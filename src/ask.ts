@@ -1,0 +1,1814 @@
+import path from "node:path"
+import { Command } from "commander"
+import { qdrant } from "./lib/qdrant.js"
+import { config } from "./lib/config.js"
+import { createEmbedding, chat } from "./lib/ollama.js"
+import type { EvidenceType } from "./lib/evidence.js"
+import type { RelationshipHints } from "./lib/relationships.js"
+import type { ServiceType } from "./lib/chunker.js"
+
+type RetrievedPayload = {
+  repoName?: string
+  serviceType?: ServiceType
+  branchName?: string
+  commitSha?: string
+  filePath?: string
+  startLine?: number
+  endLine?: number
+  content?: string
+  evidenceTypes?: EvidenceType[]
+  routes?: string[]
+  symbols?: string[]
+  messageNames?: string[]
+  queueNames?: string[]
+  exchangeNames?: string[]
+  dbTables?: string[]
+  contentHash?: string
+}
+
+type RetrievedChunk = {
+  id: string
+  payload: RetrievedPayload
+}
+
+type SearchFilter = ReturnType<typeof buildFilter>
+
+type HandlerRef = {
+  objectName: string
+  methodName: string
+  fullName: string
+}
+
+type RouteDefinition = {
+  method: string
+  alias: string
+  url: string
+  handler: string
+}
+
+type MethodWindow = {
+  content: string
+  firstChunk: RetrievedPayload | undefined
+  lastChunk: RetrievedPayload | undefined
+  startLine: number
+  endLine: number
+}
+
+const serviceTypes = new Set<ServiceType>(["api", "worker", "cron", "library", "unknown"])
+
+const program = new Command()
+
+program
+  .argument("<question...>", "Question to ask")
+  .option("--limit <limit>", "Number of chunks to retrieve", "8")
+  .option("--repo-name <repoName>", "Only search one indexed repository")
+  .option("--branch <branchName>", "Only search one indexed branch")
+  .option("--service-type <serviceType>", "Only search one service type")
+  .parse()
+
+const question = program.args.join(" ")
+const options = program.opts<{ limit: string; repoName?: string; branch?: string; serviceType?: string }>()
+const limit = Number(options.limit)
+const serviceType = options.serviceType && serviceTypes.has(options.serviceType as ServiceType)
+  ? (options.serviceType as ServiceType)
+  : undefined
+
+function buildFilter() {
+  const must = []
+
+  if (options.repoName) {
+    must.push({
+      key: "repoName",
+      match: {
+        value: options.repoName,
+      },
+    })
+  }
+
+  if (options.branch) {
+    must.push({
+      key: "branchName",
+      match: {
+        value: options.branch,
+      },
+    })
+  }
+
+  if (serviceType) {
+    must.push({
+      key: "serviceType",
+      match: {
+        value: serviceType,
+      },
+    })
+  }
+
+  return must.length > 0 ? { must } : undefined
+}
+
+async function retrieve(queryText: string, resultLimit: number): Promise<RetrievedChunk[]> {
+  const questionVector = await createEmbedding(queryText)
+  const filter = buildFilter()
+  const query = {
+    query: questionVector,
+    limit: resultLimit,
+    with_payload: true,
+    ...(filter ? { filter } : {}),
+  }
+
+  const results = await qdrant.query(config.collectionName, query)
+
+  return results.points
+    .map(point => ({
+      id: String(point.id),
+      payload: point.payload as RetrievedPayload,
+    }))
+    .filter(chunk => chunk.payload.content)
+}
+
+function unique(values: string[], max = 12): string[] {
+  return [...new Set(values.map(value => value.trim()).filter(Boolean))].slice(0, max)
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function collectHints(chunks: RetrievedChunk[]): RelationshipHints {
+  return {
+    routes: unique(chunks.flatMap(chunk => chunk.payload.routes ?? []), 8),
+    symbols: unique(chunks.flatMap(chunk => chunk.payload.symbols ?? []), 12),
+    messageNames: unique(chunks.flatMap(chunk => chunk.payload.messageNames ?? []), 12),
+    queueNames: unique(chunks.flatMap(chunk => chunk.payload.queueNames ?? []), 8),
+    exchangeNames: unique(chunks.flatMap(chunk => chunk.payload.exchangeNames ?? []), 8),
+    dbTables: unique(chunks.flatMap(chunk => chunk.payload.dbTables ?? []), 8),
+  }
+}
+
+function extractQuestionHints(question: string): string[] {
+  return unique([
+    ...[...question.matchAll(/\/[A-Za-z0-9_./:{}-]+/g)].map(match => match[0]),
+    ...[...question.matchAll(/\b[A-Z][A-Za-z0-9_]{2,}\b/g)]
+      .map(match => match[0])
+      .filter(value => !["What", "When", "Where", "Which", "How", "Does"].includes(value)),
+    ...[...question.matchAll(/["'`]([^"'`]{2,80})["'`]/g)].map(match => match[1] ?? ""),
+  ])
+}
+
+function extractQuestionRoutes(question: string): string[] {
+  return unique(
+    [...question.matchAll(/\/[A-Za-z0-9_./:{}-]+/g)].map(match => match[0]),
+    10,
+  )
+}
+
+function normalizeRoute(route: string): string {
+  const normalized = route.trim().replace(/\/+$/, "")
+
+  return normalized.length > 0 ? normalized.toLowerCase() : "/"
+}
+
+function routeMatches(candidate: string, wantedRoute: string): boolean {
+  const candidateRoute = normalizeRoute(candidate)
+  const wanted = normalizeRoute(wantedRoute)
+
+  return candidateRoute === wanted
+}
+
+function contentContainsRoute(content: string, wantedRoute: string): boolean {
+  const wanted = normalizeRoute(wantedRoute)
+  const quotedRoutes = [...content.matchAll(/["'`](\/[A-Za-z0-9_./:{}-]+)["'`]/g)].map(match => match[1] ?? "")
+
+  return quotedRoutes.some(route => normalizeRoute(route) === wanted)
+}
+
+async function retrieveExactRouteMatches(routes: string[]): Promise<RetrievedChunk[]> {
+  if (routes.length === 0) return []
+
+  const filter = buildFilter()
+  const matches: RetrievedChunk[] = []
+  let offset: string | number | Record<string, unknown> | null | undefined
+
+  do {
+    const scrollRequest = {
+      limit: 256,
+      with_payload: true,
+      with_vector: false,
+      ...(filter ? { filter } : {}),
+      ...(offset ? { offset } : {}),
+    }
+    const page = await qdrant.scroll(config.collectionName, scrollRequest)
+
+    for (const point of page.points) {
+      const payload = point.payload as RetrievedPayload | null | undefined
+
+      if (!payload?.content) continue
+
+      const storedRoutes = payload.routes ?? []
+      const hasMatch = routes.some(route => {
+        return storedRoutes.some(storedRoute => routeMatches(storedRoute, route)) || contentContainsRoute(payload.content ?? "", route)
+      })
+
+      if (hasMatch) {
+        matches.push({
+          id: String(point.id),
+          payload,
+        })
+      }
+    }
+
+    offset = page.next_page_offset
+  } while (offset)
+
+  return matches
+}
+
+function textForExactSearch(payload: RetrievedPayload): string {
+  return [
+    payload.content ?? "",
+    ...(payload.routes ?? []),
+    ...(payload.symbols ?? []),
+    ...(payload.messageNames ?? []),
+    ...(payload.queueNames ?? []),
+    ...(payload.exchangeNames ?? []),
+    ...(payload.dbTables ?? []),
+  ].join("\n")
+}
+
+function scoreExactTermMatch(payload: RetrievedPayload, terms: string[]): number {
+  const text = textForExactSearch(payload).toLowerCase()
+
+  return terms.reduce((score, term) => {
+    const normalizedTerm = term.toLowerCase()
+
+    if (!normalizedTerm) return score
+    if (payload.symbols?.some(symbol => symbol.toLowerCase() === normalizedTerm)) return score + 5
+    if (payload.messageNames?.some(messageName => messageName.toLowerCase() === normalizedTerm)) return score + 5
+    if (text.includes(normalizedTerm)) return score + 1
+
+    return score
+  }, 0)
+}
+
+async function retrieveExactTermMatches(terms: string[], maxMatches: number, filter: SearchFilter = buildFilter()): Promise<RetrievedChunk[]> {
+  const exactTerms = unique(terms, 24)
+
+  if (exactTerms.length === 0) return []
+
+  const matches: Array<RetrievedChunk & { score: number }> = []
+  let offset: string | number | Record<string, unknown> | null | undefined
+
+  do {
+    const scrollRequest = {
+      limit: 256,
+      with_payload: true,
+      with_vector: false,
+      ...(filter ? { filter } : {}),
+      ...(offset ? { offset } : {}),
+    }
+    const page = await qdrant.scroll(config.collectionName, scrollRequest)
+
+    for (const point of page.points) {
+      const payload = point.payload as RetrievedPayload | null | undefined
+
+      if (!payload?.content) continue
+
+      const score = scoreExactTermMatch(payload, exactTerms)
+
+      if (score > 0) {
+        matches.push({
+          id: String(point.id),
+          payload,
+          score,
+        })
+      }
+    }
+
+    offset = page.next_page_offset
+  } while (offset)
+
+  return matches
+    .sort((left, right) => right.score - left.score)
+    .slice(0, maxMatches)
+    .map(({ score: _score, ...chunk }) => chunk)
+}
+
+function chunkScopeFilter(chunk: RetrievedChunk) {
+  const must = [
+    {
+      key: "repoName",
+      match: {
+        value: chunk.payload.repoName ?? "",
+      },
+    },
+    {
+      key: "branchName",
+      match: {
+        value: chunk.payload.branchName ?? "",
+      },
+    },
+    {
+      key: "filePath",
+      match: {
+        value: chunk.payload.filePath ?? "",
+      },
+    },
+  ]
+
+  return { must }
+}
+
+function repoBranchFileFilter(repoName: string, branchName: string, filePath: string) {
+  return {
+    must: [
+      {
+        key: "repoName",
+        match: {
+          value: repoName,
+        },
+      },
+      {
+        key: "branchName",
+        match: {
+          value: branchName,
+        },
+      },
+      {
+        key: "filePath",
+        match: {
+          value: filePath,
+        },
+      },
+    ],
+  }
+}
+
+async function retrieveFileChunks(repoName: string, branchName: string, filePath: string): Promise<RetrievedChunk[]> {
+  const chunks: RetrievedChunk[] = []
+  let offset: string | number | Record<string, unknown> | null | undefined
+
+  do {
+    const page = await qdrant.scroll(config.collectionName, {
+      filter: repoBranchFileFilter(repoName, branchName, filePath),
+      limit: 128,
+      with_payload: true,
+      with_vector: false,
+      ...(offset ? { offset } : {}),
+    })
+
+    for (const point of page.points) {
+      const payload = point.payload as RetrievedPayload | null | undefined
+
+      if (!payload?.content) continue
+
+      chunks.push({
+        id: String(point.id),
+        payload,
+      })
+    }
+
+    offset = page.next_page_offset
+  } while (offset)
+
+  return chunks.sort((left, right) => (left.payload.startLine ?? 0) - (right.payload.startLine ?? 0))
+}
+
+async function retrieveNeighborChunks(chunks: RetrievedChunk[], lineWindow = 90): Promise<RetrievedChunk[]> {
+  const neighbors: RetrievedChunk[] = []
+
+  for (const chunk of chunks) {
+    if (!chunk.payload.repoName || !chunk.payload.branchName || !chunk.payload.filePath) continue
+
+    let offset: string | number | Record<string, unknown> | null | undefined
+
+    do {
+      const page = await qdrant.scroll(config.collectionName, {
+        filter: chunkScopeFilter(chunk),
+        limit: 128,
+        with_payload: true,
+        with_vector: false,
+        ...(offset ? { offset } : {}),
+      })
+
+      for (const point of page.points) {
+        const payload = point.payload as RetrievedPayload | null | undefined
+
+        if (!payload?.content || payload.startLine === undefined || payload.endLine === undefined) continue
+
+        const nearStart = (chunk.payload.startLine ?? 0) - lineWindow
+        const nearEnd = (chunk.payload.endLine ?? 0) + lineWindow
+
+        if (payload.endLine >= nearStart && payload.startLine <= nearEnd) {
+          neighbors.push({
+            id: String(point.id),
+            payload,
+          })
+        }
+      }
+
+      offset = page.next_page_offset
+    } while (offset)
+  }
+
+  return neighbors
+}
+
+function extractRouteHandlerRefs(chunks: RetrievedChunk[]): HandlerRef[] {
+  const refs: HandlerRef[] = []
+
+  for (const chunk of chunks) {
+    const content = chunk.payload.content ?? ""
+
+    for (const match of content.matchAll(/\bhandler\s*:\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)/g)) {
+      const handlerRef = match[1]
+
+      if (!handlerRef) continue
+
+      const parts = handlerRef.split(".")
+      const objectName = parts[0]
+      const methodName = parts.at(-1)
+
+      if (!objectName || !methodName) continue
+
+      refs.push({
+        objectName,
+        methodName,
+        fullName: handlerRef,
+      })
+    }
+  }
+
+  return [...new Map(refs.map(ref => [ref.fullName, ref])).values()]
+}
+
+function extractExactRouteHandlerRefs(chunks: RetrievedChunk[], routes: string[]): HandlerRef[] {
+  const refs: HandlerRef[] = []
+  const definitions = extractRouteDefinitions(chunks, routes)
+
+  for (const definition of definitions) {
+    for (const match of definition.matchAll(/\bhandler\s*:\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)/g)) {
+      const handlerRef = match[1]
+
+      if (!handlerRef) continue
+
+      const parts = handlerRef.split(".")
+      const objectName = parts[0]
+      const methodName = parts.at(-1)
+
+      if (!objectName || !methodName) continue
+
+      refs.push({
+        objectName,
+        methodName,
+        fullName: handlerRef,
+      })
+    }
+  }
+
+  return [...new Map(refs.map(ref => [ref.fullName, ref])).values()]
+}
+
+function parseRequireAliases(content: string, routeFilePath: string): Map<string, string> {
+  const aliases = new Map<string, string>()
+  const routeDir = path.posix.dirname(routeFilePath)
+
+  for (const match of content.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*["'`]([^"'`]+)["'`]\s*\)/g)) {
+    const alias = match[1]
+    const requirePath = match[2]
+
+    if (!alias || !requirePath || !requirePath.startsWith(".")) continue
+
+    const resolved = path.posix.normalize(path.posix.join(routeDir, requirePath))
+    const withExtension = path.posix.extname(resolved) ? resolved : `${resolved}.js`
+
+    aliases.set(alias, withExtension)
+  }
+
+  return aliases
+}
+
+async function resolveHandlerChunks(exactChunks: RetrievedChunk[], handlerRefs: HandlerRef[]): Promise<RetrievedChunk[]> {
+  const chunks: RetrievedChunk[] = []
+
+  for (const exactChunk of exactChunks) {
+    const repoName = exactChunk.payload.repoName
+    const branchName = exactChunk.payload.branchName
+    const routeFilePath = exactChunk.payload.filePath
+
+    if (!repoName || !branchName || !routeFilePath) continue
+
+    const routeFileChunks = await retrieveFileChunks(repoName, branchName, routeFilePath)
+    const routeFileHeader = routeFileChunks
+      .filter(chunk => (chunk.payload.startLine ?? 0) <= 120)
+      .map(chunk => chunk.payload.content ?? "")
+      .join("\n")
+    const aliases = parseRequireAliases(routeFileHeader, routeFilePath)
+
+    for (const ref of handlerRefs) {
+      const controllerFilePath = aliases.get(ref.objectName)
+
+      if (!controllerFilePath) continue
+
+      const controllerChunks = await retrieveExactTermMatches(
+        [ref.methodName, ref.fullName],
+        6,
+        repoBranchFileFilter(repoName, branchName, controllerFilePath),
+      )
+
+      chunks.push(...controllerChunks)
+      chunks.push(...await retrieveNeighborChunks(controllerChunks, 45))
+    }
+  }
+
+  if (chunks.length > 0) return chunks
+
+  const fallbackTerms = handlerRefs.flatMap(ref => [ref.fullName, ref.methodName, ref.objectName])
+
+  return retrieveExactTermMatches(fallbackTerms, 10)
+}
+
+function extractRpcAndCallTerms(chunks: RetrievedChunk[]): string[] {
+  const terms: string[] = []
+
+  for (const chunk of chunks) {
+    const content = chunk.payload.content ?? ""
+
+    terms.push(...(chunk.payload.messageNames ?? []))
+    terms.push(...(chunk.payload.queueNames ?? []))
+    terms.push(...(chunk.payload.exchangeNames ?? []))
+    terms.push(...[...content.matchAll(/\bfunc\s*:\s*["'`]([^"'`]+)["'`]/g)].map(match => match[1] ?? ""))
+
+    for (const match of content.matchAll(/\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*\(/g)) {
+      const call = match[1]
+
+      if (!call) continue
+
+      const lowerCall = call.toLowerCase()
+
+      if (
+        lowerCall.includes("rpc") ||
+        lowerCall.includes("account") ||
+        lowerCall.includes("mrg") ||
+        lowerCall.includes("publish") ||
+        lowerCall.includes("consume") ||
+        lowerCall.includes("send")
+      ) {
+        terms.push(call)
+        terms.push(call.split(".").at(-1) ?? call)
+      }
+    }
+  }
+
+  return unique(terms, 24)
+}
+
+function extractRpcFuncNames(chunks: RetrievedChunk[]): string[] {
+  return unique(
+    chunks.flatMap(chunk => {
+      const content = chunk.payload.content ?? ""
+
+      return [...content.matchAll(/\bfunc\s*:\s*["'`]([^"'`]+)["'`]/g)].map(match => match[1] ?? "")
+    }),
+    12,
+  )
+}
+
+function extractRouteDefinitions(chunks: RetrievedChunk[], routes: string[]): string[] {
+  return chunks.flatMap(chunk => {
+    const content = chunk.payload.content ?? ""
+    const definitions = []
+
+    for (const match of content.matchAll(/\{[\s\S]*?method\s*:\s*\[[\s\S]*?url\s*:\s*["'`]\/[^"'`]+["'`][\s\S]*?handler\s*:\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+[\s\S]*?\}/g)) {
+      const definition = match[0]
+
+      if (routes.some(route => contentContainsRoute(definition, route))) {
+        definitions.push(definition.trim())
+      }
+    }
+
+    return definitions
+  })
+}
+
+function extractRouteDefinitionsForSymbol(content: string, symbolName: string): RouteDefinition[] {
+  const definitions: RouteDefinition[] = []
+
+  for (const match of content.matchAll(/\{[\s\S]*?method\s*:\s*\[[\s\S]*?url\s*:\s*["'`]\/[^"'`]+["'`][\s\S]*?handler\s*:\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+[\s\S]*?\}/g)) {
+    const parsed = parseRouteDefinition(match[0])
+
+    if (parsed?.handler.split(".").at(-1) === symbolName) {
+      definitions.push(parsed)
+    }
+  }
+
+  return definitions
+}
+
+function parseRouteDefinition(definition: string): RouteDefinition | undefined {
+  const method = definition.match(/\bmethod\s*:\s*\[([^\]]+)\]/)?.[1]?.replaceAll(/["'`\s]/g, "") ?? ""
+  const alias = definition.match(/\balias\s*:\s*["'`]([^"'`]+)["'`]/)?.[1] ?? ""
+  const url = definition.match(/\burl\s*:\s*["'`]([^"'`]+)["'`]/)?.[1] ?? ""
+  const handler = definition.match(/\bhandler\s*:\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)/)?.[1] ?? ""
+
+  if (!url || !handler) return undefined
+
+  return {
+    method,
+    alias,
+    url,
+    handler,
+  }
+}
+
+function isExactRouteComparisonQuestion(question: string): boolean {
+  const lower = question.toLowerCase()
+
+  return lower.includes("different") || lower.includes("difference") || lower.includes("compare")
+}
+
+function buildExactRouteComparisonAnswer(
+  routeDefinitions: string[],
+  handlerFacts: string[],
+  downstreamFacts: string[],
+  chunks: RetrievedPayload[],
+): string | undefined {
+  const definitions = routeDefinitions.map(parseRouteDefinition).filter(definition => definition !== undefined)
+
+  if (definitions.length < 2) return undefined
+
+  const source = chunks[0]
+  const lines = source ? `${source.filePath}:${source.startLine}-${source.endLine}` : "unknown"
+  const factsByHandler = new Map(
+    definitions.map(definition => {
+      const methodName = definition.handler.split(".").at(-1) ?? definition.handler
+      const fact = handlerFacts.find(handlerFact => handlerFact.startsWith(`${methodName} `)) ?? ""
+
+      return [definition.handler, fact]
+    }),
+  )
+  const downstreamUsesDepo = downstreamFacts.some(fact => fact.includes("uses data.depo"))
+
+  function hasFact(handler: string, factText: string): boolean {
+    return factsByHandler.get(handler)?.includes(factText) ?? false
+  }
+
+  function methodName(handler: string): string {
+    return handler.split(".").at(-1) ?? handler
+  }
+
+  const behavioralDifferences: string[] = []
+
+  for (const definition of definitions) {
+    const handler = definition.handler
+    const additions = [
+      hasFact(handler, "reads request.query values") ? "reads query parameters" : undefined,
+      hasFact(handler, "passes depo into the RPC payload") ? "passes `depo` to the RPC payload" : undefined,
+      hasFact(handler, "passes an explicit timeout") ? "sets an explicit RPC timeout" : undefined,
+      hasFact(handler, "filters/maps account response") ? "filters/maps the account response before returning" : undefined,
+    ].filter(Boolean)
+
+    if (additions.length > 0) {
+      behavioralDifferences.push(`- ${definition.url} (${methodName(handler)}) ${additions.join(", ")}.`)
+    }
+  }
+
+  const rpcFuncs = unique(
+    handlerFacts.flatMap(fact => {
+      const match = fact.match(/rpc func values: ([^;]+)/)
+
+      return match?.[1]?.split(",").map(value => value.trim()) ?? []
+    }),
+  )
+
+  if (rpcFuncs.length > 0) {
+    behavioralDifferences.unshift(`- Both handlers call RPC func ${rpcFuncs.join(", ")}.`)
+  }
+
+  if (downstreamUsesDepo) {
+    behavioralDifferences.push(
+      "- The downstream RPC handler uses `data.depo`, so only callers that pass `depo` can influence that downstream behavior.",
+    )
+  }
+
+  const returnBehavior = definitions.map(definition => {
+    const fact = factsByHandler.get(definition.handler) ?? ""
+    const returns = [
+      fact.includes("returns results.message from res.message") ? "returns `results.message = res.message`" : undefined,
+      fact.includes("maps account type 7 to 0") ? "maps account `type == 7` to `0` before returning" : undefined,
+      fact.includes("unless all=1") ? "unless `all=1`, removes accounts whose `login` is empty" : undefined,
+      fact.includes("normalizes type_name") ? "normalizes `type_name` and sets `allowed_rate`" : undefined,
+      fact.includes("sets login/created") ? "turns empty `login` into `New Account` and sets `created` flag" : undefined,
+    ].filter(Boolean)
+
+    return `- ${definition.url} (${methodName(definition.handler)}): ${returns.length > 0 ? returns.join("; ") : "no return transformation was extracted."}`
+  })
+
+  return [
+    `The important difference is in the handler behavior, not only the URL version. Source route definitions: ${source?.repoName}@${source?.branchName} ${lines}.`,
+    "",
+    ...definitions.map(definition => {
+      return [
+        `- ${definition.url}`,
+        `  method: ${definition.method || "unknown"}`,
+        `  alias: ${definition.alias || "unknown"}`,
+        `  handler: ${definition.handler}`,
+      ].join("\n")
+    }),
+    "",
+    "Behavioral differences:",
+    behavioralDifferences.length > 0
+      ? behavioralDifferences.join("\n")
+      : "- No behavioral differences were extracted from the retrieved handler chunks.",
+    "",
+    "Return behavior:",
+    returnBehavior.join("\n"),
+    "",
+    "Handler details found:",
+    handlerFacts.length > 0 ? handlerFacts.map(fact => `- ${fact}`).join("\n") : "- No handler implementation details were extracted.",
+    "",
+    "Downstream RPC details found:",
+    downstreamFacts.length > 0
+      ? downstreamFacts.map(fact => `- ${fact}`).join("\n")
+      : "- No downstream RPC handler details were extracted.",
+  ].join("\n")
+}
+
+function buildExactEndpointDetailAnswer(
+  routeDefinitions: string[],
+  endpointFacts: string[],
+  downstreamFacts: string[],
+  chunks: RetrievedPayload[],
+): string | undefined {
+  const definition = routeDefinitions.map(parseRouteDefinition).find(routeDefinition => routeDefinition !== undefined)
+
+  if (!definition) return undefined
+
+  const source = chunks[0]
+  const lines = source ? `${source.filePath}:${source.startLine}-${source.endLine}` : "unknown"
+  const bodyFields = unique(
+    endpointFacts.flatMap(fact => {
+      const match = fact.match(/body fields:\s*([^;]+)/)
+
+      return match?.[1] ? match[1].split(",").map(value => value.trim()) : []
+    }),
+    12,
+  )
+  const rpcFunctions = extractRpcFuncNamesFromFacts(endpointFacts)
+  const validationFacts = unique(
+    endpointFacts.flatMap(fact => {
+      const match = fact.match(/validation\/auth:\s*([^;]+)/)
+
+      return match?.[1] ? match[1].split(",").map(value => value.trim()) : []
+    }),
+    12,
+  )
+  const extraPayload = unique(
+    endpointFacts.flatMap(fact => {
+      const match = fact.match(/extra payload:\s*([^;]+)/)
+
+      return match?.[1] ? match[1].split(",").map(value => value.trim()) : []
+    }),
+    12,
+  )
+  const returnFacts = unique(
+    endpointFacts.flatMap(fact => {
+      const match = fact.match(/return:\s*([^;]+)/)
+
+      return match?.[1] ? match[1].split(",").map(value => value.trim()) : []
+    }),
+    12,
+  )
+  const downstreamValidation = unique(
+    downstreamFacts.flatMap(fact => {
+      return fact
+        .split(";")
+        .map(value => value.trim())
+        .filter(value => {
+          return (
+            value.includes("Joi") ||
+            value.includes("requires") ||
+            value.includes("checks") ||
+            value.includes("deposit_demo") ||
+            value.includes("balance RPC") ||
+            value.includes("returns true") ||
+            value.includes("delegates")
+          )
+        })
+    }),
+    16,
+  )
+  const servicesInvolved = unique(
+    [...endpointFacts, ...downstreamFacts].flatMap(fact => {
+      const match = fact.match(/\bin\s+([^@\s]+)@([^ ]+)\s+([^:;]+)/)
+
+      return match?.[1] && match?.[2] ? [`${match[1]}@${match[2]}`] : []
+    }),
+    8,
+  )
+  const databaseEffects = unique(
+    downstreamValidation.filter(fact => {
+      return fact.includes("users_demoid") || fact.includes("deposit_demo") || fact.includes("table")
+    }),
+    8,
+  )
+
+  return [
+    `Endpoint definition found in ${source?.repoName}@${source?.branchName} ${lines}.`,
+    "",
+    `- ${definition.url}`,
+    `  method: ${definition.method || "unknown"}`,
+    `  alias: ${definition.alias || "unknown"}`,
+    `  handler: ${definition.handler}`,
+    "",
+    "Services/repos involved:",
+    servicesInvolved.length > 0 ? servicesInvolved.map(service => `- ${service}`).join("\n") : "- Only the route owner was found.",
+    "",
+    "Request body:",
+    bodyFields.length > 0
+      ? bodyFields.map(field => `- ${field}`).join("\n")
+      : "- No request.body fields were extracted from the handler.",
+    "",
+    "API-layer validation and payload behavior:",
+    validationFacts.length > 0 ? validationFacts.map(fact => `- ${fact}`).join("\n") : "- No API-layer validation facts were extracted.",
+    extraPayload.length > 0 ? extraPayload.map(fact => `- ${fact}`).join("\n") : undefined,
+    rpcFunctions.length > 0 ? `- calls RPC func: ${rpcFunctions.join(", ")}` : undefined,
+    "",
+    "Database/table effects:",
+    databaseEffects.length > 0
+      ? databaseEffects.map(fact => `- ${fact}`).join("\n")
+      : "- No database/table effect was extracted.",
+    "",
+    "Downstream RPC/model behavior:",
+    downstreamValidation.length > 0
+      ? downstreamValidation.map(fact => `- ${fact}`).join("\n")
+      : "- No downstream RPC/model facts were extracted.",
+    "",
+    "Return:",
+    returnFacts.length > 0 ? returnFacts.map(fact => `- ${fact}`).join("\n") : "- No API return facts were extracted.",
+    downstreamFacts.some(fact => fact.includes("returns true on success"))
+      ? "- downstream model returns true on success before the API returns RPC res.message"
+      : undefined,
+    "",
+    "Evidence:",
+    endpointFacts.length > 0 ? endpointFacts.map(fact => `- ${fact}`).join("\n") : "- No handler facts were extracted.",
+    downstreamFacts.length > 0 ? downstreamFacts.map(fact => `- ${fact}`).join("\n") : "- No downstream facts were extracted.",
+  ].join("\n")
+}
+
+function extractDownstreamRpcFacts(chunks: RetrievedChunk[], handlerRepoNames: string[]): string[] {
+  const facts: string[] = []
+
+  for (const chunk of chunks) {
+    const content = chunk.payload.content ?? ""
+
+    if (!content.includes("GetAccountByUserID")) continue
+    if (chunk.payload.repoName && handlerRepoNames.includes(chunk.payload.repoName)) continue
+
+    const methodName = content.match(/\basync\s+([A-Za-z_$][\w$]*)\s*\(/)?.[1] ?? "unknown"
+    const validatesUserId = content.includes("data.user_id")
+    const usesDepo = content.includes("data.depo")
+    const callsPlatformAccounts = content.includes("getUserPlatformAccountsAsync")
+    const usesManager = content.includes("MRGManager.getManagerByID") || content.includes("MRGUserFromManagerApi.getInstance")
+    const returnsPlatformAccounts = /return\s+results/.test(content) && callsPlatformAccounts
+
+    facts.push(
+      [
+        `${methodName} in ${chunk.payload.repoName}@${chunk.payload.branchName} ${chunk.payload.filePath}:${chunk.payload.startLine}-${chunk.payload.endLine}`,
+        validatesUserId ? "validates/uses data.user_id" : undefined,
+        usesDepo ? "uses data.depo" : undefined,
+        usesManager ? "builds MRG manager/user context" : undefined,
+        callsPlatformAccounts ? "calls userModel.getUserPlatformAccountsAsync" : undefined,
+        returnsPlatformAccounts ? "returns that model result to the RPC caller" : undefined,
+      ]
+        .filter(Boolean)
+        .join("; "),
+    )
+  }
+
+  return unique(facts, 12)
+}
+
+function buildLineMap(fileChunks: RetrievedChunk[]): Map<number, string> {
+  const linesByNumber = new Map<number, string>()
+  const sortedChunks = fileChunks.sort((left, right) => (left.payload.startLine ?? 0) - (right.payload.startLine ?? 0))
+
+  for (const chunk of sortedChunks) {
+    const startLine = chunk.payload.startLine ?? 0
+    const lines = (chunk.payload.content ?? "").split(/\r?\n/)
+
+    lines.forEach((line, index) => {
+      const lineNumber = startLine + index
+
+      if (!linesByNumber.has(lineNumber)) {
+        linesByNumber.set(lineNumber, line)
+      }
+    })
+  }
+
+  return linesByNumber
+}
+
+function findMethodWindow(fileChunks: RetrievedChunk[], methodName: string, maxLines = 120): MethodWindow | undefined {
+  const lineMap = buildLineMap(fileChunks)
+  const methodPattern = new RegExp(`\\basync\\s+${escapeRegExp(methodName)}\\s*\\(`)
+  const methodDeclarationPattern = /^\s*(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{?\s*,?\s*$/
+  const controlFlowKeywords = new Set(["if", "for", "while", "switch", "catch", "return", "throw"])
+  const sortedLineNumbers = [...lineMap.keys()].sort((left, right) => left - right)
+  const startLine = sortedLineNumbers.find(lineNumber => methodPattern.test(lineMap.get(lineNumber) ?? ""))
+
+  if (!startLine) return undefined
+
+  const nextMethodLine = sortedLineNumbers.find(lineNumber => {
+    if (lineNumber <= startLine) return false
+
+    const line = lineMap.get(lineNumber) ?? ""
+    const match = line.match(methodDeclarationPattern)
+
+    return Boolean(match?.[1] && !controlFlowKeywords.has(match[1]))
+  })
+  const endLine = Math.min(nextMethodLine ? nextMethodLine - 1 : startLine + maxLines, startLine + maxLines)
+  const contentLines = sortedLineNumbers
+    .filter(lineNumber => lineNumber >= startLine && lineNumber <= endLine)
+    .map(lineNumber => lineMap.get(lineNumber) ?? "")
+  const sortedChunks = fileChunks.sort((left, right) => (left.payload.startLine ?? 0) - (right.payload.startLine ?? 0))
+  const windowChunks = sortedChunks.filter(chunk => {
+    const chunkStart = chunk.payload.startLine ?? 0
+    const chunkEnd = chunk.payload.endLine ?? 0
+
+    return chunkEnd >= startLine && chunkStart <= endLine
+  })
+
+  return {
+    content: contentLines.join("\n"),
+    firstChunk: windowChunks[0]?.payload,
+    lastChunk: windowChunks.at(-1)?.payload,
+    startLine,
+    endLine,
+  }
+}
+
+function extractRpcFuncNamesFromFacts(facts: string[]): string[] {
+  return unique(
+    facts.flatMap(fact => {
+      const match = fact.match(/rpc func values:\s*([^;]+)/)
+
+      if (!match?.[1]) return []
+
+      return match[1].split(",").map(value => value.trim())
+    }),
+    16,
+  )
+}
+
+function extractGenericDownstreamRpcFacts(
+  chunks: RetrievedChunk[],
+  handlerRepoNames: string[],
+  allowedMethodNames: string[] = [],
+): string[] {
+  const facts: string[] = []
+  const chunksByFile = new Map<string, RetrievedChunk[]>()
+  const allowedMethods = new Set(allowedMethodNames)
+
+  for (const chunk of chunks) {
+    if (chunk.payload.repoName && handlerRepoNames.includes(chunk.payload.repoName)) continue
+
+    const key = [chunk.payload.repoName, chunk.payload.branchName, chunk.payload.filePath].join(":")
+
+    if (!chunksByFile.has(key)) {
+      chunksByFile.set(key, [])
+    }
+
+    chunksByFile.get(key)?.push(chunk)
+  }
+
+  for (const fileChunks of chunksByFile.values()) {
+    const sortedChunks = fileChunks.sort((left, right) => (left.payload.startLine ?? 0) - (right.payload.startLine ?? 0))
+    const methodNames = allowedMethods.size > 0
+      ? [...allowedMethods]
+      : unique(
+          sortedChunks.flatMap(chunk => {
+            const content = chunk.payload.content ?? ""
+
+            return [...content.matchAll(/\basync\s+([A-Za-z_$][\w$]*)\s*\(/g)].map(match => match[1] ?? "")
+          }),
+          20,
+        )
+
+    for (const methodName of methodNames) {
+      const methodWindow = findMethodWindow(sortedChunks, methodName, 140)
+
+      if (!methodWindow) continue
+
+      const content = methodWindow.content
+      const details = [
+        content.includes("demoModel.SubmitDepositDemo") ? "delegates to demoModel.SubmitDepositDemo" : undefined,
+        content.includes("Joi.object") ? "uses Joi schema validation" : undefined,
+        content.includes("login: Joi.number().integer().positive().required()") ? "requires positive integer login" : undefined,
+        content.includes("nominal: Joi.number().integer().min(1).max(9999999).required()")
+          ? "requires nominal integer from 1 to 9999999"
+          : undefined,
+        content.includes("metaserver_id: Joi.number().integer().valid(1, 2).required()")
+          ? "requires metaserver_id 1 or 2"
+          : undefined,
+        content.includes("user_id: Joi.number().integer().required()") ? "requires integer user_id" : undefined,
+        content.includes("users_demoid") ? "checks users_demoid for matching demo account" : undefined,
+        content.includes("deposit_demo") ? "writes to deposit_demo" : undefined,
+        /INSERT\s+INTO\s+deposit_demo/i.test(content) && content.includes("status")
+          ? "creates deposit_demo row with status 0"
+          : undefined,
+        content.includes("metaserver_id == 1") ? "uses MT4 demo balance flow when metaserver_id is 1" : undefined,
+        content.includes("metaserver_id == 2") ? "uses MT5 demo balance flow when metaserver_id is 2" : undefined,
+        content.includes("MRGDemoAddBalanceRequestAsync") ? "calls demo balance RPC" : undefined,
+        content.includes("return true") ? "returns true on success" : undefined,
+        content.includes("status = 1") ? "marks deposit_demo status 1 on success" : undefined,
+        content.includes("status = 2") ? "marks deposit_demo status 2 on failure" : undefined,
+      ].filter(Boolean)
+
+      if (details.length === 0) continue
+
+      facts.push(
+        `${methodName} in ${methodWindow.firstChunk?.repoName}@${methodWindow.firstChunk?.branchName} ${methodWindow.firstChunk?.filePath}:${methodWindow.startLine}-${methodWindow.endLine}; ${details.join("; ")}`,
+      )
+    }
+  }
+
+  return unique(facts, 16)
+}
+
+function extractHandlerFactSummary(
+  chunks: RetrievedChunk[],
+  handlerRefs: HandlerRef[],
+  handlerRepoNames: string[] = [],
+): string[] {
+  const facts: string[] = []
+  const chunksByFile = new Map<string, RetrievedChunk[]>()
+
+  for (const chunk of chunks) {
+    if (handlerRepoNames.length > 0 && (!chunk.payload.repoName || !handlerRepoNames.includes(chunk.payload.repoName))) continue
+
+    const key = [chunk.payload.repoName, chunk.payload.branchName, chunk.payload.filePath].join(":")
+
+    if (!chunksByFile.has(key)) {
+      chunksByFile.set(key, [])
+    }
+
+    chunksByFile.get(key)?.push(chunk)
+  }
+
+  for (const handlerRef of handlerRefs) {
+    for (const fileChunks of chunksByFile.values()) {
+      const sortedChunks = fileChunks.sort((left, right) => (left.payload.startLine ?? 0) - (right.payload.startLine ?? 0))
+      const methodWindow = findMethodWindow(sortedChunks, handlerRef.methodName, 120)
+
+      if (!methodWindow) continue
+
+      const methodBody = methodWindow.content
+
+      const hasMrgAccountRpc = methodBody.includes("MRGAccountRpc.send")
+      const funcNames = [...methodBody.matchAll(/\bfunc\s*:\s*["'`]([^"'`]+)["'`]/g)].map(match => match[1] ?? "")
+      const queryFlags = [
+        ...[...methodBody.matchAll(/\b(?:const|let|var)\s+\{\s*([A-Za-z_$][\w$]*)\s*\}\s*=\s*request\.query/g)].map(
+          match => match[1] ?? "",
+        ),
+        ...[...methodBody.matchAll(/\brequest\.query\.([A-Za-z_$][\w$]*)/g)].map(match => match[1] ?? ""),
+      ]
+      const passesDepo = /\bdepo\b/.test(methodBody) && /MRGAccountRpc\.send/.test(methodBody)
+      const hasTimeout = /MRGAccountRpc\.send\([\s\S]*,\s*\d+/.test(methodBody)
+      const filtersAccounts = /filter\s*\(/.test(methodBody)
+      const returnsRpcMessage = /results\.message\s*=\s*res\.message/.test(methodBody)
+      const mapsTypeSevenToZero = /type\s*==\s*7/.test(methodBody) && /type\s*=\s*0/.test(methodBody)
+      const filtersEmptyLoginUnlessAll = /parseInt\(all\)\s*!==\s*1/.test(methodBody) && /account\.login\s*!=\s*''/.test(methodBody)
+      const shapesTypeName = methodBody.includes("type_name") && methodBody.includes("allowed_rate")
+      const marksCreatedState = methodBody.includes("created = 0") && methodBody.includes("created = 1")
+
+      if (hasMrgAccountRpc || funcNames.length > 0 || queryFlags.length > 0) {
+        facts.push(
+          [
+            `${handlerRef.methodName} in ${methodWindow.firstChunk?.repoName}@${methodWindow.firstChunk?.branchName} ${methodWindow.firstChunk?.filePath}:${methodWindow.startLine}-${methodWindow.endLine}`,
+            hasMrgAccountRpc ? "calls MRGAccountRpc.send" : undefined,
+            funcNames.length > 0 ? `rpc func values: ${unique(funcNames).join(", ")}` : undefined,
+            queryFlags.length > 0 ? `reads request.query values: ${unique(queryFlags).join(", ")}` : undefined,
+            passesDepo ? "passes depo into the RPC payload" : undefined,
+            hasTimeout ? "passes an explicit timeout to RPC send" : undefined,
+            filtersAccounts ? "filters/maps account response before returning" : undefined,
+            returnsRpcMessage ? "returns results.message from res.message" : undefined,
+            mapsTypeSevenToZero ? "maps account type 7 to 0" : undefined,
+            filtersEmptyLoginUnlessAll ? "unless all=1, filters out accounts with empty login" : undefined,
+            shapesTypeName ? "normalizes type_name and sets allowed_rate" : undefined,
+            marksCreatedState ? "sets login/created fields for empty vs existing login" : undefined,
+          ]
+            .filter(Boolean)
+            .join("; "),
+        )
+      }
+    }
+  }
+
+  return unique(facts, 12)
+}
+
+function extractEndpointHandlerFacts(
+  chunks: RetrievedChunk[],
+  handlerRefs: HandlerRef[],
+  handlerRepoNames: string[] = [],
+): string[] {
+  const facts: string[] = []
+  const chunksByFile = new Map<string, RetrievedChunk[]>()
+
+  for (const chunk of chunks) {
+    if (handlerRepoNames.length > 0 && (!chunk.payload.repoName || !handlerRepoNames.includes(chunk.payload.repoName))) continue
+
+    const key = [chunk.payload.repoName, chunk.payload.branchName, chunk.payload.filePath].join(":")
+
+    if (!chunksByFile.has(key)) {
+      chunksByFile.set(key, [])
+    }
+
+    chunksByFile.get(key)?.push(chunk)
+  }
+
+  for (const handlerRef of handlerRefs) {
+    for (const fileChunks of chunksByFile.values()) {
+      const sortedChunks = fileChunks.sort((left, right) => (left.payload.startLine ?? 0) - (right.payload.startLine ?? 0))
+      const methodWindow = findMethodWindow(sortedChunks, handlerRef.methodName, 120)
+
+      if (!methodWindow) continue
+
+      const methodBody = methodWindow.content
+      const bodyFields = [
+        ...[...methodBody.matchAll(/\b([A-Za-z_$][\w$]*)\s*:\s*request\.body\.([A-Za-z_$][\w$]*)/g)].map(
+          match => `${match[2]} -> ${match[1]}`,
+        ),
+        ...[...methodBody.matchAll(/\b([A-Za-z_$][\w$]*)\s*:\s*parseInt\(request\.body\.([A-Za-z_$][\w$]*)\)/g)].map(
+          match => `${match[2]} -> ${match[1]} (parseInt)`,
+        ),
+      ]
+      const rpcFuncNames = [...methodBody.matchAll(/\bfunc\s*:\s*["'`]([^"'`]+)["'`]/g)].map(match => match[1] ?? "")
+      const validations = [
+        methodBody.includes("request.jwtVerify") ? "verifies JWT" : undefined,
+        methodBody.includes("encryptedJwt.ua != request.headers['user-agent']") ? "checks JWT user-agent against request user-agent" : undefined,
+        methodBody.includes("userid < 1") ? "requires authenticated userid >= 1" : undefined,
+        methodBody.includes("request.validationError") ? "throws on request.validationError" : undefined,
+        methodBody.includes("userModel.getMrgAccount") ? "looks up mapped MRG account for userid" : undefined,
+        methodBody.includes("MrgAccountNotFoundError") ? "throws MRG_ACCOUNT_NOT_FOUND when mapped MRG account is missing" : undefined,
+      ].filter(Boolean)
+      const extraPayload = [
+        /user_id\s*:\s*parseInt\(mrguser\.mrgid\)/.test(methodBody) ? "adds user_id from mapped mrguser.mrgid" : undefined,
+        methodBody.includes("x-forwarded-for") ? "adds ip from x-forwarded-for or remoteAddress" : undefined,
+        methodBody.includes("request.headers['user-agent']") ? "adds browser from user-agent header" : undefined,
+      ].filter(Boolean)
+      const returns = [
+        methodBody.includes("const result = { message: false }") ? "initial result is { message: false }" : undefined,
+        methodBody.includes("MrgApiError") && methodBody.includes("res.error") ? "throws MrgApiError when RPC returns res.error" : undefined,
+        methodBody.includes("result.message = res.message") ? "sets result.message from RPC res.message" : undefined,
+        /return\s+result/.test(methodBody) ? "returns result" : undefined,
+      ].filter(Boolean)
+
+      facts.push(
+        [
+          `${handlerRef.methodName} in ${methodWindow.firstChunk?.repoName}@${methodWindow.firstChunk?.branchName} ${methodWindow.firstChunk?.filePath}:${methodWindow.startLine}-${methodWindow.endLine}`,
+          bodyFields.length > 0 ? `body fields: ${unique(bodyFields, 12).join(", ")}` : undefined,
+          rpcFuncNames.length > 0 ? `rpc func values: ${unique(rpcFuncNames, 12).join(", ")}` : undefined,
+          validations.length > 0 ? `validation/auth: ${validations.join(", ")}` : undefined,
+          extraPayload.length > 0 ? `extra payload: ${extraPayload.join(", ")}` : undefined,
+          returns.length > 0 ? `return: ${returns.join(", ")}` : undefined,
+        ]
+          .filter(Boolean)
+          .join("; "),
+      )
+    }
+  }
+
+  return unique(facts, 16)
+}
+
+async function retrieveExactRouteDetails(
+  exactChunks: RetrievedChunk[],
+  handlerRefs: HandlerRef[],
+  includeRpcHop: boolean,
+): Promise<RetrievedChunk[]> {
+  const handlerChunks = await resolveHandlerChunks(exactChunks, handlerRefs)
+
+  if (!includeRpcHop) return handlerChunks
+
+  const rpcFuncNames = extractRpcFuncNames(handlerChunks)
+  const rpcTerms = extractRpcAndCallTerms(handlerChunks)
+  const rpcFuncChunks = await retrieveExactTermMatches(rpcFuncNames, 80)
+  const rpcChunks = await retrieveExactTermMatches([...rpcFuncNames, ...rpcTerms], 80)
+  const originRepos = new Set(exactChunks.map(chunk => chunk.payload.repoName).filter(Boolean))
+  const downstreamFuncChunks = rpcFuncChunks.filter(chunk => {
+    const content = chunk.payload.content ?? ""
+
+    return !originRepos.has(chunk.payload.repoName) && rpcFuncNames.some(funcName => content.includes(funcName))
+  })
+  const downstreamNeighborChunks = await retrieveNeighborChunks(downstreamFuncChunks, 70)
+  const downstreamRpcChunks = rpcChunks.filter(chunk => !originRepos.has(chunk.payload.repoName))
+  const localRpcChunks = rpcChunks.filter(chunk => originRepos.has(chunk.payload.repoName))
+
+  return [
+    ...handlerChunks,
+    ...downstreamFuncChunks.slice(0, 12),
+    ...downstreamNeighborChunks.slice(0, 12),
+    ...downstreamRpcChunks.slice(0, 6),
+    ...localRpcChunks.slice(0, 6),
+  ]
+}
+
+function shouldExpandRetrieval(question: string, hints: RelationshipHints): boolean {
+  const lower = question.toLowerCase()
+  const asksRelationshipQuestion = [
+    "flow",
+    "endpoint",
+    "route",
+    "rpc",
+    "amqp",
+    "rabbit",
+    "queue",
+    "exchange",
+    "publish",
+    "consume",
+    "consumer",
+    "handler",
+    "call",
+    "database",
+    "table",
+    "migration",
+    "service",
+  ].some(keyword => lower.includes(keyword))
+
+  return (
+    asksRelationshipQuestion ||
+    extractQuestionHints(question).length > 0 ||
+    hints.routes.length > 0 ||
+    hints.messageNames.length > 0 ||
+    hints.queueNames.length > 0 ||
+    hints.exchangeNames.length > 0 ||
+    hints.dbTables.length > 0
+  )
+}
+
+function shouldExpandExactRouteQuestion(question: string): boolean {
+  const lower = question.toLowerCase()
+
+  return ["flow", "rpc", "amqp", "rabbit", "queue", "exchange", "publish", "consume", "consumer", "handler", "call"].some(
+    keyword => lower.includes(keyword),
+  )
+}
+
+function shouldInspectExactEndpointDetails(question: string): boolean {
+  const lower = question.toLowerCase()
+
+  return [
+    "body",
+    "validation",
+    "validate",
+    "return",
+    "response",
+    "payload",
+    "service",
+    "services",
+    "database",
+    "table",
+    "tables",
+    "affected",
+    "involved",
+    "flow",
+  ].some(keyword => lower.includes(keyword))
+}
+
+function buildExpansionQueries(question: string, hints: RelationshipHints): string[] {
+  const names = unique([
+    ...extractQuestionHints(question),
+    ...hints.routes,
+    ...hints.symbols,
+    ...hints.messageNames,
+    ...hints.queueNames,
+    ...hints.exchangeNames,
+    ...hints.dbTables,
+  ], 16)
+
+  return unique(
+    names.flatMap(name => [
+      `${question} ${name}`,
+      `${name} route controller handler publisher consumer rpc amqp queue exchange`,
+      `${name} database table migration entity sql`,
+    ]),
+    12,
+  )
+}
+
+function mergeChunks(chunks: RetrievedChunk[], maxResults = Math.max(limit, 12)): RetrievedChunk[] {
+  const byKey = new Map<string, RetrievedChunk>()
+
+  for (const chunk of chunks) {
+    const key = chunk.payload.contentHash ?? chunk.id
+
+    if (!byKey.has(key)) {
+      byKey.set(key, chunk)
+    }
+  }
+
+  return [...byKey.values()].slice(0, maxResults)
+}
+
+function filterEndpointSourceChunks(
+  chunks: RetrievedChunk[],
+  routes: string[],
+  handlerRefs: HandlerRef[],
+  rpcFuncNames: string[],
+): RetrievedChunk[] {
+  const handlerNames = new Set(handlerRefs.map(ref => ref.methodName))
+  const rpcNames = new Set(rpcFuncNames)
+  const filtered = chunks.filter(chunk => {
+    const content = chunk.payload.content ?? ""
+    const hasRoute = routes.some(route => contentContainsRoute(content, route))
+    const hasHandler = [...handlerNames].some(handlerName => content.includes(handlerName))
+    const hasRpcFunc = [...rpcNames].some(rpcFuncName => content.includes(rpcFuncName))
+
+    return hasRoute || hasHandler || hasRpcFunc
+  })
+
+  return mergeChunks(filtered, 14)
+}
+
+function questionAsksAboutDatabase(question: string): boolean {
+  return /\b(database|databases|table|tables|sql|affected|insert|update|delete|select)\b/i.test(question)
+}
+
+function questionAsksAboutServicesOrFlow(question: string): boolean {
+  return /\b(service|services|repo|repos|flow|involved|calls?|publishes?|consumes?|rpc|amqp|rabbitmq|queue|exchange)\b/i.test(question)
+}
+
+function extractSqlTableNamesFromContent(content: string): string[] {
+  return [
+    ...[...content.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi)].map(match => match[1] ?? ""),
+    ...[...content.matchAll(/\b(?:INSERT\s+INTO|DELETE\s+FROM)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi)].map(match => match[1] ?? ""),
+  ]
+}
+
+function sanitizeTableNames(values: string[], max = 24): string[] {
+  const stopWords = new Set([
+    "and",
+    "as",
+    "by",
+    "desc",
+    "false",
+    "from",
+    "group",
+    "having",
+    "join",
+    "limit",
+    "null",
+    "on",
+    "or",
+    "order",
+    "select",
+    "set",
+    "status",
+    "true",
+    "where",
+  ])
+
+  return unique(
+    values
+      .map(value => value.trim().replace(/^[`"']|[`"']$/g, ""))
+      .filter(value => value.length > 1)
+      .filter(value => !stopWords.has(value.toLowerCase())),
+    max,
+  )
+}
+
+function buildEvidenceInventory(chunks: RetrievedPayload[], question: string): string {
+  const repos = unique(
+    chunks.map(chunk => {
+      return `${chunk.repoName ?? "unknown"}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}]`
+    }),
+    16,
+  )
+  const evidenceTypes = unique(chunks.flatMap(chunk => chunk.evidenceTypes ?? []), 16)
+  const routes = unique(chunks.flatMap(chunk => chunk.routes ?? []), 16)
+  const symbols = unique(chunks.flatMap(chunk => chunk.symbols ?? []), 24)
+  const messageNames = unique(chunks.flatMap(chunk => chunk.messageNames ?? []), 16)
+  const queueNames = unique(chunks.flatMap(chunk => chunk.queueNames ?? []), 16)
+  const exchangeNames = unique(chunks.flatMap(chunk => chunk.exchangeNames ?? []), 16)
+  const dbTables = sanitizeTableNames(
+    [
+      ...chunks.flatMap(chunk => chunk.dbTables ?? []),
+      ...chunks.flatMap(chunk => extractSqlTableNamesFromContent(chunk.content ?? "")),
+    ],
+    24,
+  )
+  const asksDb = questionAsksAboutDatabase(question)
+  const asksFlow = questionAsksAboutServicesOrFlow(question)
+  const dbEvidencePresent = dbTables.length > 0 || evidenceTypes.some(type => type === "raw_sql" || type === "db_model")
+  const flowEvidencePresent =
+    routes.length > 0 ||
+    messageNames.length > 0 ||
+    queueNames.length > 0 ||
+    exchangeNames.length > 0 ||
+    symbols.length > 0 ||
+    repos.length > 1
+
+  return [
+    `Confirmed repos/services: ${repos.join(", ") || "none"}`,
+    `Confirmed evidence types: ${evidenceTypes.join(", ") || "none"}`,
+    `Confirmed routes: ${routes.join(", ") || "none"}`,
+    `Confirmed symbols/functions: ${symbols.join(", ") || "none"}`,
+    `Confirmed message/RPC names: ${messageNames.join(", ") || "none"}`,
+    `Confirmed queues: ${queueNames.join(", ") || "none"}`,
+    `Confirmed exchanges: ${exchangeNames.join(", ") || "none"}`,
+    `Confirmed database tables from metadata or SQL: ${dbTables.join(", ") || "none"}`,
+    `Database/table evidence requested: ${asksDb ? "yes" : "no"}`,
+    `Database/table evidence present: ${dbEvidencePresent ? "yes" : "no"}`,
+    `Service/flow evidence requested: ${asksFlow ? "yes" : "no"}`,
+    `Service/flow evidence present: ${flowEvidencePresent ? "yes" : "no"}`,
+  ].join("\n")
+}
+
+function buildStructuralEvidenceAnswer(chunks: RetrievedPayload[], question: string): string {
+  const asksDb = questionAsksAboutDatabase(question)
+  const asksFlow = questionAsksAboutServicesOrFlow(question)
+  const repos = unique(
+    chunks.map(chunk => `${chunk.repoName ?? "unknown"}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}]`),
+    16,
+  )
+  const routes = unique(chunks.flatMap(chunk => chunk.routes ?? []), 16)
+  const messages = unique(chunks.flatMap(chunk => chunk.messageNames ?? []), 16)
+  const queues = unique(chunks.flatMap(chunk => chunk.queueNames ?? []), 16)
+  const exchanges = unique(chunks.flatMap(chunk => chunk.exchangeNames ?? []), 16)
+  const tables = sanitizeTableNames(
+    [
+      ...chunks.flatMap(chunk => chunk.dbTables ?? []),
+      ...chunks.flatMap(chunk => extractSqlTableNamesFromContent(chunk.content ?? "")),
+    ],
+    24,
+  )
+  const tableSources = chunks
+    .filter(chunk => {
+      return (chunk.dbTables?.length ?? 0) > 0 || extractSqlTableNamesFromContent(chunk.content ?? "").length > 0
+    })
+    .slice(0, 10)
+    .map(chunk => {
+      const sourceTables = sanitizeTableNames([
+        ...(chunk.dbTables ?? []),
+        ...extractSqlTableNamesFromContent(chunk.content ?? ""),
+      ], 12)
+
+      return `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}; tables: ${sourceTables.join(", ")}`
+    })
+  const evidenceFiles = chunks.slice(0, 12).map(chunk => {
+    return `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`
+  })
+
+  return [
+    "I do not have an exact route/function anchor for this question, so this is an evidence-only retrieval summary, not a confirmed end-to-end flow.",
+    "",
+    asksFlow ? "Retrieved repos/services with matching evidence:" : undefined,
+    asksFlow ? (repos.length > 0 ? repos.map(repo => `- ${repo}`).join("\n") : "- NOT_FOUND_IN_INDEXED_CODEBASE") : undefined,
+    asksFlow ? "" : undefined,
+    routes.length > 0 ? "Confirmed routes in retrieved evidence:" : undefined,
+    routes.length > 0 ? routes.map(route => `- ${route}`).join("\n") : undefined,
+    routes.length > 0 ? "" : undefined,
+    messages.length > 0 || queues.length > 0 || exchanges.length > 0 ? "Confirmed message/queue evidence:" : undefined,
+    messages.length > 0 ? `- messages/RPC names: ${messages.join(", ")}` : undefined,
+    queues.length > 0 ? `- queues: ${queues.join(", ")}` : undefined,
+    exchanges.length > 0 ? `- exchanges: ${exchanges.join(", ")}` : undefined,
+    messages.length > 0 || queues.length > 0 || exchanges.length > 0 ? "" : undefined,
+    asksDb ? "Database/table evidence:" : undefined,
+    asksDb
+      ? tables.length > 0
+        ? tables.map(table => `- ${table}`).join("\n")
+        : "- NOT_FOUND_IN_INDEXED_CODEBASE: no table names were found in retrieved metadata or SQL"
+      : undefined,
+    asksDb && tableSources.length > 0 ? "" : undefined,
+    asksDb && tableSources.length > 0 ? "Table evidence sources:" : undefined,
+    asksDb && tableSources.length > 0 ? tableSources.join("\n") : undefined,
+    "",
+    "What is still missing:",
+    "- An exact endpoint, function name, queue name, or RPC func is needed to confirm a full service-to-service flow.",
+    "- Retrieved repos/files alone are not proof that every listed repo participates in the same runtime path.",
+    "",
+    "Retrieved source set:",
+    evidenceFiles.length > 0 ? evidenceFiles.join("\n") : "- NOT_FOUND_IN_INDEXED_CODEBASE",
+  ]
+    .filter(line => line !== undefined)
+    .join("\n")
+}
+
+function extractNamedSymbolsFromQuestion(question: string): string[] {
+  return unique(
+    [...question.matchAll(/\b[A-Z][A-Za-z0-9_]{2,}\b/g)]
+      .map(match => match[0])
+      .filter(value => !["What", "When", "Where", "Which", "How", "Does"].includes(value)),
+    8,
+  )
+}
+
+function describeMethodBody(content: string): string[] {
+  const bodyFields = [
+    ...[...content.matchAll(/\b([A-Za-z_$][\w$]*)\s*:\s*request\.body\.([A-Za-z_$][\w$]*)/g)].map(
+      match => `${match[2]} -> ${match[1]}`,
+    ),
+    ...[...content.matchAll(/\b([A-Za-z_$][\w$]*)\s*:\s*parseInt\(request\.body\.([A-Za-z_$][\w$]*)\)/g)].map(
+      match => `${match[2]} -> ${match[1]} (parseInt)`,
+    ),
+  ]
+  const rpcFuncNames = [...content.matchAll(/\bfunc\s*:\s*["'`]([^"'`]+)["'`]/g)].map(match => match[1] ?? "")
+  const tables = sanitizeTableNames(extractSqlTableNamesFromContent(content), 12)
+  const details = [
+    bodyFields.length > 0 ? `body fields: ${unique(bodyFields, 12).join(", ")}` : undefined,
+    rpcFuncNames.length > 0 ? `rpc func values: ${unique(rpcFuncNames, 12).join(", ")}` : undefined,
+    content.includes("request.jwtVerify") ? "verifies JWT" : undefined,
+    content.includes("request.validationError") ? "throws on request.validationError" : undefined,
+    content.includes("Joi.object") ? "uses Joi schema validation" : undefined,
+    content.includes("login: Joi.number().integer().positive().required()") ? "requires positive integer login" : undefined,
+    content.includes("nominal: Joi.number().integer().min(1).max(9999999).required()")
+      ? "requires nominal integer from 1 to 9999999"
+      : undefined,
+    content.includes("metaserver_id: Joi.number().integer().valid(1, 2).required()")
+      ? "requires metaserver_id 1 or 2"
+      : undefined,
+    content.includes("user_id: Joi.number().integer().required()") ? "requires integer user_id" : undefined,
+    content.includes("users_demoid") ? "checks users_demoid" : undefined,
+    tables.length > 0 ? `tables: ${tables.join(", ")}` : undefined,
+    content.includes("MRGAccountRpc.send") ? "calls MRGAccountRpc.send" : undefined,
+    content.includes("demoModel.SubmitDepositDemo") ? "delegates to demoModel.SubmitDepositDemo" : undefined,
+    content.includes("MRGDemoAddBalanceRequestAsync") ? "calls demo balance RPC" : undefined,
+    content.includes("result.message = res.message") ? "sets result.message from RPC res.message" : undefined,
+    /return\s+result/.test(content) ? "returns result" : undefined,
+    /return\s+true/.test(content) ? "returns true on success" : undefined,
+  ].filter((detail): detail is string => Boolean(detail))
+
+  return unique(details, 20)
+}
+
+function buildExactSymbolAnswer(symbolNames: string[], chunks: RetrievedChunk[]): string | undefined {
+  const methodFacts: string[] = []
+  const routeFacts: string[] = []
+  const chunksByFile = new Map<string, RetrievedChunk[]>()
+
+  for (const chunk of chunks) {
+    const key = [chunk.payload.repoName, chunk.payload.branchName, chunk.payload.filePath].join(":")
+
+    if (!chunksByFile.has(key)) {
+      chunksByFile.set(key, [])
+    }
+
+    chunksByFile.get(key)?.push(chunk)
+  }
+
+  for (const symbolName of symbolNames) {
+    for (const chunk of chunks) {
+      const content = chunk.payload.content ?? ""
+
+      if (!content.includes(symbolName)) continue
+
+      const routeDefinitions = extractRouteDefinitionsForSymbol(content, symbolName)
+
+      for (const routeDefinition of routeDefinitions) {
+        routeFacts.push(
+          `${symbolName} referenced by route in ${chunk.payload.repoName}@${chunk.payload.branchName} ${chunk.payload.filePath}:${chunk.payload.startLine}-${chunk.payload.endLine}; method: ${routeDefinition.method}; url: ${routeDefinition.url}; alias: ${routeDefinition.alias}; handler: ${routeDefinition.handler}`,
+        )
+      }
+    }
+
+    for (const fileChunks of chunksByFile.values()) {
+      const methodWindow = findMethodWindow(fileChunks, symbolName, 140)
+
+      if (!methodWindow) continue
+
+      const details = describeMethodBody(methodWindow.content)
+      methodFacts.push(
+        `${symbolName} in ${methodWindow.firstChunk?.repoName}@${methodWindow.firstChunk?.branchName} ${methodWindow.firstChunk?.filePath}:${methodWindow.startLine}-${methodWindow.endLine}${details.length > 0 ? `; ${details.join("; ")}` : ""}`,
+      )
+    }
+  }
+
+  const facts = unique([...routeFacts, ...methodFacts], 24)
+
+  if (facts.length === 0) return undefined
+
+  return [
+    `Exact symbol evidence found for: ${symbolNames.join(", ")}`,
+    "",
+    "Confirmed facts:",
+    facts.map(fact => `- ${fact}`).join("\n"),
+    "",
+    "What is still missing:",
+    "- This answer only uses chunks that exactly mention the named symbol plus nearby chunks.",
+    "- If you need the full runtime flow, ask with the endpoint path, queue name, or RPC func and include what detail you want.",
+  ].join("\n")
+}
+
+async function main() {
+  const exactRoutes = extractQuestionRoutes(question)
+  const exactChunks = await retrieveExactRouteMatches(exactRoutes)
+  const questionHints = extractQuestionHints(question)
+  const exactTermChunks = exactRoutes.length === 0 ? await retrieveExactTermMatches(questionHints, 24) : []
+  const exactTermDetailChunks =
+    exactRoutes.length === 0 && exactTermChunks.length > 0 ? await retrieveNeighborChunks(exactTermChunks, 70) : []
+  const exactComparison = exactRoutes.length >= 2 && isExactRouteComparisonQuestion(question)
+  const exactEndpointInspection = exactRoutes.length === 1 && shouldInspectExactEndpointDetails(question)
+  const exactHandlerRefs = extractExactRouteHandlerRefs(exactChunks, exactRoutes)
+  const exactDetailChunks =
+    exactChunks.length > 0
+      ? await retrieveExactRouteDetails(
+          exactChunks,
+          exactHandlerRefs,
+          exactComparison || exactEndpointInspection || shouldExpandExactRouteQuestion(question),
+        )
+      : []
+  const initialChunks = exactRoutes.length > 0 ? [] : await retrieve(question, limit)
+  const hints = collectHints([...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactTermDetailChunks, ...initialChunks])
+  const expansionQueries =
+    exactRoutes.length > 0 && exactChunks.length === 0
+      ? []
+      : exactRoutes.length > 0 && !shouldExpandExactRouteQuestion(question)
+        ? []
+      : shouldExpandRetrieval(question, hints)
+        ? buildExpansionQueries(question, hints)
+        : []
+  const expandedChunks = []
+
+  for (const expansionQuery of expansionQueries) {
+    expandedChunks.push(...await retrieve(expansionQuery, Math.max(3, Math.ceil(limit / 2))))
+  }
+
+  const retrievedChunks = mergeChunks(
+    [...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactTermDetailChunks, ...initialChunks, ...expandedChunks],
+    exactRoutes.length > 0 ? Math.max(limit, 24) : Math.max(limit, 12),
+  )
+  const chunks = retrievedChunks.map(chunk => chunk.payload)
+  const routeDefinitions = extractRouteDefinitions(exactChunks, exactRoutes)
+  const exactRouteRepoNames = unique(exactChunks.map(chunk => chunk.payload.repoName ?? ""), 12)
+  const handlerFacts = extractHandlerFactSummary(exactDetailChunks, exactHandlerRefs, exactRouteRepoNames)
+  const endpointFacts = extractEndpointHandlerFacts(exactDetailChunks, exactHandlerRefs, exactRouteRepoNames)
+  const endpointRpcFuncNames = extractRpcFuncNamesFromFacts(endpointFacts)
+  const downstreamFacts = extractDownstreamRpcFacts(
+    exactDetailChunks,
+    exactRouteRepoNames,
+  )
+  const genericDownstreamFacts = extractGenericDownstreamRpcFacts(
+    exactDetailChunks,
+    exactRouteRepoNames,
+    endpointRpcFuncNames,
+  )
+  const deterministicExactAnswer =
+    exactComparison
+      ? buildExactRouteComparisonAnswer(routeDefinitions, handlerFacts, downstreamFacts, chunks)
+      : undefined
+  const deterministicEndpointAnswer = exactEndpointInspection
+    ? buildExactEndpointDetailAnswer(routeDefinitions, endpointFacts, genericDownstreamFacts, chunks)
+    : undefined
+
+  if (deterministicExactAnswer || deterministicEndpointAnswer) {
+    const sourceChunks = deterministicEndpointAnswer
+      ? filterEndpointSourceChunks(retrievedChunks, exactRoutes, exactHandlerRefs, endpointRpcFuncNames).map(chunk => chunk.payload)
+      : chunks
+
+    console.log("\nANSWER\n")
+    console.log(deterministicExactAnswer ?? deterministicEndpointAnswer)
+
+    console.log("\nSOURCES\n")
+
+    for (const chunk of sourceChunks) {
+      console.log(
+        `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+      )
+    }
+
+    return
+  }
+
+  if (chunks.length === 0) {
+    console.warn("No chunks were retrieved. Try a broader question or remove repo/service filters.")
+  }
+
+  const exactSymbolAnswer =
+    exactRoutes.length === 0 && exactTermChunks.length > 0
+      ? buildExactSymbolAnswer(extractNamedSymbolsFromQuestion(question), mergeChunks([...exactTermChunks, ...exactTermDetailChunks], 24))
+      : undefined
+
+  if (exactSymbolAnswer) {
+    const sourceChunks = mergeChunks([...exactTermChunks, ...exactTermDetailChunks], 16).map(chunk => chunk.payload)
+
+    console.log("\nANSWER\n")
+    console.log(exactSymbolAnswer)
+
+    console.log("\nSOURCES\n")
+
+    for (const chunk of sourceChunks) {
+      console.log(
+        `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+      )
+    }
+
+    return
+  }
+
+  const structuralEvidenceAnswer =
+    exactRoutes.length === 0 && (questionAsksAboutDatabase(question) || questionAsksAboutServicesOrFlow(question))
+      ? buildStructuralEvidenceAnswer(chunks, question)
+      : undefined
+
+  if (structuralEvidenceAnswer) {
+    console.log("\nANSWER\n")
+    console.log(structuralEvidenceAnswer)
+
+    console.log("\nSOURCES\n")
+
+    for (const chunk of chunks) {
+      console.log(
+        `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+      )
+    }
+
+    return
+  }
+
+  const context = chunks
+    .map((chunk, index) => {
+      return [
+        `SOURCE ${index + 1}`,
+        `repo: ${chunk.repoName}`,
+        `branch: ${chunk.branchName}`,
+        `commit: ${chunk.commitSha}`,
+        `serviceType: ${chunk.serviceType}`,
+        `evidenceTypes: ${chunk.evidenceTypes?.join(", ") ?? "unknown"}`,
+        `routes: ${chunk.routes?.join(", ") ?? ""}`,
+        `symbols: ${chunk.symbols?.join(", ") ?? ""}`,
+        `messageNames: ${chunk.messageNames?.join(", ") ?? ""}`,
+        `queues: ${chunk.queueNames?.join(", ") ?? ""}`,
+        `exchanges: ${chunk.exchangeNames?.join(", ") ?? ""}`,
+        `dbTables: ${chunk.dbTables?.join(", ") ?? ""}`,
+        `file: ${chunk.filePath}`,
+        `lines: ${chunk.startLine}-${chunk.endLine}`,
+        "```",
+        chunk.content,
+        "```",
+      ].join("\n")
+    })
+    .join("\n\n")
+  const evidenceInventory = buildEvidenceInventory(chunks, question)
+
+  const prompt = [
+    `Question: ${question}`,
+    "",
+    `Exact routes requested: ${exactRoutes.join(", ") || "none"}`,
+    `Exact route matches found: ${exactChunks.length}`,
+    `Handler/detail chunks found: ${exactDetailChunks.length}`,
+    `Route handlers discovered: ${exactHandlerRefs.map(ref => ref.fullName).join(", ") || "none"}`,
+    "",
+    "Extracted route definitions:",
+    routeDefinitions.length > 0 ? routeDefinitions.join("\n\n") : "none",
+    "",
+    "Extracted handler facts:",
+    handlerFacts.length > 0 ? handlerFacts.map(fact => `- ${fact}`).join("\n") : "none",
+    "",
+    "Evidence inventory:",
+    evidenceInventory,
+    "",
+    "Relevant context:",
+    context,
+    "",
+    "Answer requirements:",
+    "- Answer from the context only.",
+    "- If the question names exact routes or paths, prioritize sources whose content or route metadata exactly contains those paths.",
+    "- Do not replace an exact route from the question with a different route unless explaining that the exact route was not found.",
+    "- When comparing route definitions, compare method, alias, url, and handler exactly as written. Do not say handlers are the same if their names differ.",
+    "- Do not say compared routes match exactly when their urls, aliases, or handlers differ.",
+    "- Mention service/repo names, source file paths, and line ranges.",
+    "- Mention branch names when they are present in source metadata.",
+    "- If context is insufficient, say NOT_FOUND_IN_INDEXED_CODEBASE and explain what is missing.",
+    "- Treat the Evidence inventory as a whitelist for service, route, message, queue, exchange, and database table names.",
+    "- Do not infer database table names from domain words. Only name tables that appear in metadata, SQL, or quoted source context.",
+    "- Do not infer service involvement from class/client names alone. A service/repo is confirmed only when it appears in source metadata or an explicit source says it calls/handles the same route/message/function.",
+    "- Avoid words like likely, probably, might, or suggests for facts. Use 'not confirmed in retrieved context' instead.",
+    "- If the evidence inventory says requested database/table evidence is not present, answer that the table impact is NOT_FOUND_IN_INDEXED_CODEBASE.",
+    "- If the evidence inventory says requested service/flow evidence is not present, do not describe a flow; say what anchor was missing.",
+    "- For cross-service flows, separate confirmed facts from guesses.",
+    "- Prefer evidence from RabbitMQ handlers, API routes, cron jobs, database usage, and config files.",
+    "- Mention queue, routing key, exchange, and database table names when present.",
+    "- If a route calls a symbol/message and another service consumes or handles the same symbol/message, explain that link as confirmed only when both sides appear in sources.",
+    "- Do not add architecture, database, deployment, or cross-service sections unless the question asks for them or the context directly supports them.",
+    "- For general summary questions, do not mention cross-service flow unless the question explicitly asks about it.",
+  ].join("\n")
+
+  const answer = await chat(prompt)
+
+  console.log("\nANSWER\n")
+  console.log(answer)
+
+  console.log("\nSOURCES\n")
+
+  for (const chunk of chunks) {
+    console.log(
+      `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+    )
+  }
+}
+
+main().catch(error => {
+  console.error(error)
+  process.exit(1)
+})

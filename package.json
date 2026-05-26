@@ -1,0 +1,18 @@
+{
+  "type": "module",
+  "scripts": {
+    "index": "node --import data:text/javascript,import{register}from'node:module';import{pathToFileURL}from'node:url';register('ts-node/esm',pathToFileURL('./')); src/index-repo.ts",
+    "ask": "node --import data:text/javascript,import{register}from'node:module';import{pathToFileURL}from'node:url';register('ts-node/esm',pathToFileURL('./')); src/ask.ts"
+  },
+  "dependencies": {
+    "@qdrant/js-client-rest": "^1.18.0",
+    "commander": "^14.0.3",
+    "fast-glob": "^3.3.3",
+    "ignore": "^7.0.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1"
+  }
+}

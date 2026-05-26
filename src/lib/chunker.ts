@@ -1,0 +1,123 @@
+import { sha256, uuidFromHash } from "./hash.js"
+import { inferEvidenceTypes } from "./evidence.js"
+import { inferRelationshipHints } from "./relationships.js"
+import type { EvidenceType } from "./evidence.js"
+import type { RelationshipHints } from "./relationships.js"
+import type { SourceFile } from "./files.js"
+
+export type CodeChunk = {
+  id: string
+  repoName: string
+  serviceType: ServiceType
+  branchName: string
+  commitSha: string
+  filePath: string
+  startLine: number
+  endLine: number
+  content: string
+  contentHash: string
+  evidenceTypes: EvidenceType[]
+  relationshipHints: RelationshipHints
+}
+
+export type ServiceType = "api" | "worker" | "cron" | "library" | "unknown"
+
+const MAX_LINES = 30
+const OVERLAP_LINES = 4
+const MAX_CHARS = 1_200
+const INDEX_SCHEMA_VERSION = "branches-v1"
+
+export function chunkFile(
+  file: SourceFile,
+  repoName: string,
+  serviceType: ServiceType,
+  branchName: string,
+  commitSha: string,
+): CodeChunk[] {
+  const lines = file.content.split("\n")
+  const chunks: CodeChunk[] = []
+
+  let start = 0
+
+  while (start < lines.length) {
+    const firstLine = lines[start] ?? ""
+
+    if (firstLine.length > MAX_CHARS) {
+      for (let offset = 0; offset < firstLine.length; offset += MAX_CHARS) {
+        const content = firstLine.slice(offset, offset + MAX_CHARS).trim()
+
+        if (content.length === 0) continue
+
+        const lineNumber = start + 1
+        const evidenceTypes = inferEvidenceTypes(file.relativePath, content)
+        const relationshipHints = inferRelationshipHints(content)
+        const contentHash = sha256(
+          `${INDEX_SCHEMA_VERSION}:${repoName}:${branchName}:${serviceType}:${file.relativePath}:${lineNumber}:${lineNumber}:${offset}:${content}`,
+        )
+
+        chunks.push({
+          id: uuidFromHash(contentHash),
+          repoName,
+          serviceType,
+          branchName,
+          commitSha,
+          filePath: file.relativePath,
+          startLine: lineNumber,
+          endLine: lineNumber,
+          content,
+          contentHash,
+          evidenceTypes,
+          relationshipHints,
+        })
+      }
+
+      start++
+      continue
+    }
+
+    let end = start
+    let charCount = 0
+
+    while (end < lines.length && end - start < MAX_LINES) {
+      const nextLine = lines[end] ?? ""
+      const nextCharCount = charCount + nextLine.length + 1
+
+      if (end > start && nextCharCount > MAX_CHARS) break
+
+      charCount = nextCharCount
+      end++
+    }
+
+    const selectedLines = lines.slice(start, end)
+    const content = selectedLines.join("\n").trim()
+
+    if (content.length > 0) {
+      const startLine = start + 1
+      const endLine = end
+      const evidenceTypes = inferEvidenceTypes(file.relativePath, content)
+      const relationshipHints = inferRelationshipHints(content)
+      const contentHash = sha256(
+        `${INDEX_SCHEMA_VERSION}:${repoName}:${branchName}:${serviceType}:${file.relativePath}:${startLine}:${endLine}:${content}`,
+      )
+
+      chunks.push({
+        id: uuidFromHash(contentHash),
+        repoName,
+        serviceType,
+        branchName,
+        commitSha,
+        filePath: file.relativePath,
+        startLine,
+        endLine,
+        content,
+        contentHash,
+        evidenceTypes,
+        relationshipHints,
+      })
+    }
+
+    start = Math.max(end - OVERLAP_LINES, start + 1)
+  }
+
+  return chunks
+}
