@@ -88,6 +88,7 @@ export async function chat(prompt: string): Promise<string> {
                         role: "system",
                         content: [
                             "You are an internal microservice codebase assistant.",
+                            "Answer in the same language as the user question. If the question is in Bahasa Indonesia, answer in Bahasa Indonesia while preserving code identifiers exactly.",
                             "Answer only from the provided context.",
                             "If the context is insufficient, say NOT_FOUND_IN_INDEXED_CODEBASE.",
                             "Always mention service/repo name, source file paths, and line ranges.",
