@@ -160,6 +160,7 @@ This executes known CLI questions and checks that important evidence strings sti
 - exact endpoint detail lookup for `/mrg/api/v1/deposit/demo/`
 - exact symbol lookup for `SubmitDepositDemo`
 - PHP `ims-tf` caller lookup for `/mrg/api/v1/account/demo/request/`
+- broad `ims-tf` request-account-demo flow discovery, including typo tolerance
 
 These tests require Ollama, Qdrant, and the relevant indexed repos/chunks to be available.
 
@@ -176,14 +177,17 @@ The indexer:
 5. Embeds and upserts only new or changed chunks.
 6. Deletes stale chunks that no longer exist.
 
+Indexing also writes a local relationship graph to `.data/relationships.jsonl`. This graph is refreshed for the indexed repo and branch even when every chunk is skipped as unchanged.
+
 Example:
 
 ```text
 Found 143 chunks
+Found 81 relationship edges
 Skipping 143 unchanged chunks
 Indexing 0 new or changed chunks
 Deleting 0 stale chunks
-Done. Indexed 0 chunks, skipped 143, deleted 0 stale chunks and 0 legacy chunks.
+Done. Indexed 0 chunks, skipped 143, deleted 0 stale chunks and 0 legacy chunks, wrote 81 relationship edges.
 ```
 
 ## Indexed Files
@@ -241,12 +245,21 @@ Chunks also store relationship hints:
 - exchange names
 - database table names
 
-`ask` uses these hints for a second retrieval pass on flow-style questions, so a route in one repo can pull related consumers or handlers from another repo when they share a symbol/message name.
+The indexer also extracts graph edges:
+
+- `CALLS_HTTP_ENDPOINT`
+- `HANDLES_HTTP_ENDPOINT`
+- `CALLS_RPC_FUNC`
+- `CALLS_EXTERNAL_FUNC`
+- `DEFINES_SYMBOL`
+- `TOUCHES_TABLE`
+
+`ask` uses this graph before semantic retrieval for broad flow-style questions. For example, a PHP caller in `ims-tf` can resolve a config constant to an HTTP route, find the matching route handler in `ims-tf2`, then inspect that handler for RPC or external API calls.
 
 ## Current Limits
 
 - This is RAG, not a full static call graph.
-- Cross-repo relationships are inferred from retrieved evidence, not guaranteed.
+- Cross-repo relationships are inferred from relationship edges and retrieved evidence, not guaranteed.
 - Chunking is still simple line/character-based.
 - Polyglot support uses heuristics, not language parsers.
 - Answers should be treated as investigation aids and verified against the cited files.

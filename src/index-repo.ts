@@ -8,6 +8,7 @@ import { getGitInfo } from "./lib/git.js"
 import { chunkFile } from "./lib/chunker.js"
 import type { CodeChunk, ServiceType } from "./lib/chunker.js"
 import { createEmbedding } from "./lib/ollama.js"
+import { extractRelationshipEdges, writeRelationshipGraphForRepo } from "./lib/graph.js"
 
 const serviceTypes = new Set<ServiceType>(["api", "worker", "cron", "library", "unknown"])
 
@@ -279,11 +280,14 @@ async function main() {
   console.log(`Found ${files.length} files`)
 
   const chunks = files.flatMap(file => chunkFile(file, repoName, serviceType, gitInfo.branchName, gitInfo.commitSha))
+  const relationshipEdges = extractRelationshipEdges(files, repoName, serviceType, gitInfo.branchName, gitInfo.commitSha)
 
   console.log(`Found ${chunks.length} chunks`)
+  console.log(`Found ${relationshipEdges.length} relationship edges`)
 
   const chunksByTopFolder = new Map<string, number>()
   const chunksByEvidenceType = new Map<string, number>()
+  const edgesByType = new Map<string, number>()
 
   for (const chunk of chunks) {
     const topFolder = chunk.filePath.split(/[\\/]/)[0] ?? "(root)"
@@ -292,6 +296,10 @@ async function main() {
     for (const evidenceType of chunk.evidenceTypes) {
       chunksByEvidenceType.set(evidenceType, (chunksByEvidenceType.get(evidenceType) ?? 0) + 1)
     }
+  }
+
+  for (const edge of relationshipEdges) {
+    edgesByType.set(edge.type, (edgesByType.get(edge.type) ?? 0) + 1)
   }
 
   console.log("Top chunk folders:")
@@ -304,8 +312,13 @@ async function main() {
     console.log(`- ${evidenceType}: ${count}`)
   }
 
+  console.log("Relationship edge counts:")
+  for (const [edgeType, count] of [...edgesByType.entries()].sort((left, right) => right[1] - left[1]).slice(0, 12)) {
+    console.log(`- ${edgeType}: ${count}`)
+  }
+
   if (options.dryRun) {
-    console.log("Dry run complete. No Qdrant collection was changed and no embeddings were generated.")
+    console.log("Dry run complete. No Qdrant collection or relationship graph was changed and no embeddings were generated.")
     return
   }
 
@@ -351,8 +364,10 @@ async function main() {
     }
   }
 
+  await writeRelationshipGraphForRepo(repoName, gitInfo.branchName, relationshipEdges, options.replaceRepo)
+
   console.log(
-    `Done. Indexed ${indexed} chunks, skipped ${skipped}, deleted ${staleIds.length} stale chunks and ${legacyIds.length} legacy chunks.`,
+    `Done. Indexed ${indexed} chunks, skipped ${skipped}, deleted ${staleIds.length} stale chunks and ${legacyIds.length} legacy chunks, wrote ${relationshipEdges.length} relationship edges.`,
   )
 }
 

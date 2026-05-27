@@ -60,12 +60,13 @@ const cases: AnswerCase[] = [
       "ims-tf@develop-mt5",
       "accountReqDemo",
       "ims-tf2@develop",
-      "/mrg/api/v2/account/demo/request/",
-      "MrgV2Controller.RequestDemoAccountV2",
-      "RequestDemoAccount",
+      "/mrg/api/v1/account/demo/request",
+      "MrgController.RequestDemoAccount",
+      "ReqAccountDemo",
     ],
     forbidden: [
       "Saya tidak punya anchor route/function yang persis",
+      "/mrg/api/v2/account/demo/request/",
     ],
   },
   {
@@ -76,12 +77,14 @@ const cases: AnswerCase[] = [
       "accountReqDemo",
       "ACCOUNT_REQUEST_DEMO_1",
       "ims-tf2@develop",
-      "/mrg/api/v2/account/demo/request/",
-      "MrgV2Controller.RequestDemoAccountV2",
+      "/mrg/api/v1/account/demo/request",
+      "MrgController.RequestDemoAccount",
+      "ReqAccountDemo",
     ],
     forbidden: [
       "I do not have an exact route/function anchor",
       "NOT_FOUND_IN_INDEXED_CODEBASE",
+      "/mrg/api/v2/account/demo/request/",
     ],
   },
 ]
