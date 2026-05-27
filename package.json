@@ -1,8 +1,9 @@
 {
   "type": "module",
   "scripts": {
-    "index": "node --import data:text/javascript,import{register}from'node:module';import{pathToFileURL}from'node:url';register('ts-node/esm',pathToFileURL('./')); src/index-repo.ts",
-    "ask": "node --import data:text/javascript,import{register}from'node:module';import{pathToFileURL}from'node:url';register('ts-node/esm',pathToFileURL('./')); src/ask.ts"
+    "index": "node --import ./register-ts-node.mjs src/index-repo.ts",
+    "ask": "node --import ./register-ts-node.mjs src/ask.ts",
+    "test:answers": "node --import ./register-ts-node.mjs src/answer-regression.ts"
   },
   "dependencies": {
     "@qdrant/js-client-rest": "^1.18.0",

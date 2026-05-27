@@ -147,6 +147,22 @@ Limit retrieved chunks:
 npm run ask -- "What database tables are used by request account flow?" --limit 12
 ```
 
+## Answer Regression Tests
+
+After indexing the sample repos you care about, run:
+
+```powershell
+npm run test:answers
+```
+
+This executes known CLI questions and checks that important evidence strings still appear in the answer. The current cases cover:
+
+- exact endpoint detail lookup for `/mrg/api/v1/deposit/demo/`
+- exact symbol lookup for `SubmitDepositDemo`
+- PHP `ims-tf` caller lookup for `/mrg/api/v1/account/demo/request/`
+
+These tests require Ollama, Qdrant, and the relevant indexed repos/chunks to be available.
+
 ## Incremental Indexing
 
 Reindexing does not embed/upload everything from scratch.
