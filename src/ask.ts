@@ -153,6 +153,10 @@ function localizeAnswer(answer: string, question: string): string {
     [/Handler behavior:/g, "Behavior handler:"],
     [/RPC calls from handlers:/g, "Call RPC dari handler:"],
     [/External calls from handlers:/g, "Call eksternal dari handler:"],
+    [/Downstream handlers for external\/API funcs:/g, "Handler downstream untuk func API eksternal:"],
+    [/Downstream handler behavior:/g, "Behavior handler downstream:"],
+    [/Model\/symbol calls inside downstream handlers:/g, "Call model/symbol di dalam handler downstream:"],
+    [/Model\/symbol behavior:/g, "Behavior model/symbol:"],
     [/Downstream RPC symbols:/g, "Symbol RPC downstream:"],
     [/Database\/table touches near downstream symbols:/g, "Touch database/tabel di sekitar symbol downstream:"],
     [/Confirmed facts:/g, "Fakta yang terkonfirmasi:"],
@@ -184,6 +188,8 @@ function localizeAnswer(answer: string, question: string): string {
     [/body fields:/g, "field body:"],
     [/rpc func values:/g, "nilai func RPC:"],
     [/external API func values:/g, "nilai func API eksternal:"],
+    [/required fields\/checks:/g, "field/check wajib:"],
+    [/calls:/g, "memanggil:"],
     [/tables:/g, "tabel:"],
     [/validation\/auth:/g, "validasi/auth:"],
     [/extra payload:/g, "payload tambahan:"],
@@ -370,6 +376,8 @@ function edgeTextForConceptSearch(edge: RelationshipEdge): string {
     edge.viaConstant,
     edge.rpcFunc,
     edge.externalFunc,
+    edge.receiverSymbol,
+    edge.calleeSymbol,
     edge.symbol,
     edge.table,
     edge.evidence,
@@ -432,21 +440,39 @@ function scoreGraphCallEdge(edge: RelationshipEdge, tokens: string[], mentionedR
 
 function findRelatedGraphTableEdges(symbolEdges: RelationshipEdge[], graph: RelationshipEdge[]): RelationshipEdge[] {
   const tableEdges: RelationshipEdge[] = []
+  const lineWindow = 140
 
   for (const symbolEdge of symbolEdges) {
     tableEdges.push(
       ...graph.filter(edge => {
         if (edge.type !== "TOUCHES_TABLE" || !graphScopeAllows(edge)) return false
-        if (sameRepoBranchFile(edge, symbolEdge)) return true
 
-        return edge.repoName === symbolEdge.repoName &&
-          edge.branchName === symbolEdge.branchName &&
-          edge.filePath.includes(path.dirname(symbolEdge.filePath))
+        return sameRepoBranchFile(edge, symbolEdge) &&
+          edge.startLine >= symbolEdge.startLine &&
+          edge.startLine <= symbolEdge.startLine + lineWindow
       }),
     )
   }
 
   return [...new Map(tableEdges.map(edge => [edge.id, edge])).values()].slice(0, 8)
+}
+
+function receiverMatchesDefinition(receiverSymbol: string | undefined, definitionEdge: RelationshipEdge): boolean {
+  if (!receiverSymbol) return true
+
+  const receiver = receiverSymbol.toLowerCase()
+  const filePath = definitionEdge.filePath.toLowerCase()
+
+  if (receiver.endsWith("model")) {
+    const modelName = receiver.replace(/model$/, "")
+
+    return filePath.includes(`/models/${modelName}.`) ||
+      filePath.includes(`\\models\\${modelName}.`) ||
+      filePath.includes(`models/${modelName}.`) ||
+      filePath.includes(`models\\${modelName}.`)
+  }
+
+  return true
 }
 
 function findGraphHandlerDefinitions(handlerEdge: RelationshipEdge, graph: RelationshipEdge[]): RelationshipEdge[] {
@@ -501,6 +527,40 @@ async function describeGraphSymbolEdges(edges: RelationshipEdge[]): Promise<stri
   return unique(facts, 12)
 }
 
+function findGraphSymbolDefinitions(symbolName: string, graph: RelationshipEdge[], excludedRepos: string[] = [], receiverSymbol?: string): RelationshipEdge[] {
+  return graph
+    .filter(edge => {
+      if (edge.type !== "DEFINES_SYMBOL" || edge.symbol !== symbolName) return false
+      if (!graphScopeAllows(edge)) return false
+      if (excludedRepos.includes(edge.repoName)) return false
+
+      return receiverMatchesDefinition(receiverSymbol, edge)
+    })
+    .sort((left, right) => {
+      const leftReceiverScore = receiverMatchesDefinition(receiverSymbol, left) ? 1 : 0
+      const rightReceiverScore = receiverMatchesDefinition(receiverSymbol, right) ? 1 : 0
+
+      return rightReceiverScore - leftReceiverScore
+    })
+    .slice(0, 8)
+}
+
+function findCallsFromSymbols(
+  symbolEdges: RelationshipEdge[],
+  graph: RelationshipEdge[],
+  type: RelationshipEdge["type"],
+): RelationshipEdge[] {
+  const symbolNames = new Set(symbolEdges.map(edge => edge.symbol).filter(Boolean))
+
+  return graph
+    .filter(edge => {
+      if (edge.type !== type || !graphScopeAllows(edge)) return false
+
+      return Boolean(edge.fromSymbol && symbolNames.has(edge.fromSymbol))
+    })
+    .slice(0, 16)
+}
+
 async function buildGraphFlowAnswer(question: string, graph: RelationshipEdge[]): Promise<GraphFlowAnswer | undefined> {
   if (!questionAsksAboutServicesOrFlow(question) || graph.length === 0) return undefined
 
@@ -551,19 +611,35 @@ async function buildGraphFlowAnswer(question: string, graph: RelationshipEdge[])
       return Boolean(edge.fromSymbol && [...handlerNames, ...handlerDefinitionNames].includes(edge.fromSymbol))
     })
     .slice(0, 12)
+  const externalFuncNames = unique(externalCalls.map(edge => edge.externalFunc ?? ""), 12)
+  const downstreamExternalSymbols = externalFuncNames.flatMap(funcName => {
+    return findGraphSymbolDefinitions(funcName, scopedGraph, endpointHandlers.map(edge => edge.repoName))
+  }).slice(0, 12)
+  const downstreamExternalFacts = await describeGraphSymbolEdges(downstreamExternalSymbols)
+  const downstreamSymbolCalls = findCallsFromSymbols(downstreamExternalSymbols, scopedGraph, "CALLS_SYMBOL")
+    .filter(edge => {
+      if (!edge.calleeSymbol) return false
+
+      return !["object", "number", "string", "validateAsync", "logActionAsync", "getByID", "getInstance", "Clone", "indexOf"].includes(edge.calleeSymbol)
+    })
+    .slice(0, 12)
+  const downstreamModelDefinitions = downstreamSymbolCalls.flatMap(edge => {
+    return findGraphSymbolDefinitions(edge.calleeSymbol ?? "", scopedGraph, [], edge.receiverSymbol)
+  }).slice(0, 12)
+  const downstreamModelFacts = await describeGraphSymbolEdges(downstreamModelDefinitions)
   const rpcNames = unique(rpcCalls.map(edge => edge.rpcFunc ?? ""), 12)
   const downstreamSymbols = scopedGraph
     .filter(edge => edge.type === "DEFINES_SYMBOL" && edge.symbol && rpcNames.includes(edge.symbol))
     .filter(edge => !endpointHandlers.some(handlerEdge => handlerEdge.repoName === edge.repoName && handlerEdge.branchName === edge.branchName))
     .slice(0, 12)
-  const tableEdges = findRelatedGraphTableEdges(downstreamSymbols, scopedGraph)
+  const tableEdges = findRelatedGraphTableEdges([...downstreamSymbols, ...downstreamExternalSymbols, ...downstreamModelDefinitions], scopedGraph)
   const reposInvolved = unique(
-    [selectedCall, ...endpointHandlers, ...rpcCalls, ...downstreamSymbols, ...tableEdges].map(edge => {
+    [selectedCall, ...endpointHandlers, ...rpcCalls, ...externalCalls, ...downstreamExternalSymbols, ...downstreamSymbolCalls, ...downstreamModelDefinitions, ...downstreamSymbols, ...tableEdges].map(edge => {
       return `${edge.repoName}@${edge.branchName || "unknown"} [${edge.serviceType}]`
     }),
     16,
   )
-  const sources = [...new Map([selectedCall, ...endpointHandlers, ...handlerDefinitionEdges, ...rpcCalls, ...externalCalls, ...downstreamSymbols, ...tableEdges].map(edge => [edge.id, edge])).values()]
+  const sources = [...new Map([selectedCall, ...endpointHandlers, ...handlerDefinitionEdges, ...rpcCalls, ...externalCalls, ...downstreamExternalSymbols, ...downstreamSymbolCalls, ...downstreamModelDefinitions, ...downstreamSymbols, ...tableEdges].map(edge => [edge.id, edge])).values()]
 
   const answer = [
     "Graph flow found from relationship index:",
@@ -594,6 +670,26 @@ async function buildGraphFlowAnswer(question: string, graph: RelationshipEdge[])
     externalCalls.length > 0
       ? externalCalls.map(edge => `- ${edge.fromSymbol || "unknown"} calls ${edge.externalFunc} in ${edgeSource(edge)}`).join("\n")
       : "- No external API/client call was extracted from the endpoint handler.",
+    "",
+    "Downstream handlers for external/API funcs:",
+    downstreamExternalSymbols.length > 0
+      ? downstreamExternalSymbols.map(edge => `- ${edge.symbol} in ${edgeSource(edge)}`).join("\n")
+      : "- No downstream function with the same external/API func name was found.",
+    "",
+    "Downstream handler behavior:",
+    downstreamExternalFacts.length > 0
+      ? downstreamExternalFacts.map(fact => `- ${fact}`).join("\n")
+      : "- No downstream handler body was resolved.",
+    "",
+    "Model/symbol calls inside downstream handlers:",
+    downstreamSymbolCalls.length > 0
+      ? downstreamSymbolCalls.map(edge => `- ${edge.fromSymbol || "unknown"} calls ${edge.receiverSymbol}.${edge.calleeSymbol} in ${edgeSource(edge)}`).join("\n")
+      : "- No model/symbol calls were extracted inside downstream handlers.",
+    "",
+    "Model/symbol behavior:",
+    downstreamModelFacts.length > 0
+      ? downstreamModelFacts.map(fact => `- ${fact}`).join("\n")
+      : "- No called model/symbol body was resolved.",
     "",
     "Downstream RPC symbols:",
     downstreamSymbols.length > 0
@@ -1974,6 +2070,7 @@ function extractSqlTableNamesFromContent(content: string): string[] {
   return [
     ...[...content.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi)].map(match => match[1] ?? ""),
     ...[...content.matchAll(/\b(?:INSERT\s+INTO|DELETE\s+FROM)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi)].map(match => match[1] ?? ""),
+    ...[...content.matchAll(/\bsqlstr\.(?:insertObject|updateObject)\(\s*["'`]([A-Za-z_][\w.]*)["'`]/g)].map(match => match[1] ?? ""),
   ]
 }
 
@@ -2149,11 +2246,24 @@ function describeMethodBody(content: string): string[] {
   ]
   const rpcFuncNames = [...content.matchAll(/\bfunc\s*:\s*["'`]([^"'`]+)["'`]/g)].map(match => match[1] ?? "")
   const externalFuncNames = [...content.matchAll(/\bpostParamsAsync\(\s*["'`]([^"'`]+)["'`]/g)].map(match => match[1] ?? "")
+  const requiredFields = [
+    ...[...content.matchAll(/\b([A-Za-z_$][\w$]*)\s*:\s*Joi\.[^\n,;]+?\.required\(\)/g)].map(match => match[1] ?? ""),
+    ...[...content.matchAll(/\bif\s*\(\s*!\s*data\.([A-Za-z_$][\w$]*)\s*\)/g)].map(match => match[1] ?? ""),
+  ]
+  const modelCalls = unique(
+    [...content.matchAll(/\b([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(/g)]
+      .map(match => `${match[1]}.${match[2]}`)
+      .filter(call => !/^console\./.test(call))
+      .filter(call => !/\.validateAsync$/.test(call)),
+    12,
+  )
   const tables = sanitizeTableNames(extractSqlTableNamesFromContent(content), 12)
   const details = [
     bodyFields.length > 0 ? `body fields: ${unique(bodyFields, 12).join(", ")}` : undefined,
     rpcFuncNames.length > 0 ? `rpc func values: ${unique(rpcFuncNames, 12).join(", ")}` : undefined,
     externalFuncNames.length > 0 ? `external API func values: ${unique(externalFuncNames, 12).join(", ")}` : undefined,
+    requiredFields.length > 0 ? `required fields/checks: ${unique(requiredFields, 16).join(", ")}` : undefined,
+    modelCalls.length > 0 ? `calls: ${modelCalls.join(", ")}` : undefined,
     content.includes("request.jwtVerify") ? "verifies JWT" : undefined,
     content.includes("request.validationError") ? "throws on request.validationError" : undefined,
     content.includes("Joi.object") ? "uses Joi schema validation" : undefined,

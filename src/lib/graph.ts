@@ -9,6 +9,7 @@ export type RelationshipType =
   | "HANDLES_HTTP_ENDPOINT"
   | "CALLS_RPC_FUNC"
   | "CALLS_EXTERNAL_FUNC"
+  | "CALLS_SYMBOL"
   | "DEFINES_SYMBOL"
   | "TOUCHES_TABLE"
 
@@ -30,6 +31,8 @@ export type RelationshipEdge = {
   viaConstant?: string | undefined
   rpcFunc?: string | undefined
   externalFunc?: string | undefined
+  receiverSymbol?: string | undefined
+  calleeSymbol?: string | undefined
   symbol?: string | undefined
   table?: string | undefined
   evidence?: string | undefined
@@ -40,6 +43,11 @@ type ConstantRoute = {
   fullName: string
   route: string
   expression: string
+}
+
+type TableOccurrence = {
+  table: string
+  line: number
 }
 
 const graphPath = path.join(process.cwd(), ".data", "relationships.jsonl")
@@ -66,6 +74,8 @@ function edgeId(edge: Omit<RelationshipEdge, "id">): string {
     edge.viaConstant ?? "",
     edge.rpcFunc ?? "",
     edge.externalFunc ?? "",
+    edge.receiverSymbol ?? "",
+    edge.calleeSymbol ?? "",
     edge.symbol ?? "",
     edge.table ?? "",
   ].join(":"))
@@ -84,14 +94,21 @@ function normalizeRoute(route: string): string {
   return normalized.length > 0 ? normalized : "/"
 }
 
-function extractTables(content: string): string[] {
+function extractTableOccurrences(content: string): TableOccurrence[] {
   const stopWords = new Set(["on", "status", "set", "where", "order", "group", "select", "from"])
-  const tables = [
-    ...[...content.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi)].map(match => match[1] ?? ""),
-    ...[...content.matchAll(/\b(?:INSERT\s+INTO|DELETE\s+FROM)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi)].map(match => match[1] ?? ""),
+  const matches = [
+    ...content.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi),
+    ...content.matchAll(/\b(?:INSERT\s+INTO|DELETE\s+FROM)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi),
+    ...content.matchAll(/\bsqlstr\.(?:insertObject|updateObject)\(\s*["'`]([A-Za-z_][\w.]*)["'`]/g),
   ]
 
-  return unique(tables.filter(table => !stopWords.has(table.toLowerCase())), 30)
+  return [...new Map(matches
+    .map(match => ({
+      table: match[1] ?? "",
+      line: lineNumberAt(content, match.index ?? 0),
+    }))
+    .filter(occurrence => occurrence.table && !stopWords.has(occurrence.table.toLowerCase()))
+    .map(occurrence => [`${occurrence.table}:${occurrence.line}`, occurrence])).values()].slice(0, 100)
 }
 
 function findPhpFunctionBefore(content: string, index: number): { name: string; line: number } | undefined {
@@ -281,6 +298,30 @@ export function extractRelationshipEdges(
       }))
     }
 
+    for (const match of file.content.matchAll(/\b([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(/g)) {
+      if (!match[1] || !match[2] || match.index === undefined) continue
+
+      const receiverSymbol = match[1]
+      const calleeSymbol = match[2]
+
+      if (["console", "Math", "JSON", "Object", "Array", "String", "Number", "Promise"].includes(receiverSymbol)) continue
+      if (["log", "error", "warn", "map", "filter", "find", "then", "catch", "indexOf", "includes"].includes(calleeSymbol)) continue
+
+      const caller = findJsMethodBefore(file.content, match.index) ?? findPhpFunctionBefore(file.content, match.index)
+      const startLine = caller?.line ?? lineNumberAt(file.content, match.index)
+
+      edges.push(createEdge({
+        ...base,
+        type: "CALLS_SYMBOL",
+        startLine,
+        endLine: lineNumberAt(file.content, match.index),
+        fromSymbol: caller?.name,
+        receiverSymbol,
+        calleeSymbol,
+        evidence: match[0],
+      }))
+    }
+
     for (const match of file.content.matchAll(/\b(?:async\s+)?(?:public\s+|private\s+|protected\s+)?(?:function\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/g)) {
       if (!match[1] || match.index === undefined) continue
       if (["if", "for", "while", "switch", "catch", "function"].includes(match[1])) continue
@@ -297,13 +338,13 @@ export function extractRelationshipEdges(
       }))
     }
 
-    for (const table of extractTables(file.content)) {
+    for (const occurrence of extractTableOccurrences(file.content)) {
       edges.push(createEdge({
         ...base,
         type: "TOUCHES_TABLE",
-        startLine: 1,
-        endLine: file.content.split(/\r?\n/).length,
-        table,
+        startLine: occurrence.line,
+        endLine: occurrence.line,
+        table: occurrence.table,
       }))
     }
   }

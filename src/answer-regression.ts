@@ -63,6 +63,9 @@ const cases: AnswerCase[] = [
       "/mrg/api/v1/account/demo/request",
       "MrgController.RequestDemoAccount",
       "ReqAccountDemo",
+      "mrg-accounts@develop",
+      "demoModel.RequestAccountNew",
+      "users_demoid",
     ],
     forbidden: [
       "Saya tidak punya anchor route/function yang persis",
@@ -80,6 +83,9 @@ const cases: AnswerCase[] = [
       "/mrg/api/v1/account/demo/request",
       "MrgController.RequestDemoAccount",
       "ReqAccountDemo",
+      "mrg-accounts@develop",
+      "demoModel.RequestAccountNew",
+      "users_demoid",
     ],
     forbidden: [
       "I do not have an exact route/function anchor",

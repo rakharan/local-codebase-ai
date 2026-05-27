@@ -251,10 +251,11 @@ The indexer also extracts graph edges:
 - `HANDLES_HTTP_ENDPOINT`
 - `CALLS_RPC_FUNC`
 - `CALLS_EXTERNAL_FUNC`
+- `CALLS_SYMBOL`
 - `DEFINES_SYMBOL`
 - `TOUCHES_TABLE`
 
-`ask` uses this graph before semantic retrieval for broad flow-style questions. For example, a PHP caller in `ims-tf` can resolve a config constant to an HTTP route, find the matching route handler in `ims-tf2`, then inspect that handler for RPC or external API calls.
+`ask` uses this graph before semantic retrieval for broad flow-style questions. For example, a PHP caller in `ims-tf` can resolve a config constant to an HTTP route, find the matching route handler in `ims-tf2`, inspect that handler for RPC or external API calls, follow same-name downstream functions in another repo, and then follow model/function calls inside that downstream handler.
 
 ## Current Limits
 
