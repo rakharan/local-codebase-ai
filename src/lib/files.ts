@@ -119,6 +119,11 @@ export type SourceFile = {
   content: string
 }
 
+export type ReadRepoFilesOptions = {
+  include?: string[]
+  exclude?: string[]
+}
+
 function isAllowedFile(filePath: string): boolean {
   const lower = filePath.toLowerCase()
   const base = path.basename(lower)
@@ -163,12 +168,19 @@ async function buildIgnore(repoPath: string) {
   return ignored
 }
 
-export async function readRepoFiles(repoPath: string): Promise<SourceFile[]> {
+function normalizeGlobPattern(pattern: string): string {
+  return pattern.replaceAll("\\", "/").replace(/^\/+/, "")
+}
+
+export async function readRepoFiles(repoPath: string, options: ReadRepoFilesOptions = {}): Promise<SourceFile[]> {
   const ignored = await buildIgnore(repoPath)
-  const entries = await fg("**/*", {
+  const include = options.include?.length ? options.include.map(normalizeGlobPattern) : ["**/*"]
+  const exclude = options.exclude?.map(normalizeGlobPattern) ?? []
+  const entries = await fg(include, {
     cwd: repoPath,
     dot: true,
     onlyFiles: true,
+    ignore: exclude,
   })
 
   const files: SourceFile[] = []

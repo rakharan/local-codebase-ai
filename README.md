@@ -57,6 +57,50 @@ Supported service types:
 
 If `--repo-name` is omitted, the folder name is used. If `--service-type` is omitted, `unknown` is used.
 
+For large legacy repos, preview a narrow scope before embedding:
+
+```powershell
+npm run index -- C:/GIT/work/ims-tf `
+  --repo-name ims-tf `
+  --service-type api `
+  --dry-run `
+  --include "components/mrg/controllers/**" `
+  --include "components/mrg/models/**" `
+  --include "components/mrg/includes/**" `
+  --include "components/askap/controllers/**" `
+  --include "components/askap/models/**" `
+  --include "components/askap/includes/**" `
+  --include "config.ex.php" `
+  --exclude "**/assets/**" `
+  --exclude "**/views/**" `
+  --exclude "**/templates/**" `
+  --exclude "**/libraries/**" `
+  --max-chunks 5000
+```
+
+Then index the same scope:
+
+```powershell
+npm run index -- C:/GIT/work/ims-tf `
+  --repo-name ims-tf `
+  --service-type api `
+  --replace-repo `
+  --include "components/mrg/controllers/**" `
+  --include "components/mrg/models/**" `
+  --include "components/mrg/includes/**" `
+  --include "components/askap/controllers/**" `
+  --include "components/askap/models/**" `
+  --include "components/askap/includes/**" `
+  --include "config.ex.php" `
+  --exclude "**/assets/**" `
+  --exclude "**/views/**" `
+  --exclude "**/templates/**" `
+  --exclude "**/libraries/**" `
+  --max-chunks 5000
+```
+
+`--replace-repo` deletes all existing chunks with the same `repoName` before indexing. Use it after an accidental broad index or when changing from a full-repo index to a scoped index.
+
 ## Branches
 
 The indexer reads the currently checked-out Git branch and commit from the target repo.

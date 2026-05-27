@@ -144,6 +144,7 @@ function localizeAnswer(answer: string, question: string): string {
     [/referenced by route in/g, "direferensikan oleh route di"],
     [/referenced by route block in/g, "direferensikan oleh block route di"],
     [/Services\/repos involved:/g, "Service/repo yang terlibat:"],
+    [/Upstream callers:/g, "Caller upstream:"],
     [/Request body:/g, "Request body:"],
     [/API-layer validation and payload behavior:/g, "Validasi layer API dan perilaku payload:"],
     [/Database\/table effects:/g, "Efek database/tabel:"],
@@ -208,6 +209,8 @@ function localizeAnswer(answer: string, question: string): string {
     [/Retrieved repos\/files alone are not proof that every listed repo participates in the same runtime path\./g, "Repo/file yang ter-retrieve saja belum membuktikan semua repo tersebut ikut dalam runtime path yang sama."],
     [/This answer only uses chunks that exactly mention the named symbol plus nearby chunks\./g, "Jawaban ini hanya memakai chunk yang menyebut symbol tersebut secara persis plus chunk di sekitarnya."],
     [/If you need the full runtime flow, ask with the endpoint path, queue name, or RPC func and include what detail you want\./g, "Kalau butuh runtime flow penuh, tanyakan dengan path endpoint, queue name, atau func RPC dan sertakan detail yang kamu mau."],
+    [/No upstream caller was extracted from the retrieved context\./g, "Tidak ada caller upstream yang berhasil diekstrak dari context yang ter-retrieve."],
+    [/No database\/table effect was extracted\./g, "Tidak ada efek database\/tabel yang berhasil diekstrak."],
   ]
 
   return replacements.reduce((localized, [pattern, replacement]) => localized.replace(pattern, replacement), answer)
@@ -231,6 +234,7 @@ function collectHints(chunks: RetrievedChunk[]): RelationshipHints {
 function extractQuestionHints(question: string): string[] {
   return unique([
     ...[...question.matchAll(/\/[A-Za-z0-9_./:{}-]+/g)].map(match => match[0]),
+    ...[...question.matchAll(/\b[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*\b/g)].map(match => match[0]),
     ...[...question.matchAll(/\b[A-Z][A-Za-z0-9_]{2,}\b/g)]
       .map(match => match[0])
       .filter(value => !["What", "When", "Where", "Which", "How", "Does"].includes(value)),
@@ -687,6 +691,58 @@ function extractRouteDefinitionsForSymbol(content: string, symbolName: string): 
   return definitions
 }
 
+function extractPhpConstantRoutes(content: string): Array<{ name: string; route: string; expression: string }> {
+  const constants = new Map<string, string>()
+
+  for (const match of content.matchAll(/\bconst\s+([A-Z][A-Z0-9_]*)\s*=\s*([^;]+);/g)) {
+    const name = match[1]
+    const expression = match[2]
+
+    if (name && expression) {
+      constants.set(name, expression)
+    }
+  }
+
+  function resolveExpression(expression: string, seen = new Set<string>()): string {
+    return expression
+      .split(".")
+      .map(part => {
+        const trimmed = part.trim()
+        const stringValue = trimmed.match(/^["'`]([^"'`]*)["'`]$/)?.[1]
+
+        if (stringValue !== undefined) return stringValue
+
+        const selfReference = trimmed.match(/^self::([A-Z][A-Z0-9_]*)$/)?.[1]
+
+        if (selfReference && constants.has(selfReference) && !seen.has(selfReference)) {
+          return resolveExpression(constants.get(selfReference) ?? "", new Set([...seen, selfReference]))
+        }
+
+        return ""
+      })
+      .join("")
+  }
+
+  return [...constants.entries()]
+    .map(([name, expression]) => ({
+      name,
+      expression,
+      route: resolveExpression(expression),
+    }))
+    .filter(value => value.route.startsWith("/"))
+}
+
+function extractPhpConstantNamesForRoutes(chunks: RetrievedChunk[], routes: string[]): string[] {
+  return unique(
+    chunks.flatMap(chunk => {
+      return extractPhpConstantRoutes(chunk.payload.content ?? "")
+        .filter(constantRoute => routes.some(route => routeMatches(constantRoute.route, route)))
+        .map(constantRoute => constantRoute.name)
+    }),
+    16,
+  )
+}
+
 function parseRouteDefinition(definition: string): RouteDefinition | undefined {
   const method = definition.match(/\bmethod\s*:\s*\[([^\]]+)\]/)?.[1]?.replaceAll(/["'`\s]/g, "") ?? ""
   const alias = definition.match(/\balias\s*:\s*["'`]([^"'`]+)["'`]/)?.[1] ?? ""
@@ -821,12 +877,18 @@ function buildExactEndpointDetailAnswer(
   endpointFacts: string[],
   downstreamFacts: string[],
   chunks: RetrievedPayload[],
+  upstreamFacts: string[] = [],
 ): string | undefined {
   const definition = routeDefinitions.map(parseRouteDefinition).find(routeDefinition => routeDefinition !== undefined)
 
   if (!definition) return undefined
 
-  const source = chunks[0]
+  const source =
+    chunks.find(chunk => {
+      const content = chunk.content ?? ""
+
+      return contentContainsRoute(content, definition.url) && content.includes(definition.handler)
+    }) ?? chunks[0]
   const lines = source ? `${source.filePath}:${source.startLine}-${source.endLine}` : "unknown"
   const bodyFields = unique(
     endpointFacts.flatMap(fact => {
@@ -903,6 +965,11 @@ function buildExactEndpointDetailAnswer(
     `  alias: ${definition.alias || "unknown"}`,
     `  handler: ${definition.handler}`,
     "",
+    "Upstream callers:",
+    upstreamFacts.length > 0
+      ? upstreamFacts.map(fact => `- ${fact}`).join("\n")
+      : "- No upstream caller was extracted from the retrieved context.",
+    "",
     "Services/repos involved:",
     servicesInvolved.length > 0 ? servicesInvolved.map(service => `- ${service}`).join("\n") : "- Only the route owner was found.",
     "",
@@ -933,6 +1000,7 @@ function buildExactEndpointDetailAnswer(
       : undefined,
     "",
     "Evidence:",
+    upstreamFacts.length > 0 ? upstreamFacts.map(fact => `- ${fact}`).join("\n") : undefined,
     endpointFacts.length > 0 ? endpointFacts.map(fact => `- ${fact}`).join("\n") : "- No handler facts were extracted.",
     downstreamFacts.length > 0 ? downstreamFacts.map(fact => `- ${fact}`).join("\n") : "- No downstream facts were extracted.",
   ].join("\n")
@@ -1265,14 +1333,49 @@ function extractEndpointHandlerFacts(
   return unique(facts, 16)
 }
 
+function extractUpstreamRouteCallerFacts(chunks: RetrievedChunk[], constantNames: string[]): string[] {
+  const constants = new Set(constantNames)
+  const facts: string[] = []
+
+  if (constants.size === 0) return []
+
+  for (const chunk of chunks) {
+    const content = chunk.payload.content ?? ""
+    const matchingConstants = [...constants].filter(constantName => content.includes(constantName))
+
+    if (matchingConstants.length === 0) continue
+    if (!content.includes("Helper::requestAPI")) continue
+
+    for (const constantName of matchingConstants) {
+      const usageIndex = content.indexOf(constantName)
+      const contentBeforeUsage = usageIndex >= 0 ? content.slice(0, usageIndex) : content
+      const functionName =
+        [...contentBeforeUsage.matchAll(/\b(?:public|private|protected)?\s*function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)]
+          .map(match => match[1] ?? "")
+          .filter(Boolean)
+          .at(-1) ?? "unknown"
+
+      facts.push(
+        `${functionName} in ${chunk.payload.repoName}@${chunk.payload.branchName} ${chunk.payload.filePath}:${chunk.payload.startLine}-${chunk.payload.endLine}; calls Helper::requestAPI with ${constantName}`,
+      )
+    }
+  }
+
+  return unique(facts, 12)
+}
+
 async function retrieveExactRouteDetails(
   exactChunks: RetrievedChunk[],
   handlerRefs: HandlerRef[],
   includeRpcHop: boolean,
+  exactRoutes: string[] = [],
 ): Promise<RetrievedChunk[]> {
   const handlerChunks = await resolveHandlerChunks(exactChunks, handlerRefs)
+  const phpConstantNames = extractPhpConstantNamesForRoutes(exactChunks, exactRoutes)
+  const phpConstantChunks = phpConstantNames.length > 0 ? await retrieveExactTermMatches(phpConstantNames, 40) : []
+  const phpConstantNeighborChunks = phpConstantChunks.length > 0 ? await retrieveNeighborChunks(phpConstantChunks, 45) : []
 
-  if (!includeRpcHop) return handlerChunks
+  if (!includeRpcHop) return [...handlerChunks, ...phpConstantChunks, ...phpConstantNeighborChunks]
 
   const rpcFuncNames = extractRpcFuncNames(handlerChunks)
   const rpcTerms = extractRpcAndCallTerms(handlerChunks)
@@ -1290,6 +1393,8 @@ async function retrieveExactRouteDetails(
 
   return [
     ...handlerChunks,
+    ...phpConstantChunks.slice(0, 12),
+    ...phpConstantNeighborChunks.slice(0, 12),
     ...downstreamFuncChunks.slice(0, 12),
     ...downstreamNeighborChunks.slice(0, 12),
     ...downstreamRpcChunks.slice(0, 6),
@@ -1399,16 +1504,19 @@ function filterEndpointSourceChunks(
   routes: string[],
   handlerRefs: HandlerRef[],
   rpcFuncNames: string[],
+  extraTerms: string[] = [],
 ): RetrievedChunk[] {
   const handlerNames = new Set(handlerRefs.map(ref => ref.methodName))
   const rpcNames = new Set(rpcFuncNames)
+  const terms = new Set(extraTerms)
   const filtered = chunks.filter(chunk => {
     const content = chunk.payload.content ?? ""
     const hasRoute = routes.some(route => contentContainsRoute(content, route))
     const hasHandler = [...handlerNames].some(handlerName => content.includes(handlerName))
     const hasRpcFunc = [...rpcNames].some(rpcFuncName => content.includes(rpcFuncName))
+    const hasExtraTerm = [...terms].some(term => content.includes(term))
 
-    return hasRoute || hasHandler || hasRpcFunc
+    return hasRoute || hasHandler || hasRpcFunc || hasExtraTerm
   })
 
   return mergeChunks(filtered, 14)
@@ -1580,9 +1688,12 @@ function buildStructuralEvidenceAnswer(chunks: RetrievedPayload[], question: str
 
 function extractNamedSymbolsFromQuestion(question: string): string[] {
   return unique(
-    [...question.matchAll(/\b[A-Z][A-Za-z0-9_]{2,}\b/g)]
-      .map(match => match[0])
-      .filter(value => !["What", "When", "Where", "Which", "How", "Does"].includes(value)),
+    [
+      ...[...question.matchAll(/\b[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*\b/g)].map(match => match[0]),
+      ...[...question.matchAll(/\b[A-Z][A-Za-z0-9_]{2,}\b/g)]
+        .map(match => match[0])
+        .filter(value => !["What", "When", "Where", "Which", "How", "Does"].includes(value)),
+    ],
     8,
   )
 }
@@ -1628,6 +1739,8 @@ function describeMethodBody(content: string): string[] {
 function buildExactSymbolAnswer(symbolNames: string[], chunks: RetrievedChunk[]): string | undefined {
   const methodFacts: string[] = []
   const routeFacts: string[] = []
+  const constantFacts: string[] = []
+  const usageFacts: string[] = []
   const chunksByFile = new Map<string, RetrievedChunk[]>()
 
   for (const chunk of chunks) {
@@ -1641,10 +1754,27 @@ function buildExactSymbolAnswer(symbolNames: string[], chunks: RetrievedChunk[])
   }
 
   for (const symbolName of symbolNames) {
+    const shortSymbolName = symbolName.includes("::") ? symbolName.split("::").at(-1) ?? symbolName : symbolName
+
     for (const chunk of chunks) {
       const content = chunk.payload.content ?? ""
 
-      if (!content.includes(symbolName)) continue
+      if (!content.includes(symbolName) && !content.includes(shortSymbolName)) continue
+
+      const constantPattern = new RegExp(`\\bconst\\s+${escapeRegExp(shortSymbolName)}\\s*=\\s*([^;]+);`)
+      const constantMatch = content.match(constantPattern)
+
+      if (constantMatch?.[1]) {
+        constantFacts.push(
+          `${shortSymbolName} constant in ${chunk.payload.repoName}@${chunk.payload.branchName} ${chunk.payload.filePath}:${chunk.payload.startLine}-${chunk.payload.endLine}; expression: ${constantMatch[1].trim()}`,
+        )
+      }
+
+      if (content.includes(`Helper::requestAPI(${symbolName}`) || content.includes(`Helper::requestAPI(${shortSymbolName}`)) {
+        usageFacts.push(
+          `${symbolName} used in Helper::requestAPI call at ${chunk.payload.repoName}@${chunk.payload.branchName} ${chunk.payload.filePath}:${chunk.payload.startLine}-${chunk.payload.endLine}`,
+        )
+      }
 
       const routeDefinitions = extractRouteDefinitionsForSymbol(content, symbolName)
 
@@ -1656,18 +1786,18 @@ function buildExactSymbolAnswer(symbolNames: string[], chunks: RetrievedChunk[])
     }
 
     for (const fileChunks of chunksByFile.values()) {
-      const methodWindow = findMethodWindow(fileChunks, symbolName, 140)
+      const methodWindow = findMethodWindow(fileChunks, shortSymbolName, 140)
 
       if (!methodWindow) continue
 
       const details = describeMethodBody(methodWindow.content)
       methodFacts.push(
-        `${symbolName} in ${methodWindow.firstChunk?.repoName}@${methodWindow.firstChunk?.branchName} ${methodWindow.firstChunk?.filePath}:${methodWindow.startLine}-${methodWindow.endLine}${details.length > 0 ? `; ${details.join("; ")}` : ""}`,
+        `${shortSymbolName} in ${methodWindow.firstChunk?.repoName}@${methodWindow.firstChunk?.branchName} ${methodWindow.firstChunk?.filePath}:${methodWindow.startLine}-${methodWindow.endLine}${details.length > 0 ? `; ${details.join("; ")}` : ""}`,
       )
     }
   }
 
-  const facts = unique([...routeFacts, ...methodFacts], 24)
+  const facts = unique([...constantFacts, ...usageFacts, ...routeFacts, ...methodFacts], 24)
 
   if (facts.length === 0) return undefined
 
@@ -1691,7 +1821,8 @@ async function main() {
   const exactTermDetailChunks =
     exactRoutes.length === 0 && exactTermChunks.length > 0 ? await retrieveNeighborChunks(exactTermChunks, 70) : []
   const exactComparison = exactRoutes.length >= 2 && isExactRouteComparisonQuestion(question)
-  const exactEndpointInspection = exactRoutes.length === 1 && shouldInspectExactEndpointDetails(question)
+  const exactEndpointInspection =
+    exactRoutes.length === 1 && (shouldInspectExactEndpointDetails(question) || shouldExpandExactRouteQuestion(question))
   const exactHandlerRefs = extractExactRouteHandlerRefs(exactChunks, exactRoutes)
   const exactDetailChunks =
     exactChunks.length > 0
@@ -1699,6 +1830,7 @@ async function main() {
           exactChunks,
           exactHandlerRefs,
           exactComparison || exactEndpointInspection || shouldExpandExactRouteQuestion(question),
+          exactRoutes,
         )
       : []
   const initialChunks = exactRoutes.length > 0 ? [] : await retrieve(question, limit)
@@ -1727,6 +1859,8 @@ async function main() {
   const handlerFacts = extractHandlerFactSummary(exactDetailChunks, exactHandlerRefs, exactRouteRepoNames)
   const endpointFacts = extractEndpointHandlerFacts(exactDetailChunks, exactHandlerRefs, exactRouteRepoNames)
   const endpointRpcFuncNames = extractRpcFuncNamesFromFacts(endpointFacts)
+  const phpConstantNamesForExactRoutes = extractPhpConstantNamesForRoutes(exactChunks, exactRoutes)
+  const upstreamFacts = extractUpstreamRouteCallerFacts(exactDetailChunks, phpConstantNamesForExactRoutes)
   const downstreamFacts = extractDownstreamRpcFacts(
     exactDetailChunks,
     exactRouteRepoNames,
@@ -1741,12 +1875,18 @@ async function main() {
       ? buildExactRouteComparisonAnswer(routeDefinitions, handlerFacts, downstreamFacts, chunks)
       : undefined
   const deterministicEndpointAnswer = exactEndpointInspection
-    ? buildExactEndpointDetailAnswer(routeDefinitions, endpointFacts, genericDownstreamFacts, chunks)
+    ? buildExactEndpointDetailAnswer(routeDefinitions, endpointFacts, genericDownstreamFacts, chunks, upstreamFacts)
     : undefined
 
   if (deterministicExactAnswer || deterministicEndpointAnswer) {
     const sourceChunks = deterministicEndpointAnswer
-      ? filterEndpointSourceChunks(retrievedChunks, exactRoutes, exactHandlerRefs, endpointRpcFuncNames).map(chunk => chunk.payload)
+      ? filterEndpointSourceChunks(
+          retrievedChunks,
+          exactRoutes,
+          exactHandlerRefs,
+          endpointRpcFuncNames,
+          phpConstantNamesForExactRoutes,
+        ).map(chunk => chunk.payload)
       : chunks
 
     console.log("\nANSWER\n")

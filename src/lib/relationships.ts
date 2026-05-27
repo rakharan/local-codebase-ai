@@ -32,8 +32,44 @@ function quotedNearKeyword(content: string, keywords: string[]): string[] {
   return values
 }
 
+function inferPhpConstantRoutes(content: string): string[] {
+  const constants = new Map<string, string>()
+
+  for (const match of content.matchAll(/\bconst\s+([A-Z][A-Z0-9_]*)\s*=\s*([^;]+);/g)) {
+    const name = match[1]
+    const expression = match[2]
+
+    if (name && expression) {
+      constants.set(name, expression)
+    }
+  }
+
+  function resolveExpression(expression: string, seen = new Set<string>()): string {
+    return expression
+      .split(".")
+      .map(part => {
+        const trimmed = part.trim()
+        const stringValue = trimmed.match(/^["'`]([^"'`]*)["'`]$/)?.[1]
+
+        if (stringValue !== undefined) return stringValue
+
+        const selfReference = trimmed.match(/^self::([A-Z][A-Z0-9_]*)$/)?.[1]
+
+        if (selfReference && constants.has(selfReference) && !seen.has(selfReference)) {
+          return resolveExpression(constants.get(selfReference) ?? "", new Set([...seen, selfReference]))
+        }
+
+        return ""
+      })
+      .join("")
+  }
+
+  return [...constants.values()].map(expression => resolveExpression(expression)).filter(value => value.startsWith("/"))
+}
+
 function inferRoutes(content: string): string[] {
   const routes = [
+    ...inferPhpConstantRoutes(content),
     ...matches(content, /(?:app|router|route)\s*\.\s*(?:get|post|put|patch|delete|any)\s*\(\s*["'`]([^"'`]+)["'`]/gi),
     ...matches(content, /@(?:Get|Post|Put|Patch|Delete|All)\s*\(\s*["'`]([^"'`]+)["'`]/g),
     ...matches(content, /http\.HandleFunc\s*\(\s*["'`]([^"'`]+)["'`]/g),
@@ -51,6 +87,8 @@ function inferSymbols(content: string): string[] {
     ...matches(content, /\bstruct\s+([A-Za-z_][A-Za-z0-9_]*)\b/g),
     ...matches(content, /\btype\s+([A-Za-z_][A-Za-z0-9_]*)\s+struct\b/g),
     ...matches(content, /\b(?:public|private|protected)\s+function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g),
+    ...matches(content, /\bconst\s+([A-Z][A-Z0-9_]*)\s*=/g),
+    ...matches(content, /\b([A-Za-z_][A-Za-z0-9_]*::[A-Z][A-Z0-9_]*)\b/g),
   ])
 }
 
