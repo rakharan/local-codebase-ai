@@ -88,14 +88,31 @@ program
   .option("--repo-name <repoName>", "Only search one indexed repository")
   .option("--branch <branchName>", "Only search one indexed branch")
   .option("--service-type <serviceType>", "Only search one service type")
+  .option("--history <json>", "JSON string of previous conversation messages")
   .parse()
 
 const question = program.args.join(" ")
-const options = program.opts<{ limit: string; repoName?: string; branch?: string; serviceType?: string }>()
+const options = program.opts<{ limit: string; repoName?: string; branch?: string; serviceType?: string; history?: string }>()
 const limit = Number(options.limit)
 const serviceType = options.serviceType && serviceTypes.has(options.serviceType as ServiceType)
   ? (options.serviceType as ServiceType)
   : undefined
+
+function parseHistory(json?: string): Array<{ role: string; content: string }> {
+  if (!json) return []
+  try {
+    const parsed = JSON.parse(json)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((m: unknown) => {
+      const msg = m as Record<string, unknown>
+      return typeof msg.role === "string" && typeof msg.content === "string"
+    })
+  } catch {
+    return []
+  }
+}
+
+const history = parseHistory(options.history)
 
 function buildFilter() {
   const must = []
@@ -2679,7 +2696,16 @@ async function main() {
     .join("\n\n")
   const evidenceInventory = buildEvidenceInventory(chunks, question)
 
+  const historyLines = history.length > 0
+    ? [
+        "Previous conversation:",
+        ...history.map(h => `${h.role === "user" ? "User" : "Assistant"}: ${h.content}`),
+        "",
+      ]
+    : []
+
   const prompt = [
+    ...historyLines,
     `Question: ${question}`,
     `Answer language: ${shouldAnswerIndonesian(question) ? "Indonesian/Bahasa Indonesia" : "same language as the question"}`,
     "",
@@ -2722,7 +2748,8 @@ async function main() {
     "- If a route calls a symbol/message and another service consumes or handles the same symbol/message, explain that link as confirmed only when both sides appear in sources.",
     "- Do not add architecture, database, deployment, or cross-service sections unless the question asks for them or the context directly supports them.",
     "- For general summary questions, do not mention cross-service flow unless the question explicitly asks about it.",
-  ].join("\n")
+    history.length > 0 ? "- This question may be a follow-up. Use the previous conversation to resolve pronouns like 'it', 'that', or 'the endpoint', but still ground your answer in the retrieved context above." : undefined,
+  ].filter((line): line is string => typeof line === "string").join("\n")
 
   const answer = await chat(prompt)
 

@@ -13,12 +13,18 @@ const app = express()
 app.use(express.json())
 app.use(express.static(publicDir))
 
+type HistoryMessage = {
+  role: "user" | "assistant"
+  content: string
+}
+
 type AskBody = {
   question: string
   limit?: number
   repoName?: string
   branch?: string
   serviceType?: string
+  history?: HistoryMessage[]
 }
 
 type AskResult = {
@@ -67,6 +73,10 @@ app.post("/api/ask", async (request, response) => {
 
   if (body.serviceType) {
     args.push("--service-type", body.serviceType)
+  }
+
+  if (body.history && body.history.length > 0) {
+    args.push("--history", JSON.stringify(body.history))
   }
 
   try {

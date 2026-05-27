@@ -4,6 +4,17 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Local Codebase AI</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-typescript.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-php.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-powershell.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -14,14 +25,114 @@
     padding: 0;
     line-height: 1.6;
   }
-  .container {
+  .app {
+    display: flex;
+    min-height: 100vh;
+  }
+  /* Sidebar */
+  .sidebar {
+    width: 260px;
+    background: #161b22;
+    border-right: 1px solid #30363d;
+    padding: 20px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    flex-shrink: 0;
+    position: fixed;
+    height: 100vh;
+    overflow-y: auto;
+  }
+  .sidebar-logo {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #f0f6fc;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .sidebar-logo svg { width: 20px; height: 20px; }
+  .sidebar-section-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: #8b949e;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+  .example-btn {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #c9d1d9;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.15s;
+    line-height: 1.4;
+  }
+  .example-btn:hover {
+    background: #30363d;
+    border-color: #58a6ff;
+  }
+  .recent-item {
+    padding: 8px 10px;
+    margin-bottom: 4px;
+    background: transparent;
+    border-radius: 6px;
+    color: #8b949e;
+    font-size: 0.8rem;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: all 0.15s;
+  }
+  .recent-item:hover {
+    background: #21262d;
+    color: #c9d1d9;
+  }
+  .recent-item-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    margin-right: 8px;
+  }
+  .recent-item-delete {
+    opacity: 0;
+    color: #f85149;
+    font-size: 0.75rem;
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 3px;
+  }
+  .recent-item:hover .recent-item-delete { opacity: 1; }
+  .recent-item-delete:hover { background: #3d0f0f; }
+  .sidebar-clear {
+    font-size: 0.75rem;
+    color: #8b949e;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 4px 0;
+    text-align: left;
+  }
+  .sidebar-clear:hover { color: #f85149; }
+  /* Main content */
+  .main {
+    margin-left: 260px;
+    flex: 1;
+    padding: 24px 32px;
     max-width: 960px;
-    margin: 0 auto;
-    padding: 24px 16px;
   }
   h1 {
     font-size: 1.5rem;
-    margin: 0 0 8px;
+    margin: 0 0 4px;
     color: #f0f6fc;
   }
   .subtitle {
@@ -32,7 +143,7 @@
   .search-box {
     display: flex;
     gap: 8px;
-    margin-bottom: 20px;
+    margin-bottom: 12px;
   }
   .search-box input {
     flex: 1;
@@ -43,12 +154,14 @@
     background: #161b22;
     color: #c9d1d9;
     outline: none;
+    transition: border-color 0.15s;
   }
   .search-box input:focus {
     border-color: #58a6ff;
+    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
   }
   .search-box button {
-    padding: 12px 20px;
+    padding: 12px 24px;
     font-size: 1rem;
     border: none;
     border-radius: 8px;
@@ -56,6 +169,7 @@
     color: #fff;
     cursor: pointer;
     font-weight: 600;
+    transition: background 0.15s;
   }
   .search-box button:hover { background: #2ea043; }
   .search-box button:disabled { background: #484f58; cursor: not-allowed; }
@@ -74,7 +188,9 @@
     color: #c9d1d9;
     outline: none;
     min-width: 140px;
+    transition: border-color 0.15s;
   }
+  .filters input:focus { border-color: #58a6ff; }
   .loading {
     display: none;
     align-items: center;
@@ -82,6 +198,10 @@
     color: #8b949e;
     font-size: 0.875rem;
     margin-bottom: 16px;
+    padding: 12px 16px;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
   }
   .loading.active { display: flex; }
   .spinner {
@@ -111,25 +231,117 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    transition: background 0.15s;
   }
   .result-header:hover { background: #30363d; }
+  .result-header-chevron {
+    transition: transform 0.2s;
+    font-size: 0.75rem;
+  }
+  .result-header.collapsed .result-header-chevron {
+    transform: rotate(-90deg);
+  }
   .result-body {
     padding: 16px;
-    white-space: pre-wrap;
     font-size: 0.875rem;
     color: #c9d1d9;
-    max-height: 600px;
-    overflow: auto;
+    max-height: none;
+    overflow: visible;
   }
   .result-body.collapsed { display: none; }
+  /* Markdown styling */
+  .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 {
+    color: #f0f6fc;
+    margin-top: 20px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid #30363d;
+    padding-bottom: 6px;
+  }
+  .markdown-body h1 { font-size: 1.25rem; }
+  .markdown-body h2 { font-size: 1.1rem; }
+  .markdown-body h3 { font-size: 1rem; }
+  .markdown-body p { margin: 10px 0; }
+  .markdown-body ul, .markdown-body ol {
+    margin: 10px 0;
+    padding-left: 24px;
+  }
+  .markdown-body li { margin: 4px 0; }
+  .markdown-body code {
+    background: #2d333b;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.85em;
+    color: #e6edf3;
+  }
+  .markdown-body pre {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 14px;
+    overflow-x: auto;
+    margin: 12px 0;
+  }
+  .markdown-body pre code {
+    background: transparent;
+    padding: 0;
+    font-size: 0.8rem;
+    color: inherit;
+  }
+  .markdown-body blockquote {
+    border-left: 3px solid #58a6ff;
+    margin: 10px 0;
+    padding: 8px 16px;
+    background: #0d1117;
+    color: #8b949e;
+  }
+  .markdown-body table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 12px 0;
+    font-size: 0.8rem;
+  }
+  .markdown-body th, .markdown-body td {
+    border: 1px solid #30363d;
+    padding: 8px 12px;
+    text-align: left;
+  }
+  .markdown-body th {
+    background: #21262d;
+    font-weight: 600;
+  }
+  .markdown-body tr:nth-child(even) { background: #0d1117; }
+  .markdown-body hr {
+    border: none;
+    border-top: 1px solid #30363d;
+    margin: 16px 0;
+  }
+  .markdown-body a {
+    color: #58a6ff;
+    text-decoration: none;
+  }
+  .markdown-body a:hover { text-decoration: underline; }
   .source-item {
-    padding: 6px 0;
+    padding: 8px 0;
     border-bottom: 1px solid #21262d;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     font-size: 0.8rem;
     color: #8b949e;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
   }
   .source-item:last-child { border-bottom: none; }
+  .source-item-index {
+    color: #484f58;
+    min-width: 24px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+  .source-item-content {
+    flex: 1;
+    word-break: break-word;
+  }
   .error {
     background: #3d0f0f;
     border: 1px solid #ff7b72;
@@ -144,34 +356,165 @@
     color: #8b949e;
     margin-top: 12px;
   }
+  .empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: #8b949e;
+  }
+  .empty-state-icon {
+    font-size: 3rem;
+    margin-bottom: 16px;
+  }
+  .empty-state-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #c9d1d9;
+    margin-bottom: 8px;
+  }
+  /* Chat thread */
+  .chat-thread {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .chat-message {
+    display: flex;
+    gap: 12px;
+    max-width: 100%;
+  }
+  .chat-message.user {
+    flex-direction: row-reverse;
+  }
+  .chat-avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 600;
+    flex-shrink: 0;
+    margin-top: 4px;
+  }
+  .chat-message.user .chat-avatar {
+    background: #238636;
+    color: #fff;
+  }
+  .chat-message.assistant .chat-avatar {
+    background: #58a6ff;
+    color: #0d1117;
+  }
+  .chat-bubble {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 12px 16px;
+    max-width: calc(100% - 50px);
+    overflow-wrap: break-word;
+  }
+  .chat-message.user .chat-bubble {
+    background: #238636;
+    border-color: #2ea043;
+    color: #fff;
+  }
+  .chat-message.user .chat-bubble .markdown-body {
+    color: #fff;
+  }
+  .chat-message.user .chat-bubble .markdown-body code {
+    background: rgba(255,255,255,0.15);
+    color: #fff;
+  }
+  .new-chat-btn {
+    padding: 8px 12px;
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    color: #c9d1d9;
+    font-size: 0.8rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.15s;
+    margin-top: 4px;
+  }
+  .new-chat-btn:hover {
+    background: #30363d;
+    border-color: #58a6ff;
+  }
+  @media (max-width: 768px) {
+    .sidebar { display: none; }
+    .main { margin-left: 0; padding: 16px; }
+  }
 </style>
 </head>
 <body>
-<div class="container">
-  <h1>Local Codebase AI</h1>
-  <div class="subtitle">Ask questions across indexed repositories</div>
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      Codebase AI
+    </div>
 
-  <div class="search-box">
-    <input id="question" type="text" placeholder="e.g. explain flow request account demo from ims-tf" autocomplete="off" />
-    <button id="askBtn" onclick="ask()">Ask</button>
-  </div>
+    <div>
+      <div class="sidebar-section-title">Try these</div>
+      <button class="example-btn" onclick="setQuestion('jelasin flow request account demo dari ims-tf')">Flow: request account demo</button>
+      <button class="example-btn" onclick="setQuestion('jelasin SubmitDepositDemo')">Symbol: SubmitDepositDemo</button>
+      <button class="example-btn" onclick="setQuestion('validasi dan return dari endpoint /mrg/api/v1/deposit/demo/')">Endpoint: /deposit/demo/</button>
+      <button class="example-btn" onclick="setQuestion('what commits relate to graph flow')">Commits: graph flow</button>
+    </div>
 
-  <div class="filters">
-    <input id="repoName" type="text" placeholder="repo-name (optional)" />
-    <input id="branch" type="text" placeholder="branch (optional)" />
-    <input id="serviceType" type="text" placeholder="service-type (optional)" />
-  </div>
+    <div>
+      <div class="sidebar-section-title">Current Chat</div>
+      <button class="new-chat-btn" onclick="newChat()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        New Chat
+      </button>
+    </div>
 
-  <div id="loading" class="loading">
-    <div class="spinner"></div>
-    <span>Thinking... this may take up to 3 minutes.</span>
-  </div>
+    <div>
+      <div class="sidebar-section-title">Recent Searches</div>
+      <div id="recentSearches"></div>
+      <button class="sidebar-clear" onclick="clearRecent()" id="clearRecentBtn" style="display:none;">Clear history</button>
+    </div>
+  </aside>
 
-  <div id="output"></div>
+  <!-- Main content -->
+  <main class="main">
+    <h1>Local Codebase AI</h1>
+    <div class="subtitle">Ask questions across indexed repositories</div>
 
-  <div class="hint">
-    Tip: Use exact endpoint paths like <code>/mrg/api/v1/deposit/demo/</code> for precise answers.
-  </div>
+    <div class="search-box">
+      <input id="question" type="text" placeholder="e.g. explain flow request account demo from ims-tf" autocomplete="off" />
+      <button id="askBtn" onclick="ask()">Ask</button>
+    </div>
+
+    <div class="filters">
+      <input id="repoName" type="text" placeholder="repo-name (optional)" />
+      <input id="branch" type="text" placeholder="branch (optional)" />
+      <input id="serviceType" type="text" placeholder="service-type (optional)" />
+    </div>
+
+    <div id="loading" class="loading">
+      <div class="spinner"></div>
+      <span>Thinking... this may take up to 3 minutes.</span>
+    </div>
+
+    <div id="output">
+      <div class="empty-state">
+        <div class="empty-state-icon">&#128270;</div>
+        <div class="empty-state-title">Ask anything about your codebase</div>
+        <div>Search across code, documentation, commits, and comments.</div>
+      </div>
+    </div>
+
+    <div class="hint">
+      Tip: Use exact endpoint paths like <code>/mrg/api/v1/deposit/demo/</code> for precise answers. Ask in English or Bahasa Indonesia.
+    </div>
+  </main>
 </div>
 
 <script>
@@ -179,14 +522,192 @@ const questionInput = document.getElementById('question');
 const askBtn = document.getElementById('askBtn');
 const loading = document.getElementById('loading');
 const output = document.getElementById('output');
+const recentContainer = document.getElementById('recentSearches');
+const clearRecentBtn = document.getElementById('clearRecentBtn');
+
+const STORAGE_KEY = 'lca_recent_searches';
+const MAX_RECENT = 10;
+
+// In-memory conversation history (resets on page refresh)
+let messages = [];
+
+// Configure marked
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+  headerIds: false,
+  mangle: false,
+});
 
 questionInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') ask();
 });
 
+function setQuestion(q) {
+  questionInput.value = q;
+  questionInput.focus();
+  ask();
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
 function toggleSection(id) {
   const body = document.getElementById(id);
+  const header = document.getElementById(id + '-header');
   body.classList.toggle('collapsed');
+  header.classList.toggle('collapsed');
+}
+
+function saveRecent(question) {
+  if (!question) return;
+  let recents = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  recents = recents.filter(r => r !== question);
+  recents.unshift(question);
+  if (recents.length > MAX_RECENT) recents = recents.slice(0, MAX_RECENT);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(recents));
+  renderRecent();
+}
+
+function deleteRecent(question, event) {
+  event.stopPropagation();
+  let recents = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  recents = recents.filter(r => r !== question);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(recents));
+  renderRecent();
+}
+
+function clearRecent() {
+  localStorage.removeItem(STORAGE_KEY);
+  renderRecent();
+}
+
+function renderRecent() {
+  const recents = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  if (recents.length === 0) {
+    recentContainer.innerHTML = '<div style="color:#484f58; font-size:0.8rem; padding:8px 0;">No recent searches</div>';
+    clearRecentBtn.style.display = 'none';
+    return;
+  }
+  recentContainer.innerHTML = recents.map(q => `
+    <div class="recent-item" onclick="setQuestion('${escapeHtml(q).replace(/'/g, "\\'")}')">
+      <span class="recent-item-text">${escapeHtml(q)}</span>
+      <span class="recent-item-delete" onclick="deleteRecent('${escapeHtml(q).replace(/'/g, "\\'")}', event)">&#10005;</span>
+    </div>
+  `).join('');
+  clearRecentBtn.style.display = 'block';
+}
+
+function renderAnswer(text) {
+  // Convert markdown to HTML
+  const html = marked.parse(text);
+  const wrapper = document.createElement('div');
+  wrapper.className = 'markdown-body';
+  wrapper.innerHTML = html;
+
+  // Add copy buttons to code blocks
+  wrapper.querySelectorAll('pre code').forEach((block) => {
+    const pre = block.parentElement;
+    const lang = Array.from(block.classList).find(c => c.startsWith('language-'))?.replace('language-', '') || '';
+    pre.style.position = 'relative';
+
+    const label = document.createElement('div');
+    label.style.cssText = 'position:absolute; top:0; right:0; padding:4px 10px; font-size:0.7rem; color:#8b949e; background:#21262d; border-bottom-left-radius:6px; text-transform:uppercase;';
+    label.textContent = lang;
+    pre.appendChild(label);
+  });
+
+  return wrapper;
+}
+
+function makeCollapsible(title, contentHtml, startCollapsed = false) {
+  const id = 'section-' + Math.random().toString(36).substr(2, 9);
+  return `
+    <div class="result">
+      <div class="result-header ${startCollapsed ? 'collapsed' : ''}" id="${id}-header" onclick="toggleSection('${id}')">
+        <span>${escapeHtml(title)}</span>
+        <span class="result-header-chevron">&#9662;</span>
+      </div>
+      <div class="result-body ${startCollapsed ? 'collapsed' : ''}" id="${id}">
+        ${contentHtml}
+      </div>
+    </div>
+  `;
+}
+
+function newChat() {
+  messages = [];
+  output.innerHTML = `
+    <div class="empty-state">
+      <div class="empty-state-icon">&#128270;</div>
+      <div class="empty-state-title">Ask anything about your codebase</div>
+      <div>Search across code, documentation, commits, and comments.</div>
+    </div>
+  `;
+  questionInput.value = '';
+  questionInput.focus();
+}
+
+function renderChatThread() {
+  if (messages.length === 0) {
+    output.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state-icon">&#128270;</div>
+        <div class="empty-state-title">Ask anything about your codebase</div>
+        <div>Search across code, documentation, commits, and comments.</div>
+      </div>
+    `;
+    return;
+  }
+
+  let html = '<div class="chat-thread">';
+
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      html += `
+        <div class="chat-message user">
+          <div class="chat-avatar">U</div>
+          <div class="chat-bubble">${escapeHtml(msg.content)}</div>
+        </div>
+      `;
+    } else {
+      const answerWrapper = renderAnswer(msg.content);
+      let assistantHtml = answerWrapper.outerHTML;
+
+      // Add sources if present
+      if (msg.sources && msg.sources.length > 0) {
+        const sourcesHtml = msg.sources.map((s, i) => `
+          <div class="source-item">
+            <span class="source-item-index">${i + 1}.</span>
+            <span class="source-item-content">${escapeHtml(s)}</span>
+          </div>
+        `).join('');
+        assistantHtml += makeCollapsible(`Sources (${msg.sources.length})`, sourcesHtml, true);
+      }
+
+      html += `
+        <div class="chat-message assistant">
+          <div class="chat-avatar">AI</div>
+          <div class="chat-bubble">${assistantHtml}</div>
+        </div>
+      `;
+    }
+  }
+
+  html += '</div>';
+  output.innerHTML = html;
+
+  // Trigger syntax highlighting
+  if (window.Prism) {
+    Prism.highlightAll();
+  }
+
+  // Scroll to bottom
+  output.scrollTop = output.scrollHeight;
 }
 
 async function ask() {
@@ -197,65 +718,63 @@ async function ask() {
   const branch = document.getElementById('branch').value.trim() || undefined;
   const serviceType = document.getElementById('serviceType').value.trim() || undefined;
 
+  // Add user message
+  messages.push({ role: 'user', content: question });
+  renderChatThread();
+
   askBtn.disabled = true;
   loading.classList.add('active');
-  output.innerHTML = '';
+  questionInput.value = '';
+
+  // Build history for API (last 10 messages, excluding the current one we just added)
+  const historyForApi = messages.slice(0, -1).slice(-10).map(m => ({
+    role: m.role,
+    content: m.content,
+  }));
 
   try {
     const res = await fetch('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, repoName, branch, serviceType }),
+      body: JSON.stringify({ question, repoName, branch, serviceType, history: historyForApi }),
     });
 
     const data = await res.json();
 
     if (!res.ok) {
-      output.innerHTML = `<div class="error">Error: ${escapeHtml(data.error || 'Unknown error')}</div>`;
+      messages.push({
+        role: 'assistant',
+        content: `Error: ${data.error || 'Unknown error'}`,
+        sources: [],
+      });
+      renderChatThread();
       return;
     }
 
-    const answerId = 'answer-' + Date.now();
-    const sourcesId = 'sources-' + Date.now();
+    saveRecent(question);
 
-    let html = '';
-
-    html += `<div class="result">
-      <div class="result-header" onclick="toggleSection('${answerId}')">
-        <span>Answer</span>
-        <span>${data.sources?.length ?? 0} sources</span>
-      </div>
-      <div id="${answerId}" class="result-body">${escapeHtml(data.answer)}</div>
-    </div>`;
-
-    if (data.sources && data.sources.length > 0) {
-      const sourcesHtml = data.sources.map(s => `<div class="source-item">${escapeHtml(s)}</div>`).join('');
-      html += `<div class="result">
-        <div class="result-header" onclick="toggleSection('${sourcesId}')">
-          <span>Sources</span>
-          <span>Toggle</span>
-        </div>
-        <div id="${sourcesId}" class="result-body collapsed">${sourcesHtml}</div>
-      </div>`;
-    }
-
-    output.innerHTML = html;
+    // Add assistant message
+    messages.push({
+      role: 'assistant',
+      content: data.answer,
+      sources: data.sources || [],
+    });
+    renderChatThread();
   } catch (err) {
-    output.innerHTML = `<div class="error">Network error: ${escapeHtml(err.message)}</div>`;
+    messages.push({
+      role: 'assistant',
+      content: `Network error: ${err.message}`,
+      sources: [],
+    });
+    renderChatThread();
   } finally {
     askBtn.disabled = false;
     loading.classList.remove('active');
   }
 }
 
-function escapeHtml(text) {
-  if (!text) return '';
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
+// Initialize
+renderRecent();
 </script>
 </body>
 </html>
