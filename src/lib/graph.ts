@@ -298,6 +298,23 @@ export function extractRelationshipEdges(
       }))
     }
 
+    for (const match of file.content.matchAll(/\bpostParams\(\s*["'`]([^"'`]+)["'`]/g)) {
+      if (!match[1] || match.index === undefined) continue
+
+      const caller = findPhpFunctionBefore(file.content, match.index) ?? findJsMethodBefore(file.content, match.index)
+      const startLine = caller?.line ?? lineNumberAt(file.content, match.index)
+
+      edges.push(createEdge({
+        ...base,
+        type: "CALLS_EXTERNAL_FUNC",
+        startLine,
+        endLine: lineNumberAt(file.content, match.index),
+        fromSymbol: caller?.name,
+        externalFunc: match[1],
+        evidence: match[0],
+      }))
+    }
+
     for (const match of file.content.matchAll(/\b([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\s*\(/g)) {
       if (!match[1] || !match[2] || match.index === undefined) continue
 

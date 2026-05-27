@@ -61,6 +61,23 @@ type GraphFlowAnswer = {
   sources: RelationshipEdge[]
 }
 
+type GraphPathDetails = {
+  entry: RelationshipEdge
+  endpointHandlers: RelationshipEdge[]
+  handlerDefinitionEdges: RelationshipEdge[]
+  handlerFacts: string[]
+  rpcCalls: RelationshipEdge[]
+  externalCalls: RelationshipEdge[]
+  downstreamExternalSymbols: RelationshipEdge[]
+  downstreamExternalFacts: string[]
+  downstreamSymbolCalls: RelationshipEdge[]
+  downstreamModelDefinitions: RelationshipEdge[]
+  downstreamModelFacts: string[]
+  downstreamSymbols: RelationshipEdge[]
+  tableEdges: RelationshipEdge[]
+  sources: RelationshipEdge[]
+}
+
 const serviceTypes = new Set<ServiceType>(["api", "worker", "cron", "library", "unknown"])
 
 const program = new Command()
@@ -149,6 +166,8 @@ function localizeAnswer(answer: string, question: string): string {
     [/Exact symbol evidence found for:/g, "Evidence symbol persis ditemukan untuk:"],
     [/Graph flow found from relationship index:/g, "Flow graph ditemukan dari relationship index:"],
     [/Confirmed path:/g, "Path yang terkonfirmasi:"],
+    [/Matching paths:/g, "Path yang cocok:"],
+    [/Entry:/g, "Entry:"],
     [/Endpoint handlers:/g, "Handler endpoint:"],
     [/Handler behavior:/g, "Behavior handler:"],
     [/RPC calls from handlers:/g, "Call RPC dari handler:"],
@@ -433,9 +452,68 @@ function scoreGraphCallEdge(edge: RelationshipEdge, tokens: string[], mentionedR
   if (mentionedRepos.includes(edge.repoName)) score += 30
   if (edge.fromSymbol && tokens.some(token => edge.fromSymbol?.toLowerCase().includes(token))) score += 8
   if (lowerQuestion.includes("mrg") && edge.toRoute?.toLowerCase().includes("/mrg/")) score += 6
+  if (lowerQuestion.includes("askap") && edge.filePath.toLowerCase().includes("askap")) score += 6
+  if (lowerQuestion.includes("mmb") && edge.filePath.toLowerCase().includes("askap")) score += 6
   if (edge.viaConstant) score += 3
+  if (edge.type === "CALLS_EXTERNAL_FUNC" && edge.externalFunc) score += 8
 
   return score
+}
+
+function graphTextHasToken(text: string, token: string): boolean {
+  if (token === "request") {
+    return text.includes("request") || text.includes("reqaccount") || text.includes("reqdemo") || /\breq\b/.test(text)
+  }
+
+  return text.includes(token)
+}
+
+function edgeTextForTokenMatch(edge: RelationshipEdge): string {
+  return [
+    edge.repoName,
+    edge.serviceType,
+    edge.branchName,
+    edge.filePath,
+    edge.fromSymbol,
+    edge.toRoute,
+    edge.alias,
+    edge.handler,
+    edge.viaConstant,
+    edge.rpcFunc,
+    edge.externalFunc,
+    edge.receiverSymbol,
+    edge.calleeSymbol,
+    edge.symbol,
+    edge.table,
+  ].filter(Boolean).join("\n").toLowerCase()
+}
+
+function graphCandidateMatchesTokens(edge: RelationshipEdge, tokens: string[]): boolean {
+  const text = edgeTextForTokenMatch(edge)
+
+  return tokens.every(token => graphTextHasToken(text, token))
+}
+
+function graphCandidateKey(edge: RelationshipEdge): string {
+  const domain = edge.filePath.split(/[\\/]/).find(part => ["mrg", "askap", "mmb"].includes(part.toLowerCase())) ?? edge.filePath
+
+  return [edge.type, domain, edge.toRoute ?? edge.externalFunc ?? edge.fromSymbol ?? edge.filePath].join(":")
+}
+
+function selectGraphFlowCandidates(candidates: Array<{ edge: RelationshipEdge; score: number }>): RelationshipEdge[] {
+  const selected = new Map<string, RelationshipEdge>()
+
+  for (const candidate of candidates) {
+    const key = graphCandidateKey(candidate.edge)
+
+    if (!selected.has(key)) {
+      selected.set(key, candidate.edge)
+    }
+
+    if (selected.size >= 5) break
+  }
+
+  return [...selected.values()]
 }
 
 function findRelatedGraphTableEdges(symbolEdges: RelationshipEdge[], graph: RelationshipEdge[]): RelationshipEdge[] {
@@ -561,56 +639,36 @@ function findCallsFromSymbols(
     .slice(0, 16)
 }
 
-async function buildGraphFlowAnswer(question: string, graph: RelationshipEdge[]): Promise<GraphFlowAnswer | undefined> {
-  if (!questionAsksAboutServicesOrFlow(question) || graph.length === 0) return undefined
-
-  const tokens = extractConceptTokens(question)
-
-  if (tokens.length < 2) return undefined
-
-  const scopedGraph = graph.filter(graphScopeAllows)
-  const mentionedRepos = mentionedGraphRepos(question, scopedGraph)
-  const candidateCalls = scopedGraph
-    .filter(edge => edge.type === "CALLS_HTTP_ENDPOINT")
-    .map(edge => ({
-      edge,
-      score: scoreGraphCallEdge(edge, tokens, mentionedRepos, question),
-    }))
-    .filter(candidate => candidate.score >= 35)
-    .sort((left, right) => right.score - left.score)
-
-  const selectedCall = candidateCalls[0]?.edge
-
-  if (!selectedCall?.toRoute) return undefined
-
-  const endpointHandlers = scopedGraph
-    .filter(edge => edge.type === "HANDLES_HTTP_ENDPOINT" && edge.toRoute && routeMatches(edge.toRoute, selectedCall.toRoute ?? ""))
-    .sort((left, right) => {
-      const leftScore = left.repoName === selectedCall.repoName ? -1 : 0
-      const rightScore = right.repoName === selectedCall.repoName ? -1 : 0
-
-      return rightScore - leftScore
-    })
-    .slice(0, 6)
+async function resolveGraphPath(entry: RelationshipEdge, scopedGraph: RelationshipEdge[]): Promise<GraphPathDetails> {
+  const endpointHandlers = entry.type === "CALLS_HTTP_ENDPOINT" && entry.toRoute
+    ? scopedGraph
+        .filter(edge => edge.type === "HANDLES_HTTP_ENDPOINT" && edge.toRoute && routeMatches(edge.toRoute, entry.toRoute ?? ""))
+        .slice(0, 6)
+    : []
   const handlerNames = unique(endpointHandlers.flatMap(edge => [handlerMethodName(edge.handler) ?? "", edge.symbol ?? ""]), 12)
   const handlerDefinitionEdges = endpointHandlers.flatMap(edge => findGraphHandlerDefinitions(edge, scopedGraph)).slice(0, 8)
   const handlerDefinitionNames = unique(handlerDefinitionEdges.map(edge => edge.symbol ?? ""), 12)
   const handlerFacts = await describeGraphSymbolEdges(handlerDefinitionEdges)
+  const handlerNameSet = [...handlerNames, ...handlerDefinitionNames]
   const rpcCalls = scopedGraph
     .filter(edge => {
       if (edge.type !== "CALLS_RPC_FUNC" || !edge.rpcFunc) return false
-      if (handlerNames.length === 0 && handlerDefinitionNames.length === 0) return false
+      if (handlerNameSet.length === 0) return false
 
-      return Boolean(edge.fromSymbol && [...handlerNames, ...handlerDefinitionNames].includes(edge.fromSymbol))
+      return Boolean(edge.fromSymbol && handlerNameSet.includes(edge.fromSymbol))
     })
     .slice(0, 12)
-  const externalCalls = scopedGraph
+  const externalCallsFromHandlers = scopedGraph
     .filter(edge => {
       if (edge.type !== "CALLS_EXTERNAL_FUNC" || !edge.externalFunc) return false
+      if (handlerNameSet.length === 0) return false
 
-      return Boolean(edge.fromSymbol && [...handlerNames, ...handlerDefinitionNames].includes(edge.fromSymbol))
+      return Boolean(edge.fromSymbol && handlerNameSet.includes(edge.fromSymbol))
     })
     .slice(0, 12)
+  const externalCalls = entry.type === "CALLS_EXTERNAL_FUNC"
+    ? [entry, ...externalCallsFromHandlers.filter(edge => edge.id !== entry.id)]
+    : externalCallsFromHandlers
   const externalFuncNames = unique(externalCalls.map(edge => edge.externalFunc ?? ""), 12)
   const downstreamExternalSymbols = externalFuncNames.flatMap(funcName => {
     return findGraphSymbolDefinitions(funcName, scopedGraph, endpointHandlers.map(edge => edge.repoName))
@@ -633,73 +691,146 @@ async function buildGraphFlowAnswer(question: string, graph: RelationshipEdge[])
     .filter(edge => !endpointHandlers.some(handlerEdge => handlerEdge.repoName === edge.repoName && handlerEdge.branchName === edge.branchName))
     .slice(0, 12)
   const tableEdges = findRelatedGraphTableEdges([...downstreamSymbols, ...downstreamExternalSymbols, ...downstreamModelDefinitions], scopedGraph)
+  const sources = [...new Map([
+    entry,
+    ...endpointHandlers,
+    ...handlerDefinitionEdges,
+    ...rpcCalls,
+    ...externalCalls,
+    ...downstreamExternalSymbols,
+    ...downstreamSymbolCalls,
+    ...downstreamModelDefinitions,
+    ...downstreamSymbols,
+    ...tableEdges,
+  ].map(edge => [edge.id, edge])).values()]
+
+  return {
+    entry,
+    endpointHandlers,
+    handlerDefinitionEdges,
+    handlerFacts,
+    rpcCalls,
+    externalCalls,
+    downstreamExternalSymbols,
+    downstreamExternalFacts,
+    downstreamSymbolCalls,
+    downstreamModelDefinitions,
+    downstreamModelFacts,
+    downstreamSymbols,
+    tableEdges,
+    sources,
+  }
+}
+
+function formatGraphPathDetails(pathDetails: GraphPathDetails, index: number): string {
+  const entry = pathDetails.entry
+
+  return [
+    `Path ${index + 1}:`,
+    "Entry:",
+    entry.type === "CALLS_HTTP_ENDPOINT"
+      ? `- ${edgeSource(entry)} calls ${entry.toRoute}${entry.viaConstant ? ` via ${entry.viaConstant}` : ""}${entry.fromSymbol ? ` from ${entry.fromSymbol}` : ""}`
+      : `- ${edgeSource(entry)} calls external/API func ${entry.externalFunc}${entry.fromSymbol ? ` from ${entry.fromSymbol}` : ""}`,
+    pathDetails.endpointHandlers.length > 0
+      ? pathDetails.endpointHandlers.map(edge => `- ${edgeSource(edge)} handles ${edge.toRoute}; method: ${edge.httpMethod || "unknown"}; alias: ${edge.alias || "unknown"}; handler: ${edge.handler || "unknown"}`).join("\n")
+      : undefined,
+    "",
+    "Endpoint handlers:",
+    pathDetails.endpointHandlers.length > 0
+      ? pathDetails.endpointHandlers.map(edge => `- ${edge.handler || edge.symbol || "unknown"} in ${edgeSource(edge)}`).join("\n")
+      : "- No endpoint handler was needed/found for this path.",
+    "",
+    "Handler behavior:",
+    pathDetails.handlerFacts.length > 0
+      ? pathDetails.handlerFacts.map(fact => `- ${fact}`).join("\n")
+      : "- No controller method body was resolved for this path.",
+    "",
+    "RPC calls from handlers:",
+    pathDetails.rpcCalls.length > 0
+      ? pathDetails.rpcCalls.map(edge => `- ${edge.fromSymbol || "unknown"} calls RPC func ${edge.rpcFunc} in ${edgeSource(edge)}`).join("\n")
+      : "- No RPC call was extracted from this path.",
+    "",
+    "External calls from handlers:",
+    pathDetails.externalCalls.length > 0
+      ? pathDetails.externalCalls.map(edge => `- ${edge.fromSymbol || "unknown"} calls ${edge.externalFunc} in ${edgeSource(edge)}`).join("\n")
+      : "- No external API/client call was extracted from this path.",
+    "",
+    "Downstream handlers for external/API funcs:",
+    pathDetails.downstreamExternalSymbols.length > 0
+      ? pathDetails.downstreamExternalSymbols.map(edge => `- ${edge.symbol} in ${edgeSource(edge)}`).join("\n")
+      : "- No downstream function with the same external/API func name was found.",
+    "",
+    "Downstream handler behavior:",
+    pathDetails.downstreamExternalFacts.length > 0
+      ? pathDetails.downstreamExternalFacts.map(fact => `- ${fact}`).join("\n")
+      : "- No downstream handler body was resolved.",
+    "",
+    "Model/symbol calls inside downstream handlers:",
+    pathDetails.downstreamSymbolCalls.length > 0
+      ? pathDetails.downstreamSymbolCalls.map(edge => `- ${edge.fromSymbol || "unknown"} calls ${edge.receiverSymbol}.${edge.calleeSymbol} in ${edgeSource(edge)}`).join("\n")
+      : "- No model/symbol calls were extracted inside downstream handlers.",
+    "",
+    "Model/symbol behavior:",
+    pathDetails.downstreamModelFacts.length > 0
+      ? pathDetails.downstreamModelFacts.map(fact => `- ${fact}`).join("\n")
+      : "- No called model/symbol body was resolved.",
+    "",
+    "Downstream RPC symbols:",
+    pathDetails.downstreamSymbols.length > 0
+      ? pathDetails.downstreamSymbols.map(edge => `- ${edge.symbol} in ${edgeSource(edge)}`).join("\n")
+      : "- No downstream repo symbol with the same RPC func name was found.",
+    "",
+    "Database/table touches near downstream symbols:",
+    pathDetails.tableEdges.length > 0
+      ? pathDetails.tableEdges.map(edge => `- ${edge.table} in ${edgeSource(edge)}`).join("\n")
+      : "- No database/table touch was extracted near downstream symbols.",
+  ].filter(line => line !== undefined).join("\n")
+}
+
+async function buildGraphFlowAnswer(question: string, graph: RelationshipEdge[]): Promise<GraphFlowAnswer | undefined> {
+  if (!questionAsksAboutServicesOrFlow(question) || graph.length === 0) return undefined
+
+  const tokens = extractConceptTokens(question)
+
+  if (tokens.length < 2) return undefined
+
+  const scopedGraph = graph.filter(graphScopeAllows)
+  const mentionedRepos = mentionedGraphRepos(question, scopedGraph)
+  const candidateCalls = scopedGraph
+    .filter(edge => edge.type === "CALLS_HTTP_ENDPOINT" || edge.type === "CALLS_EXTERNAL_FUNC")
+    .filter(edge => graphCandidateMatchesTokens(edge, tokens))
+    .map(edge => ({
+      edge,
+      score: scoreGraphCallEdge(edge, tokens, mentionedRepos, question),
+    }))
+    .filter(candidate => candidate.score >= 35)
+    .sort((left, right) => right.score - left.score)
+  const selectedCalls = selectGraphFlowCandidates(candidateCalls)
+
+  if (selectedCalls.length === 0) return undefined
+
+  const pathDetails = []
+
+  for (const selectedCall of selectedCalls) {
+    pathDetails.push(await resolveGraphPath(selectedCall, scopedGraph))
+  }
+
   const reposInvolved = unique(
-    [selectedCall, ...endpointHandlers, ...rpcCalls, ...externalCalls, ...downstreamExternalSymbols, ...downstreamSymbolCalls, ...downstreamModelDefinitions, ...downstreamSymbols, ...tableEdges].map(edge => {
+    pathDetails.flatMap(details => details.sources).map(edge => {
       return `${edge.repoName}@${edge.branchName || "unknown"} [${edge.serviceType}]`
     }),
     16,
   )
-  const sources = [...new Map([selectedCall, ...endpointHandlers, ...handlerDefinitionEdges, ...rpcCalls, ...externalCalls, ...downstreamExternalSymbols, ...downstreamSymbolCalls, ...downstreamModelDefinitions, ...downstreamSymbols, ...tableEdges].map(edge => [edge.id, edge])).values()]
+  const sources = [...new Map(pathDetails.flatMap(details => details.sources).map(edge => [edge.id, edge])).values()]
 
   const answer = [
     "Graph flow found from relationship index:",
     "",
-    "Confirmed path:",
-    `- ${edgeSource(selectedCall)} calls ${selectedCall.toRoute}${selectedCall.viaConstant ? ` via ${selectedCall.viaConstant}` : ""}${selectedCall.fromSymbol ? ` from ${selectedCall.fromSymbol}` : ""}`,
-    endpointHandlers.length > 0 ? endpointHandlers.map(edge => `- ${edgeSource(edge)} handles ${edge.toRoute}; method: ${edge.httpMethod || "unknown"}; alias: ${edge.alias || "unknown"}; handler: ${edge.handler || "unknown"}`).join("\n") : "- No matching endpoint handler was found in the relationship index.",
-    "",
     "Services/repos involved:",
     reposInvolved.length > 0 ? reposInvolved.map(repo => `- ${repo}`).join("\n") : "- NOT_FOUND_IN_INDEXED_CODEBASE",
     "",
-    "Endpoint handlers:",
-    endpointHandlers.length > 0
-      ? endpointHandlers.map(edge => `- ${edge.handler || edge.symbol || "unknown"} in ${edgeSource(edge)}`).join("\n")
-      : "- No endpoint handler was found.",
-    "",
-    "Handler behavior:",
-    handlerFacts.length > 0
-      ? handlerFacts.map(fact => `- ${fact}`).join("\n")
-      : "- No controller method body was resolved for the endpoint handler.",
-    "",
-    "RPC calls from handlers:",
-    rpcCalls.length > 0
-      ? rpcCalls.map(edge => `- ${edge.fromSymbol || "unknown"} calls RPC func ${edge.rpcFunc} in ${edgeSource(edge)}`).join("\n")
-      : "- No RPC call was extracted from the endpoint handler.",
-    "",
-    "External calls from handlers:",
-    externalCalls.length > 0
-      ? externalCalls.map(edge => `- ${edge.fromSymbol || "unknown"} calls ${edge.externalFunc} in ${edgeSource(edge)}`).join("\n")
-      : "- No external API/client call was extracted from the endpoint handler.",
-    "",
-    "Downstream handlers for external/API funcs:",
-    downstreamExternalSymbols.length > 0
-      ? downstreamExternalSymbols.map(edge => `- ${edge.symbol} in ${edgeSource(edge)}`).join("\n")
-      : "- No downstream function with the same external/API func name was found.",
-    "",
-    "Downstream handler behavior:",
-    downstreamExternalFacts.length > 0
-      ? downstreamExternalFacts.map(fact => `- ${fact}`).join("\n")
-      : "- No downstream handler body was resolved.",
-    "",
-    "Model/symbol calls inside downstream handlers:",
-    downstreamSymbolCalls.length > 0
-      ? downstreamSymbolCalls.map(edge => `- ${edge.fromSymbol || "unknown"} calls ${edge.receiverSymbol}.${edge.calleeSymbol} in ${edgeSource(edge)}`).join("\n")
-      : "- No model/symbol calls were extracted inside downstream handlers.",
-    "",
-    "Model/symbol behavior:",
-    downstreamModelFacts.length > 0
-      ? downstreamModelFacts.map(fact => `- ${fact}`).join("\n")
-      : "- No called model/symbol body was resolved.",
-    "",
-    "Downstream RPC symbols:",
-    downstreamSymbols.length > 0
-      ? downstreamSymbols.map(edge => `- ${edge.symbol} in ${edgeSource(edge)}`).join("\n")
-      : "- No downstream repo symbol with the same RPC func name was found.",
-    "",
-    "Database/table touches near downstream symbols:",
-    tableEdges.length > 0
-      ? tableEdges.map(edge => `- ${edge.table} in ${edgeSource(edge)}`).join("\n")
-      : "- No database/table touch was extracted near downstream symbols.",
+    "Matching paths:",
+    pathDetails.map((details, index) => formatGraphPathDetails(details, index)).join("\n\n"),
     "",
     "What is still missing:",
     "- Relationship graph edges prove code references and matching names; they do not prove runtime success paths or all conditional branches.",

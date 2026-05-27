@@ -66,10 +66,12 @@ const cases: AnswerCase[] = [
       "mrg-accounts@develop",
       "demoModel.RequestAccountNew",
       "users_demoid",
+      "components/askap/models/askap.php",
     ],
     forbidden: [
       "Saya tidak punya anchor route/function yang persis",
       "/mrg/api/v2/account/demo/request/",
+      "/mrg/api/v1/account/demo/delete",
     ],
   },
   {
@@ -86,11 +88,13 @@ const cases: AnswerCase[] = [
       "mrg-accounts@develop",
       "demoModel.RequestAccountNew",
       "users_demoid",
+      "components/askap/models/askap.php",
     ],
     forbidden: [
       "I do not have an exact route/function anchor",
       "NOT_FOUND_IN_INDEXED_CODEBASE",
       "/mrg/api/v2/account/demo/request/",
+      "/mrg/api/v1/account/demo/delete",
     ],
   },
 ]

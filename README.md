@@ -257,6 +257,8 @@ The indexer also extracts graph edges:
 
 `ask` uses this graph before semantic retrieval for broad flow-style questions. For example, a PHP caller in `ims-tf` can resolve a config constant to an HTTP route, find the matching route handler in `ims-tf2`, inspect that handler for RPC or external API calls, follow same-name downstream functions in another repo, and then follow model/function calls inside that downstream handler.
 
+When a broad concept has multiple matching entrypoints, `ask` returns multiple paths instead of forcing a single best route. This is useful for legacy flows where the same business action exists under MRG, Askap/MMB, or older direct API callers.
+
 ## Current Limits
 
 - This is RAG, not a full static call graph.
