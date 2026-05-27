@@ -14,6 +14,8 @@ export type EvidenceType =
   | "shell_script"
   | "test"
   | "documentation"
+  | "git_commit"
+  | "comment"
   | "unknown"
 
 function includesAny(input: string, patterns: string[]): boolean {

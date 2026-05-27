@@ -2,18 +2,22 @@
   "type": "module",
   "scripts": {
     "index": "node --import ./register-ts-node.mjs src/index-repo.ts",
+    "index-docs": "node --import ./register-ts-node.mjs src/index-docs.ts",
     "ask": "node --import ./register-ts-node.mjs src/ask.ts",
-    "test:answers": "node --import ./register-ts-node.mjs src/answer-regression.ts"
+    "test:answers": "node --import ./register-ts-node.mjs src/answer-regression.ts",
+    "start": "node --import ./register-ts-node.mjs src/server.ts"
   },
   "dependencies": {
     "@qdrant/js-client-rest": "^1.18.0",
     "commander": "^14.0.3",
+    "express": "^5.2.1",
     "fast-glob": "^3.3.3",
     "ignore": "^7.0.5",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^25.9.1"
   }
 }

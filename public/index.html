@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Local Codebase AI</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    margin: 0;
+    padding: 0;
+    line-height: 1.6;
+  }
+  .container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 24px 16px;
+  }
+  h1 {
+    font-size: 1.5rem;
+    margin: 0 0 8px;
+    color: #f0f6fc;
+  }
+  .subtitle {
+    font-size: 0.875rem;
+    color: #8b949e;
+    margin-bottom: 20px;
+  }
+  .search-box {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+  .search-box input {
+    flex: 1;
+    padding: 12px 14px;
+    font-size: 1rem;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    background: #161b22;
+    color: #c9d1d9;
+    outline: none;
+  }
+  .search-box input:focus {
+    border-color: #58a6ff;
+  }
+  .search-box button {
+    padding: 12px 20px;
+    font-size: 1rem;
+    border: none;
+    border-radius: 8px;
+    background: #238636;
+    color: #fff;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  .search-box button:hover { background: #2ea043; }
+  .search-box button:disabled { background: #484f58; cursor: not-allowed; }
+  .filters {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+  }
+  .filters input {
+    padding: 8px 10px;
+    font-size: 0.875rem;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    background: #161b22;
+    color: #c9d1d9;
+    outline: none;
+    min-width: 140px;
+  }
+  .loading {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    color: #8b949e;
+    font-size: 0.875rem;
+    margin-bottom: 16px;
+  }
+  .loading.active { display: flex; }
+  .spinner {
+    width: 18px;
+    height: 18px;
+    border: 2px solid #30363d;
+    border-top-color: #58a6ff;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .result {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 16px;
+  }
+  .result-header {
+    padding: 12px 16px;
+    background: #21262d;
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: #f0f6fc;
+    cursor: pointer;
+    user-select: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .result-header:hover { background: #30363d; }
+  .result-body {
+    padding: 16px;
+    white-space: pre-wrap;
+    font-size: 0.875rem;
+    color: #c9d1d9;
+    max-height: 600px;
+    overflow: auto;
+  }
+  .result-body.collapsed { display: none; }
+  .source-item {
+    padding: 6px 0;
+    border-bottom: 1px solid #21262d;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.8rem;
+    color: #8b949e;
+  }
+  .source-item:last-child { border-bottom: none; }
+  .error {
+    background: #3d0f0f;
+    border: 1px solid #ff7b72;
+    color: #ff7b72;
+    padding: 14px;
+    border-radius: 8px;
+    font-size: 0.875rem;
+    white-space: pre-wrap;
+  }
+  .hint {
+    font-size: 0.8rem;
+    color: #8b949e;
+    margin-top: 12px;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Local Codebase AI</h1>
+  <div class="subtitle">Ask questions across indexed repositories</div>
+
+  <div class="search-box">
+    <input id="question" type="text" placeholder="e.g. explain flow request account demo from ims-tf" autocomplete="off" />
+    <button id="askBtn" onclick="ask()">Ask</button>
+  </div>
+
+  <div class="filters">
+    <input id="repoName" type="text" placeholder="repo-name (optional)" />
+    <input id="branch" type="text" placeholder="branch (optional)" />
+    <input id="serviceType" type="text" placeholder="service-type (optional)" />
+  </div>
+
+  <div id="loading" class="loading">
+    <div class="spinner"></div>
+    <span>Thinking... this may take up to 3 minutes.</span>
+  </div>
+
+  <div id="output"></div>
+
+  <div class="hint">
+    Tip: Use exact endpoint paths like <code>/mrg/api/v1/deposit/demo/</code> for precise answers.
+  </div>
+</div>
+
+<script>
+const questionInput = document.getElementById('question');
+const askBtn = document.getElementById('askBtn');
+const loading = document.getElementById('loading');
+const output = document.getElementById('output');
+
+questionInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') ask();
+});
+
+function toggleSection(id) {
+  const body = document.getElementById(id);
+  body.classList.toggle('collapsed');
+}
+
+async function ask() {
+  const question = questionInput.value.trim();
+  if (!question) return;
+
+  const repoName = document.getElementById('repoName').value.trim() || undefined;
+  const branch = document.getElementById('branch').value.trim() || undefined;
+  const serviceType = document.getElementById('serviceType').value.trim() || undefined;
+
+  askBtn.disabled = true;
+  loading.classList.add('active');
+  output.innerHTML = '';
+
+  try {
+    const res = await fetch('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, repoName, branch, serviceType }),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      output.innerHTML = `<div class="error">Error: ${escapeHtml(data.error || 'Unknown error')}</div>`;
+      return;
+    }
+
+    const answerId = 'answer-' + Date.now();
+    const sourcesId = 'sources-' + Date.now();
+
+    let html = '';
+
+    html += `<div class="result">
+      <div class="result-header" onclick="toggleSection('${answerId}')">
+        <span>Answer</span>
+        <span>${data.sources?.length ?? 0} sources</span>
+      </div>
+      <div id="${answerId}" class="result-body">${escapeHtml(data.answer)}</div>
+    </div>`;
+
+    if (data.sources && data.sources.length > 0) {
+      const sourcesHtml = data.sources.map(s => `<div class="source-item">${escapeHtml(s)}</div>`).join('');
+      html += `<div class="result">
+        <div class="result-header" onclick="toggleSection('${sourcesId}')">
+          <span>Sources</span>
+          <span>Toggle</span>
+        </div>
+        <div id="${sourcesId}" class="result-body collapsed">${sourcesHtml}</div>
+      </div>`;
+    }
+
+    output.innerHTML = html;
+  } catch (err) {
+    output.innerHTML = `<div class="error">Network error: ${escapeHtml(err.message)}</div>`;
+  } finally {
+    askBtn.disabled = false;
+    loading.classList.remove('active');
+  }
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+</script>
+</body>
+</html>

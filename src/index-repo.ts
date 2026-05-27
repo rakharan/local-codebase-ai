@@ -4,11 +4,13 @@ import { Command } from "commander"
 import { ensureCollection, qdrant } from "./lib/qdrant.js"
 import { config } from "./lib/config.js"
 import { readRepoFiles } from "./lib/files.js"
-import { getGitInfo } from "./lib/git.js"
+import { getGitInfo, getCommits } from "./lib/git.js"
 import { chunkFile } from "./lib/chunker.js"
 import type { CodeChunk, ServiceType } from "./lib/chunker.js"
 import { createEmbedding } from "./lib/ollama.js"
 import { extractRelationshipEdges, writeRelationshipGraphForRepo } from "./lib/graph.js"
+import { createCommitChunks } from "./lib/commits.js"
+import { createCommentChunks } from "./lib/comments.js"
 
 const serviceTypes = new Set<ServiceType>(["api", "worker", "cron", "library", "unknown"])
 
@@ -27,6 +29,10 @@ program
   .option("--dry-run", "Read and chunk files, then print a summary without touching Qdrant/Ollama.", false)
   .option("--max-chunks <count>", "Abort before embedding if the selected scope exceeds this chunk count.")
   .option("--replace-repo", "Delete all existing chunks for this repo name before indexing the selected scope.", false)
+  .option("--index-commits", "Index git commit history as additional chunks.", false)
+  .option("--index-comments", "Index inline code comments as separate chunks.", false)
+  .option("--commit-since <date>", "Index commits since date (YYYY-MM-DD). Requires --index-commits.")
+  .option("--commit-until <date>", "Index commits until date (YYYY-MM-DD). Requires --index-commits.")
   .parse()
 
 const repoPathArg = program.args[0]
@@ -44,6 +50,10 @@ const options = program.opts<{
   dryRun: boolean
   maxChunks?: string
   replaceRepo: boolean
+  indexCommits: boolean
+  indexComments: boolean
+  commitSince?: string
+  commitUntil?: string
 }>()
 const repoName = options.repoName ?? path.basename(repoPath)
 const serviceType = serviceTypes.has(options.serviceType as ServiceType)
@@ -280,17 +290,21 @@ async function main() {
   console.log(`Found ${files.length} files`)
 
   const chunks = files.flatMap(file => chunkFile(file, repoName, serviceType, gitInfo.branchName, gitInfo.commitSha))
+  const commentChunks = options.indexComments
+    ? files.flatMap(file => createCommentChunks(file.relativePath, file.content, repoName, serviceType, gitInfo.branchName, gitInfo.commitSha))
+    : []
+  const allChunks = [...chunks, ...commentChunks]
   const relationshipEdges = extractRelationshipEdges(files, repoName, serviceType, gitInfo.branchName, gitInfo.commitSha)
 
-  console.log(`Found ${chunks.length} chunks`)
+  console.log(`Found ${allChunks.length} chunks (${chunks.length} code, ${commentChunks.length} comments)`)
   console.log(`Found ${relationshipEdges.length} relationship edges`)
 
   const chunksByTopFolder = new Map<string, number>()
   const chunksByEvidenceType = new Map<string, number>()
   const edgesByType = new Map<string, number>()
 
-  for (const chunk of chunks) {
-    const topFolder = chunk.filePath.split(/[\\/]/)[0] ?? "(root)"
+  for (const chunk of allChunks) {
+    const topFolder = chunk.filePath.split(/[\/]/)[0] ?? "(root)"
     chunksByTopFolder.set(topFolder, (chunksByTopFolder.get(topFolder) ?? 0) + 1)
 
     for (const evidenceType of chunk.evidenceTypes) {
@@ -317,14 +331,39 @@ async function main() {
     console.log(`- ${edgeType}: ${count}`)
   }
 
+  let commitChunks: CodeChunk[] = []
+
+  if (options.indexCommits) {
+    console.log("")
+    console.log("Fetching commit history...")
+
+    const commits = await getCommits(repoPath, options.commitSince, options.commitUntil)
+    commitChunks = createCommitChunks(commits, repoName, serviceType)
+
+    console.log(`Found ${commitChunks.length} commits to index`)
+
+    const commitEvidenceTypeCounts = new Map<string, number>()
+
+    for (const chunk of commitChunks) {
+      for (const evidenceType of chunk.evidenceTypes) {
+        commitEvidenceTypeCounts.set(evidenceType, (commitEvidenceTypeCounts.get(evidenceType) ?? 0) + 1)
+      }
+    }
+
+    console.log("Commit evidence type counts:")
+    for (const [evidenceType, count] of [...commitEvidenceTypeCounts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 12)) {
+      console.log(`- ${evidenceType}: ${count}`)
+    }
+  }
+
   if (options.dryRun) {
     console.log("Dry run complete. No Qdrant collection or relationship graph was changed and no embeddings were generated.")
     return
   }
 
-  if (maxChunks && chunks.length > maxChunks) {
+  if (maxChunks && allChunks.length > maxChunks) {
     throw new Error(
-      `Selected scope produced ${chunks.length} chunks, which exceeds --max-chunks ${maxChunks}. Narrow --include/--exclude or raise the limit.`,
+      `Selected scope produced ${allChunks.length} chunks, which exceeds --max-chunks ${maxChunks}. Narrow --include/--exclude or raise the limit.`,
     )
   }
 
@@ -337,14 +376,14 @@ async function main() {
 
   const existing = await fetchExistingIndex(repoName, gitInfo.branchName)
   const legacyIds = await fetchLegacyUnbranchedIds(repoName)
-  const currentIds = new Set(chunks.map(chunk => chunk.id))
+  const currentIds = new Set(allChunks.map(chunk => chunk.id))
   const staleIds = [...existing.ids].filter(id => !currentIds.has(String(id)))
-  const chunksToIndex = chunks.filter(chunk => !existing.hashes.has(chunk.contentHash))
+  const chunksToIndex = allChunks.filter(chunk => !existing.hashes.has(chunk.contentHash))
 
   let indexed = 0
   let skipped = 0
 
-  console.log(`Skipping ${chunks.length - chunksToIndex.length} unchanged chunks`)
+  console.log(`Skipping ${allChunks.length - chunksToIndex.length} unchanged chunks`)
   console.log(`Indexing ${chunksToIndex.length} new or changed chunks`)
   console.log(`Deleting ${staleIds.length} stale chunks`)
   console.log(`Deleting ${legacyIds.length} legacy unbranched chunks`)
@@ -352,7 +391,7 @@ async function main() {
   await deleteStaleChunks(staleIds)
   await deleteStaleChunks(legacyIds)
 
-  skipped = chunks.length - chunksToIndex.length
+  skipped = allChunks.length - chunksToIndex.length
 
   for (const chunk of chunksToIndex) {
     await upsertChunk(chunk)
@@ -369,6 +408,33 @@ async function main() {
   console.log(
     `Done. Indexed ${indexed} chunks, skipped ${skipped}, deleted ${staleIds.length} stale chunks and ${legacyIds.length} legacy chunks, wrote ${relationshipEdges.length} relationship edges.`,
   )
+
+  if (commitChunks.length > 0) {
+    console.log("")
+    console.log("Indexing commits...")
+
+    const commitExisting = await fetchExistingIndex(repoName, "git-history")
+    const commitCurrentIds = new Set(commitChunks.map(chunk => chunk.id))
+    const commitStaleIds = [...commitExisting.ids].filter(id => !commitCurrentIds.has(String(id)))
+    const commitsToIndex = commitChunks.filter(chunk => !commitExisting.hashes.has(chunk.contentHash))
+
+    console.log(`Commits: skipping ${commitChunks.length - commitsToIndex.length} unchanged, indexing ${commitsToIndex.length}, deleting ${commitStaleIds.length} stale`)
+
+    await deleteStaleChunks(commitStaleIds)
+
+    let commitIndexed = 0
+
+    for (const chunk of commitsToIndex) {
+      await upsertChunk(chunk)
+      commitIndexed++
+
+      if (commitIndexed % 10 === 0) {
+        console.log(`Indexed ${commitIndexed} commits...`)
+      }
+    }
+
+    console.log(`Done indexing commits. Indexed ${commitIndexed}, skipped ${commitChunks.length - commitsToIndex.length}.`)
+  }
 }
 
 main().catch(error => {
