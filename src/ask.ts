@@ -269,6 +269,10 @@ function extractConceptTokens(question: string): string[] {
     "what",
     "which",
     "how",
+    "explain",
+    "describe",
+    "show",
+    "tell",
     "from",
     "to",
     "in",
@@ -280,15 +284,29 @@ function extractConceptTokens(question: string): string[] {
     "tf2",
   ])
 
+  const aliases = new Map([
+    ["deemo", "demo"],
+    ["demos", "demo"],
+    ["demoaccount", "demo"],
+    ["acct", "account"],
+    ["accounts", "account"],
+    ["requests", "request"],
+  ])
+
   return unique(
     question
       .toLowerCase()
       .split(/[^a-z0-9_]+/g)
       .map(token => token.trim())
+      .map(token => aliases.get(token) ?? token)
       .filter(token => token.length >= 3)
       .filter(token => !stopWords.has(token)),
     8,
   )
+}
+
+function containsExactIdentifier(content: string, identifier: string): boolean {
+  return new RegExp(`\\b${escapeRegExp(identifier)}\\b`).test(content)
 }
 
 function normalizeRoute(route: string): string {
@@ -1479,13 +1497,13 @@ function extractUpstreamRouteCallerFacts(chunks: RetrievedChunk[], constantNames
 
   for (const chunk of chunks) {
     const content = chunk.payload.content ?? ""
-    const matchingConstants = [...constants].filter(constantName => content.includes(constantName))
+    const matchingConstants = [...constants].filter(constantName => containsExactIdentifier(content, constantName))
 
     if (matchingConstants.length === 0) continue
     if (!content.includes("Helper::requestAPI")) continue
 
     for (const constantName of matchingConstants) {
-      const usageIndex = content.indexOf(constantName)
+      const usageIndex = content.search(new RegExp(`\\b${escapeRegExp(constantName)}\\b`))
       const contentBeforeUsage = usageIndex >= 0 ? content.slice(0, usageIndex) : content
       const functionName =
         [...contentBeforeUsage.matchAll(/\b(?:public|private|protected)?\s*function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)]

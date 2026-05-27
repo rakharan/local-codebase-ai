@@ -68,6 +68,22 @@ const cases: AnswerCase[] = [
       "Saya tidak punya anchor route/function yang persis",
     ],
   },
+  {
+    name: "broad ims-tf demo account flow tolerates simple typo",
+    question: "explain flow request account deemo from ims-tf",
+    required: [
+      "ims-tf@develop-mt5",
+      "accountReqDemo",
+      "ACCOUNT_REQUEST_DEMO_1",
+      "ims-tf2@develop",
+      "/mrg/api/v2/account/demo/request/",
+      "MrgV2Controller.RequestDemoAccountV2",
+    ],
+    forbidden: [
+      "I do not have an exact route/function anchor",
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
 ]
 
 async function ask(question: string, timeoutMs: number): Promise<string> {
