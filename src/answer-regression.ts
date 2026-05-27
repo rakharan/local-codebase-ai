@@ -53,6 +53,21 @@ const cases: AnswerCase[] = [
       "NOT_FOUND_IN_INDEXED_CODEBASE",
     ],
   },
+  {
+    name: "broad ims-tf demo account flow auto-discovers route anchor",
+    question: "jelasin flow request account demo dari ims-tf",
+    required: [
+      "ims-tf@develop-mt5",
+      "accountReqDemo",
+      "ims-tf2@develop",
+      "/mrg/api/v2/account/demo/request/",
+      "MrgV2Controller.RequestDemoAccountV2",
+      "RequestDemoAccount",
+    ],
+    forbidden: [
+      "Saya tidak punya anchor route/function yang persis",
+    ],
+  },
 ]
 
 async function ask(question: string, timeoutMs: number): Promise<string> {

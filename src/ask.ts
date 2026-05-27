@@ -249,6 +249,48 @@ function extractQuestionRoutes(question: string): string[] {
   )
 }
 
+function extractConceptTokens(question: string): string[] {
+  const stopWords = new Set([
+    "apa",
+    "apakah",
+    "bagaimana",
+    "gimana",
+    "jelasin",
+    "jelaskan",
+    "flow",
+    "alur",
+    "dari",
+    "yang",
+    "dan",
+    "atau",
+    "ke",
+    "di",
+    "the",
+    "what",
+    "which",
+    "how",
+    "from",
+    "to",
+    "in",
+    "of",
+    "repo",
+    "service",
+    "ims",
+    "tf",
+    "tf2",
+  ])
+
+  return unique(
+    question
+      .toLowerCase()
+      .split(/[^a-z0-9_]+/g)
+      .map(token => token.trim())
+      .filter(token => token.length >= 3)
+      .filter(token => !stopWords.has(token)),
+    8,
+  )
+}
+
 function normalizeRoute(route: string): string {
   const normalized = route.trim().replace(/\/+$/, "")
 
@@ -308,6 +350,89 @@ async function retrieveExactRouteMatches(routes: string[]): Promise<RetrievedChu
   } while (offset)
 
   return matches
+}
+
+function metadataTextForConceptSearch(payload: RetrievedPayload): string {
+  return [
+    payload.repoName ?? "",
+    payload.serviceType ?? "",
+    payload.branchName ?? "",
+    payload.filePath ?? "",
+    ...(payload.routes ?? []),
+    ...(payload.symbols ?? []),
+    ...(payload.messageNames ?? []),
+    ...(payload.dbTables ?? []),
+    payload.content ?? "",
+  ].join("\n")
+}
+
+function scoreConceptAnchor(payload: RetrievedPayload, tokens: string[]): number {
+  const metadataText = metadataTextForConceptSearch(payload).toLowerCase()
+
+  if (tokens.length === 0 || !tokens.every(token => metadataText.includes(token))) return 0
+
+  let score = tokens.length
+
+  if ((payload.routes?.length ?? 0) > 0) score += 8
+  if ((payload.symbols?.length ?? 0) > 0) score += 3
+  if (payload.filePath?.includes("config")) score += 2
+  if (payload.filePath?.includes("route")) score += 2
+
+  return score
+}
+
+async function discoverConceptRouteAnchors(question: string): Promise<string[]> {
+  if (!questionAsksAboutServicesOrFlow(question)) return []
+
+  const tokens = extractConceptTokens(question)
+
+  if (tokens.length < 2) return []
+
+  const filter = buildFilter()
+  const matches: Array<RetrievedChunk & { score: number }> = []
+  let offset: string | number | Record<string, unknown> | null | undefined
+
+  do {
+    const scrollRequest = {
+      limit: 256,
+      with_payload: true,
+      with_vector: false,
+      ...(filter ? { filter } : {}),
+      ...(offset ? { offset } : {}),
+    }
+    const page = await qdrant.scroll(config.collectionName, scrollRequest)
+
+    for (const point of page.points) {
+      const payload = point.payload as RetrievedPayload | null | undefined
+
+      if (!payload?.content) continue
+
+      const score = scoreConceptAnchor(payload, tokens)
+
+      if (score > 0) {
+        matches.push({
+          id: String(point.id),
+          payload,
+          score,
+        })
+      }
+    }
+
+    offset = page.next_page_offset
+  } while (offset)
+
+  const bestMatches = matches.sort((left, right) => right.score - left.score).slice(0, 12)
+
+  return unique(
+    bestMatches.flatMap(match => {
+      return (match.payload.routes ?? []).filter(route => {
+        const routeText = route.toLowerCase()
+
+        return tokens.every(token => routeText.includes(token))
+      })
+    }),
+    6,
+  )
 }
 
 function textForExactSearch(payload: RetrievedPayload): string {
@@ -757,6 +882,19 @@ function parseRouteDefinition(definition: string): RouteDefinition | undefined {
     url,
     handler,
   }
+}
+
+function orderRouteDefinitions(routeDefinitions: string[], routes: string[]): string[] {
+  return [...routeDefinitions].sort((left, right) => {
+    const leftDefinition = parseRouteDefinition(left)
+    const rightDefinition = parseRouteDefinition(right)
+    const leftIndex = leftDefinition ? routes.findIndex(route => routeMatches(leftDefinition.url, route)) : -1
+    const rightIndex = rightDefinition ? routes.findIndex(route => routeMatches(rightDefinition.url, route)) : -1
+    const normalizedLeftIndex = leftIndex >= 0 ? leftIndex : Number.MAX_SAFE_INTEGER
+    const normalizedRightIndex = rightIndex >= 0 ? rightIndex : Number.MAX_SAFE_INTEGER
+
+    return normalizedLeftIndex - normalizedRightIndex
+  })
 }
 
 function isExactRouteComparisonQuestion(question: string): boolean {
@@ -1814,7 +1952,9 @@ function buildExactSymbolAnswer(symbolNames: string[], chunks: RetrievedChunk[])
 }
 
 async function main() {
-  const exactRoutes = extractQuestionRoutes(question)
+  const questionRoutes = extractQuestionRoutes(question)
+  const conceptRoutes = questionRoutes.length === 0 ? await discoverConceptRouteAnchors(question) : []
+  const exactRoutes = unique([...questionRoutes, ...conceptRoutes], 10)
   const exactChunks = await retrieveExactRouteMatches(exactRoutes)
   const questionHints = extractQuestionHints(question)
   const exactTermChunks = exactRoutes.length === 0 ? await retrieveExactTermMatches(questionHints, 24) : []
@@ -1822,7 +1962,9 @@ async function main() {
     exactRoutes.length === 0 && exactTermChunks.length > 0 ? await retrieveNeighborChunks(exactTermChunks, 70) : []
   const exactComparison = exactRoutes.length >= 2 && isExactRouteComparisonQuestion(question)
   const exactEndpointInspection =
-    exactRoutes.length === 1 && (shouldInspectExactEndpointDetails(question) || shouldExpandExactRouteQuestion(question))
+    exactRoutes.length > 0 &&
+    !exactComparison &&
+    (shouldInspectExactEndpointDetails(question) || shouldExpandExactRouteQuestion(question) || conceptRoutes.length > 0)
   const exactHandlerRefs = extractExactRouteHandlerRefs(exactChunks, exactRoutes)
   const exactDetailChunks =
     exactChunks.length > 0
@@ -1854,7 +1996,7 @@ async function main() {
     exactRoutes.length > 0 ? Math.max(limit, 24) : Math.max(limit, 12),
   )
   const chunks = retrievedChunks.map(chunk => chunk.payload)
-  const routeDefinitions = extractRouteDefinitions(exactChunks, exactRoutes)
+  const routeDefinitions = orderRouteDefinitions(extractRouteDefinitions(exactChunks, exactRoutes), exactRoutes)
   const exactRouteRepoNames = unique(exactChunks.map(chunk => chunk.payload.repoName ?? ""), 12)
   const handlerFacts = extractHandlerFactSummary(exactDetailChunks, exactHandlerRefs, exactRouteRepoNames)
   const endpointFacts = extractEndpointHandlerFacts(exactDetailChunks, exactHandlerRefs, exactRouteRepoNames)
