@@ -4,6 +4,7 @@ import { qdrant } from "./lib/qdrant.js"
 import { config } from "./lib/config.js"
 import { createEmbedding, chat } from "./lib/ollama.js"
 import { readRelationshipGraph } from "./lib/graph.js"
+import { buildRegistryPromptContext, expandQuestionWithRegistry } from "./lib/service-registry.js"
 import type { RelationshipEdge } from "./lib/graph.js"
 import type { EvidenceType } from "./lib/evidence.js"
 import type { RelationshipHints } from "./lib/relationships.js"
@@ -113,6 +114,8 @@ function parseHistory(json?: string): Array<{ role: string; content: string }> {
 }
 
 const history = parseHistory(options.history)
+const registryExpansion = expandQuestionWithRegistry(question)
+const retrievalQuestion = registryExpansion.expandedQuestion
 
 function buildFilter() {
   const must = []
@@ -172,7 +175,7 @@ function unique(values: string[], max = 12): string[] {
 }
 
 function shouldAnswerIndonesian(question: string): boolean {
-  return /\b(apa|apakah|bagaimana|gimana|kenapa|mengapa|jelasin|jelaskan|terangkan|beda|bedanya|perbedaan|yang|dan|atau|dari|untuk|dengan|di|ke|validasi|validasinya|returnnya|servis|layanan|tabel|database|alur|endpointnya|bodynya)\b/i.test(question)
+  return /\b(apa|apakah|bagaimana|gimana|kenapa|mengapa|jelasin|jelaskan|terangkan|berikan|daftar|list|tipe|jenis|akun|aturan|beda|bedanya|perbedaan|yang|dan|atau|dari|untuk|dengan|di|ke|validasi|validasinya|returnnya|servis|layanan|tabel|database|alur|endpointnya|bodynya)\b/i.test(question)
 }
 
 function localizeAnswer(answer: string, question: string): string {
@@ -298,6 +301,19 @@ function extractQuestionHints(question: string): string[] {
       .filter(value => !["What", "When", "Where", "Which", "How", "Does"].includes(value)),
     ...[...question.matchAll(/["'`]([^"'`]{2,80})["'`]/g)].map(match => match[1] ?? ""),
   ])
+}
+
+function registryExactSearchTerms(): string[] {
+  const noisyTerms = new Set(["api", "broker", "domain", "concept", "service"])
+
+  return unique(
+    registryExpansion.terms
+      .filter(term => term.length >= 3)
+      .filter(term => !noisyTerms.has(term.toLowerCase()))
+      .filter(term => !/^ims-/.test(term.toLowerCase()))
+      .filter(term => !/^tf2-/.test(term.toLowerCase())),
+    24,
+  )
 }
 
 function extractQuestionRoutes(question: string): string[] {
@@ -995,17 +1011,40 @@ function textForExactSearch(payload: RetrievedPayload): string {
 
 function scoreExactTermMatch(payload: RetrievedPayload, terms: string[]): number {
   const text = textForExactSearch(payload).toLowerCase()
+  const filePath = payload.filePath?.toLowerCase() ?? ""
+  const repoName = payload.repoName?.toLowerCase() ?? ""
 
-  return terms.reduce((score, term) => {
+  let score = terms.reduce((currentScore, term) => {
     const normalizedTerm = term.toLowerCase()
 
-    if (!normalizedTerm) return score
-    if (payload.symbols?.some(symbol => symbol.toLowerCase() === normalizedTerm)) return score + 5
-    if (payload.messageNames?.some(messageName => messageName.toLowerCase() === normalizedTerm)) return score + 5
-    if (text.includes(normalizedTerm)) return score + 1
+    if (!normalizedTerm) return currentScore
+    if (payload.symbols?.some(symbol => symbol.toLowerCase() === normalizedTerm)) return currentScore + 5
+    if (payload.messageNames?.some(messageName => messageName.toLowerCase() === normalizedTerm)) return currentScore + 5
+    if (text.includes(normalizedTerm)) return currentScore + 1
 
-    return score
+    return currentScore
   }, 0)
+
+  if (terms.some(term => term.toLowerCase() === "isignal")) {
+    if (filePath.includes("isignal-docs")) score += 20
+    if (repoName.includes("isignal")) score += 10
+  }
+
+  if (terms.some(term => term.toLowerCase() === "askap" || term.toLowerCase() === "mmb")) {
+    if (filePath.includes("askap")) score += 12
+    if (repoName.includes("askap")) score += 8
+  }
+
+  if (terms.some(term => /account(types?|_type)|tipe akun|mt4|mt5/i.test(term))) {
+    if (filePath.includes("askap/libs/config")) score += 30
+    if (filePath.includes("askap/controllers/askap")) score += 14
+    if (filePath.includes("askap/route")) score += 8
+    if (text.includes("accounttypesv2")) score += 20
+    if (text.includes("accounttypes")) score += 12
+    if (text.includes("getaccounttypesv2")) score += 10
+  }
+
+  return score
 }
 
 async function retrieveExactTermMatches(terms: string[], maxMatches: number, filter: SearchFilter = buildFilter()): Promise<RetrievedChunk[]> {
@@ -2214,6 +2253,14 @@ function questionAsksAboutServicesOrFlow(question: string): boolean {
   return /\b(service|services|repo|repos|flow|involved|calls?|publishes?|consumes?|rpc|amqp|rabbitmq|queue|exchange)\b/i.test(question)
 }
 
+function questionAsksAboutGlossary(question: string): boolean {
+  return /\b(apa itu|what is|maksud|meaning|glossary|glosarium|list|daftar|berikan|tipe akun|account type|aturan|rules?|platform_type|platform type|isignal)\b/i.test(question)
+}
+
+function questionAsksAboutAccountTypes(question: string): boolean {
+  return /\b(tipe akun|jenis akun|account types?|account_type|accountTypes|accountTypesV2)\b/i.test(question)
+}
+
 function extractSqlTableNamesFromContent(content: string): string[] {
   return [
     ...[...content.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi)].map(match => match[1] ?? ""),
@@ -2369,6 +2416,459 @@ function buildStructuralEvidenceAnswer(chunks: RetrievedPayload[], question: str
   ]
     .filter(line => line !== undefined)
     .join("\n")
+}
+
+function buildPlatformTypeGlossaryAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
+  if (!/\bplatform_type|platform type|tipe platform\b/i.test(question)) return undefined
+
+  const facts: string[] = []
+  const sources: string[] = []
+  const accountTypeFacts = extractAccountTypeFacts(chunks, question)
+
+  for (const fact of accountTypeFacts) {
+    if (!fact.platformType || !fact.platformName) continue
+
+    facts.push(`Pada config accountTypesV2 MMB/Askap, platform_type ${fact.platformType} dipakai untuk ${fact.platformName}.`)
+    sources.push(fact.source)
+  }
+
+  for (const chunk of chunks) {
+    const content = chunk.content ?? ""
+    const source = `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`
+
+    if (!/platform_type|mt4DemoType|mt5DemoType|MetaTrader|MT4|MT5/i.test(content)) continue
+
+    if (/platform_type\s*={0,2}=\s*0/.test(content) || /["']platform_type["']\s*:\s*0/.test(content)) {
+      facts.push("platform_type 0 dipakai sebagai jalur MT4 di evidence yang ter-index.")
+      sources.push(source)
+    }
+
+    if (/platform_type\s*={0,2}=\s*3/.test(content) || /["']platform_type["']\s*:\s*3/.test(content)) {
+      facts.push("platform_type 3 dipakai sebagai jalur MT5 di evidence yang ter-index.")
+      sources.push(source)
+    }
+
+    if (/platform_type\s*={0,2}=\s*5/.test(content) || /["']platform_type["']\s*:\s*5/.test(content)) {
+      facts.push("platform_type 5 dipakai sebagai jalur MT5 di evidence yang ter-index.")
+      sources.push(source)
+    }
+
+    if (/platform_type\s*:\s*Joi\.number\(\)\.required/.test(content)) {
+      facts.push("platform_type divalidasi sebagai number wajib pada handler/model downstream.")
+      sources.push(source)
+    }
+
+    if (/platform_type\s*:\s*request\.body\.platform_type/.test(content)) {
+      facts.push("platform_type diterima dari request body lalu diteruskan ke payload downstream.")
+      sources.push(source)
+    }
+
+    if (/platform_type\s*:\s*data\.platform_type/.test(content)) {
+      facts.push("platform_type dari data downstream diteruskan ke pembuatan akun demo.")
+      sources.push(source)
+    }
+  }
+
+  const uniqueFacts = unique(facts, 12)
+  const uniqueSources = unique(sources, 8)
+
+  if (uniqueFacts.length === 0) return undefined
+
+  return [
+    shouldAnswerIndonesian(question)
+      ? "Fakta yang ditemukan tentang platform_type:"
+      : "Found facts about platform_type:",
+    uniqueFacts.map(fact => `- ${fact}`).join("\n"),
+    "",
+    shouldAnswerIndonesian(question)
+      ? "Catatan:"
+      : "Notes:",
+    shouldAnswerIndonesian(question)
+      ? "- Mapping di atas hanya berdasarkan source yang ter-retrieve. Jika tiap broker punya mapping tambahan, index repo/dokumentasi broker tersebut lalu tanyakan lagi dengan nama broker spesifik."
+      : "- This mapping is based only on retrieved sources. If each broker has additional mapping rules, index that broker's repo/docs and ask again with the broker name.",
+    "",
+    "Evidence:",
+    uniqueSources.map(source => `- ${source}`).join("\n"),
+  ].join("\n")
+}
+
+type AccountTypeFact = {
+  name: string
+  id: string | undefined
+  platformName: string | undefined
+  platformType: string | undefined
+  show: string | undefined
+  groupCreation: string | undefined
+  minFirstDepo: string | undefined
+  leverage: string | undefined
+  feature: string | undefined
+  source: string
+}
+
+function accountTypeQuestionPlatform(question: string): "MT4" | "MT5" | undefined {
+  if (/\bmt4\b/i.test(question)) return "MT4"
+  if (/\bmt5\b/i.test(question)) return "MT5"
+
+  return undefined
+}
+
+function objectBlocksFromContent(content: string): string[] {
+  const blocks: string[] = []
+  let current: string[] = []
+  let inBlock = false
+
+  for (const line of content.split(/\r?\n/)) {
+    if (!inBlock && /^\s*\{/.test(line)) {
+      inBlock = true
+      current = []
+    }
+
+    if (inBlock) {
+      current.push(line)
+    }
+
+    if (inBlock && /^\s*\},?\s*$/.test(line)) {
+      blocks.push(current.join("\n"))
+      current = []
+      inBlock = false
+    }
+  }
+
+  if (blocks.length === 0 && /(?:type_name|name|platform_type|platform_name|group_creation)/i.test(content)) {
+    blocks.push(content)
+  }
+
+  return blocks
+}
+
+function readObjectProp(block: string, key: string): string | undefined {
+  const quoted = block.match(new RegExp(`["']${escapeRegExp(key)}["']\\s*:\\s*["']([^"']+)["']`))
+  if (quoted?.[1]) return quoted[1]
+
+  const bare = block.match(new RegExp(`["']${escapeRegExp(key)}["']\\s*:\\s*([^,\\n\\r]+)`))
+  return bare?.[1]?.trim().replace(/,$/, "")
+}
+
+function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): AccountTypeFact[] {
+  const wantedPlatform = accountTypeQuestionPlatform(question)
+  const facts: AccountTypeFact[] = []
+  const parseUnits = new Map<string, { content: string; source: string }>()
+
+  for (const chunk of chunks) {
+    const content = chunk.content ?? ""
+
+    if (!/accountTypes|accountTypesV2|type_name|platform_type|group_creation|GetAccountTypes/i.test(content)) continue
+
+    const source = `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`
+    parseUnits.set(`chunk:${source}`, { content, source })
+  }
+
+  const chunksByFile = new Map<string, RetrievedPayload[]>()
+
+  for (const chunk of chunks) {
+    const content = chunk.content ?? ""
+
+    if (!/accountTypes|accountTypesV2|type_name|platform_type|group_creation/i.test(content)) continue
+
+    const key = `${chunk.repoName ?? "unknown"}|${chunk.branchName ?? "unknown"}|${chunk.filePath ?? "unknown"}`
+    chunksByFile.set(key, [...(chunksByFile.get(key) ?? []), chunk])
+  }
+
+  for (const fileChunks of chunksByFile.values()) {
+    const ordered = [...fileChunks].sort((left, right) => (left.startLine ?? 0) - (right.startLine ?? 0))
+    const first = ordered[0]
+    const last = ordered[ordered.length - 1]
+
+    if (!first || !last) continue
+
+    const source = `${first.repoName}@${first.branchName ?? "unknown"} ${first.filePath}:${first.startLine}-${last.endLine}`
+    parseUnits.set(`file:${source}`, {
+      content: ordered.map(chunk => chunk.content ?? "").join("\n"),
+      source,
+    })
+  }
+
+  for (const { content, source } of parseUnits.values()) {
+    for (const block of objectBlocksFromContent(content)) {
+      const name = readObjectProp(block, "type_name") ?? readObjectProp(block, "name")
+      const platformName = readObjectProp(block, "platform_name")
+      const platformType = readObjectProp(block, "platform_type")
+      const groupCreation = readObjectProp(block, "group_creation")
+
+      if (!name) continue
+      if (!/^[A-Za-z0-9][A-Za-z0-9 _-]{1,40}$/.test(name)) continue
+
+      const normalizedPlatform =
+        platformName?.toUpperCase() ??
+        (platformType === "0" ? "MT4" : platformType === "5" ? "MT5" : undefined)
+
+      if (wantedPlatform && normalizedPlatform && normalizedPlatform !== wantedPlatform) continue
+      if (wantedPlatform && !normalizedPlatform) continue
+
+      facts.push({
+        name,
+        id: readObjectProp(block, "id"),
+        platformName,
+        platformType,
+        show: readObjectProp(block, "show"),
+        groupCreation,
+        minFirstDepo: readObjectProp(block, "min_first_depo") ?? readObjectProp(block, "mindepo"),
+        leverage: readObjectProp(block, "leverage"),
+        feature: readObjectProp(block, "feature"),
+        source,
+      })
+    }
+  }
+
+  const byKey = new Map<string, AccountTypeFact>()
+
+  for (const fact of facts) {
+    const key = [
+      fact.name.toLowerCase(),
+      fact.platformName?.toLowerCase() ?? "",
+      fact.platformType ?? "",
+      fact.groupCreation?.toLowerCase() ?? "",
+    ].join("|")
+
+    const existing = byKey.get(key)
+    if (!existing || (existing.show === undefined && fact.show !== undefined)) {
+      byKey.set(key, fact)
+    }
+  }
+
+  return sortAccountTypeFacts(
+    [...byKey.values()].map(fact => ({
+      ...fact,
+      source: findBestAccountTypeSource(fact, chunks) ?? fact.source,
+    })),
+  )
+}
+
+function findBestAccountTypeSource(fact: AccountTypeFact, chunks: RetrievedPayload[]): string | undefined {
+  const candidates = chunks.filter(chunk => {
+    const content = chunk.content ?? ""
+
+    if (!content.includes(fact.name)) return false
+    if (fact.groupCreation && content.includes(fact.groupCreation)) return true
+    if (fact.platformType && content.includes(`"platform_type": ${fact.platformType}`)) return true
+    if (fact.platformName && content.includes(`"platform_name": "${fact.platformName}"`)) return true
+
+    return false
+  })
+
+  const best = candidates.sort((left, right) => {
+    function score(chunk: RetrievedPayload): number {
+      const content = chunk.content ?? ""
+      let value = 0
+
+      if (fact.groupCreation && content.includes(fact.groupCreation)) value += 10
+      if (fact.platformType && content.includes(`"platform_type": ${fact.platformType}`)) value += 6
+      if (fact.show !== undefined && content.includes(`"show": ${fact.show}`)) value += 4
+      if (/accountTypesV2/.test(content)) value += 2
+
+      return value
+    }
+
+    return score(right) - score(left)
+  })[0]
+
+  if (!best) return undefined
+
+  return `${best.repoName}@${best.branchName ?? "unknown"} ${best.filePath}:${best.startLine}-${best.endLine}`
+}
+
+function sortAccountTypeFacts(facts: AccountTypeFact[]): AccountTypeFact[] {
+  const preferredOrder = ["silver", "gold", "premium", "micro", "ultimate", "i-profesional"]
+
+  return [...facts].sort((left, right) => {
+    const leftIndex = preferredOrder.indexOf(left.name.toLowerCase())
+    const rightIndex = preferredOrder.indexOf(right.name.toLowerCase())
+
+    if (leftIndex !== -1 || rightIndex !== -1) {
+      return (leftIndex === -1 ? Number.MAX_SAFE_INTEGER : leftIndex) -
+        (rightIndex === -1 ? Number.MAX_SAFE_INTEGER : rightIndex)
+    }
+
+    return left.name.localeCompare(right.name)
+  })
+}
+
+function buildAccountTypeBehaviorNotes(chunks: RetrievedPayload[], question: string): string[] {
+  const notes: string[] = []
+  const joined = chunks.map(chunk => chunk.content ?? "").join("\n")
+  const wantedPlatform = accountTypeQuestionPlatform(question)
+
+  if (/GetAccountTypesV2/.test(joined) && /config\.accountTypesV2/.test(joined)) {
+    notes.push("Endpoint V2 membaca `config.accountTypesV2`.")
+  }
+
+  if (/filter\(x\s*=>\s*x\.show\s*==\s*1\)/.test(joined)) {
+    notes.push("Endpoint V2 memfilter hanya entry dengan `show == 1`.")
+  }
+
+  if (/TF_CAN_REQUEST_MMB_MT5/.test(joined) && /platform_type\s*!=\s*5/.test(joined)) {
+    notes.push("Jika user tidak punya rule `TF_CAN_REQUEST_MMB_MT5`, endpoint V2 membuang entry `platform_type == 5`.")
+  }
+
+  if (/GetAccountTypes\(/.test(joined) && /config\.accountTypes/.test(joined)) {
+    notes.push("Endpoint V1 membaca `config.accountTypes`.")
+  }
+
+  if (wantedPlatform === "MT5") {
+    const mt5Facts = extractAccountTypeFacts(chunks, question)
+    if (mt5Facts.length > 0 && mt5Facts.every(fact => fact.show === "0")) {
+      notes.push("Di evidence yang ter-retrieve, semua entry MT5 yang terdefinisi punya `show: 0`; jadi tidak keluar dari endpoint V2 normal setelah filter `show == 1`.")
+    }
+  }
+
+  return unique(notes, 8)
+}
+
+function buildAccountTypeGlossaryAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
+  if (!questionAsksAboutAccountTypes(question)) return undefined
+
+  const facts = extractAccountTypeFacts(chunks, question)
+  if (facts.length === 0) return undefined
+
+  const wantedPlatform = accountTypeQuestionPlatform(question)
+  const visible = facts.filter(fact => fact.show !== "0")
+  const hidden = facts.filter(fact => fact.show === "0")
+  const primaryFacts = visible.length > 0 ? visible : facts
+
+  function describeFact(fact: AccountTypeFact): string {
+    const details = [
+      fact.id ? `id ${fact.id}` : undefined,
+      fact.platformName ? fact.platformName : undefined,
+      fact.platformType ? `platform_type ${fact.platformType}` : undefined,
+      fact.show !== undefined ? `show ${fact.show}` : undefined,
+      fact.groupCreation ? `group ${fact.groupCreation}` : undefined,
+      fact.minFirstDepo ? `min deposit ${fact.minFirstDepo}` : undefined,
+      fact.leverage ? `leverage ${fact.leverage}` : undefined,
+      fact.feature && fact.feature !== "-" ? `feature ${fact.feature}` : undefined,
+    ].filter(Boolean).join(", ")
+
+    return `- ${fact.name}${details ? ` (${details})` : ""}`
+  }
+
+  const behaviorNotes = buildAccountTypeBehaviorNotes(chunks, question)
+  const sources = unique([
+    ...facts.map(fact => fact.source),
+    ...chunks
+      .filter(chunk => /GetAccountTypes|account\/types|accountTypesV2|config\.accountTypes/i.test(chunk.content ?? ""))
+      .map(chunk => `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`),
+  ], 12)
+
+  const allPrimaryHidden = primaryFacts.length > 0 && primaryFacts.every(fact => fact.show === "0")
+  const title = shouldAnswerIndonesian(question)
+    ? `Tipe akun MMB${wantedPlatform ? ` ${wantedPlatform}` : ""} yang ${allPrimaryHidden ? "terdefinisi di config" : "ditemukan"}:`
+    : `MMB${wantedPlatform ? ` ${wantedPlatform}` : ""} account types ${allPrimaryHidden ? "defined in config" : "found"}:`
+
+  return [
+    title,
+    primaryFacts.map(describeFact).join("\n"),
+    hidden.length > 0 && visible.length > 0
+      ? [
+          "",
+          shouldAnswerIndonesian(question) ? "Entry yang terdefinisi tapi tidak visible (`show: 0`):" : "Defined but hidden entries (`show: 0`):",
+          hidden.map(describeFact).join("\n"),
+        ].join("\n")
+      : undefined,
+    behaviorNotes.length > 0
+      ? [
+          "",
+          shouldAnswerIndonesian(question) ? "Perilaku endpoint/config yang relevan:" : "Relevant endpoint/config behavior:",
+          behaviorNotes.map(note => `- ${note}`).join("\n"),
+        ].join("\n")
+      : undefined,
+    "",
+    "Evidence:",
+    sources.map(source => `- ${source}`).join("\n"),
+  ].filter((line): line is string => typeof line === "string").join("\n")
+}
+
+function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
+  if (!questionAsksAboutGlossary(question)) return undefined
+
+  const lowerQuestion = question.toLowerCase()
+  const asksRules = /\b(aturan|rules?|rule|ketentuan|business rules?)\b/i.test(question)
+  const subjectTerms = unique([
+    ...extractConceptTokens(question),
+    ...registryExpansion.terms.filter(term => term.length >= 4),
+  ], 24).map(term => term.toLowerCase())
+  const docChunks = chunks.filter(chunk => {
+    if (!chunk.evidenceTypes?.includes("documentation")) return false
+
+    const text = [
+      chunk.filePath ?? "",
+      chunk.content ?? "",
+      ...(chunk.symbols ?? []),
+      ...(chunk.messageNames ?? []),
+    ].join("\n").toLowerCase()
+
+    return subjectTerms.some(term => text.includes(term.toLowerCase()))
+  }).sort((left, right) => {
+    function score(chunk: RetrievedPayload): number {
+      const filePath = chunk.filePath?.toLowerCase() ?? ""
+      const repoName = chunk.repoName?.toLowerCase() ?? ""
+      const content = chunk.content?.toLowerCase() ?? ""
+      let value = 0
+
+      if (subjectTerms.includes("isignal")) {
+        if (filePath.includes("isignal-docs")) value += 40
+        if (repoName.includes("isignal")) value += 20
+        if (content.includes("auto copy")) value += 10
+      }
+
+      if (filePath.includes("business-rules") || filePath.includes("rules")) value += asksRules ? 20 : 0
+      if (filePath.endsWith("index.mdx") || filePath.endsWith("index.md")) value += asksRules ? 0 : 12
+
+      return value
+    }
+
+    return score(right) - score(left)
+  })
+
+  if (docChunks.length === 0) return undefined
+
+  const facts: string[] = []
+
+  for (const chunk of docChunks) {
+    const lines = (chunk.content ?? "")
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean)
+      .filter(line => !/^(Documentation|Source|title|description|file):/i.test(line))
+
+    for (const line of lines) {
+      const lowerLine = line.toLowerCase()
+      const isHeader = /^#{1,4}\s+/.test(line)
+      const isListOrTable = /^[-*]\s+/.test(line) || /^\|/.test(line) || /^\d+\.\s+/.test(line)
+      const mentionsSubject = subjectTerms.some(term => lowerLine.includes(term))
+
+      if (mentionsSubject || (asksRules && isListOrTable) || (!asksRules && isHeader && lowerLine.includes("isignal"))) {
+        facts.push(`${line} (${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine})`)
+      }
+
+      if (facts.length >= 14) break
+    }
+
+    if (facts.length >= 14) break
+  }
+
+  const uniqueFacts = unique(facts, 14)
+
+  if (uniqueFacts.length === 0) return undefined
+
+  return [
+    shouldAnswerIndonesian(question)
+      ? "Ringkasan berdasarkan dokumentasi yang ter-index:"
+      : "Summary from indexed documentation:",
+    uniqueFacts.map(fact => `- ${fact}`).join("\n"),
+    "",
+    shouldAnswerIndonesian(question)
+      ? "Catatan: ini adalah ringkasan evidence dokumentasi. Untuk detail implementasi, tanyakan flow, endpoint, tabel, atau service spesifik."
+      : "Note: this is a documentation evidence summary. For implementation details, ask for a specific flow, endpoint, table, or service.",
+  ].join("\n")
 }
 
 function extractNamedSymbolsFromQuestion(question: string): string[] {
@@ -2537,9 +3037,18 @@ async function main() {
   const exactRoutes = unique([...questionRoutes, ...conceptRoutes], 10)
   const exactChunks = await retrieveExactRouteMatches(exactRoutes)
   const questionHints = extractQuestionHints(question)
-  const exactTermChunks = exactRoutes.length === 0 ? await retrieveExactTermMatches(questionHints, 24) : []
+  const exactTermSearchTerms = unique([
+    ...questionHints,
+    ...(questionAsksAboutGlossary(question) ? extractConceptTokens(question) : []),
+    ...registryExactSearchTerms(),
+  ], 36)
+  const exactTermChunks = exactRoutes.length === 0
+    ? await retrieveExactTermMatches(exactTermSearchTerms, questionAsksAboutAccountTypes(question) ? 60 : 32)
+    : []
   const exactTermDetailChunks =
-    exactRoutes.length === 0 && exactTermChunks.length > 0 ? await retrieveNeighborChunks(exactTermChunks, 70) : []
+    exactRoutes.length === 0 && exactTermChunks.length > 0
+      ? await retrieveNeighborChunks(exactTermChunks, questionAsksAboutAccountTypes(question) ? 100 : 70)
+      : []
   const exactComparison = exactRoutes.length >= 2 && isExactRouteComparisonQuestion(question)
   const exactEndpointInspection =
     exactRoutes.length > 0 &&
@@ -2555,7 +3064,8 @@ async function main() {
           exactRoutes,
         )
       : []
-  const initialChunks = exactRoutes.length > 0 ? [] : await retrieve(question, limit)
+  const retrievalLimit = questionAsksAboutGlossary(question) ? Math.max(limit, 18) : limit
+  const initialChunks = exactRoutes.length > 0 ? [] : await retrieve(retrievalQuestion, retrievalLimit)
   const hints = collectHints([...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactTermDetailChunks, ...initialChunks])
   const expansionQueries =
     exactRoutes.length > 0 && exactChunks.length === 0
@@ -2568,12 +3078,18 @@ async function main() {
   const expandedChunks = []
 
   for (const expansionQuery of expansionQueries) {
-    expandedChunks.push(...await retrieve(expansionQuery, Math.max(3, Math.ceil(limit / 2))))
+    expandedChunks.push(...await retrieve(`${expansionQuery}\n${registryExpansion.terms.join(" ")}`, Math.max(3, Math.ceil(retrievalLimit / 2))))
   }
 
   const retrievedChunks = mergeChunks(
     [...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactTermDetailChunks, ...initialChunks, ...expandedChunks],
-    exactRoutes.length > 0 ? Math.max(limit, 24) : Math.max(limit, 12),
+    exactRoutes.length > 0
+      ? Math.max(limit, 24)
+      : questionAsksAboutAccountTypes(question)
+        ? Math.max(retrievalLimit, 36)
+        : questionAsksAboutGlossary(question)
+        ? Math.max(retrievalLimit, 24)
+        : Math.max(limit, 12),
   )
   const chunks = retrievedChunks.map(chunk => chunk.payload)
   const routeDefinitions = orderRouteDefinitions(extractRouteDefinitions(exactChunks, exactRoutes), exactRoutes)
@@ -2651,6 +3167,67 @@ async function main() {
     return
   }
 
+  const platformTypeGlossaryAnswer = buildPlatformTypeGlossaryAnswer(chunks, question)
+
+  if (platformTypeGlossaryAnswer) {
+    const sourceChunks = chunks.filter(chunk => {
+      return /platform_type|mt4DemoType|mt5DemoType|MetaTrader|MT4|MT5/i.test(chunk.content ?? "")
+    }).slice(0, 12)
+
+    console.log("\nANSWER\n")
+    console.log(platformTypeGlossaryAnswer)
+
+    console.log("\nSOURCES\n")
+
+    for (const chunk of sourceChunks) {
+      console.log(
+        `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+      )
+    }
+
+    return
+  }
+
+  const accountTypeGlossaryAnswer = buildAccountTypeGlossaryAnswer(chunks, question)
+
+  if (accountTypeGlossaryAnswer) {
+    const sourceChunks = chunks.filter(chunk => {
+      return /accountTypes|accountTypesV2|GetAccountTypes|account\/types|platform_type|group_creation/i.test(chunk.content ?? "")
+    }).slice(0, 12)
+
+    console.log("\nANSWER\n")
+    console.log(accountTypeGlossaryAnswer)
+
+    console.log("\nSOURCES\n")
+
+    for (const chunk of sourceChunks) {
+      console.log(
+        `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+      )
+    }
+
+    return
+  }
+
+  const documentationGlossaryAnswer = buildDocumentationGlossaryAnswer(chunks, question)
+
+  if (documentationGlossaryAnswer) {
+    const sourceChunks = chunks.filter(chunk => chunk.evidenceTypes?.includes("documentation")).slice(0, 12)
+
+    console.log("\nANSWER\n")
+    console.log(documentationGlossaryAnswer)
+
+    console.log("\nSOURCES\n")
+
+    for (const chunk of sourceChunks) {
+      console.log(
+        `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+      )
+    }
+
+    return
+  }
+
   const structuralEvidenceAnswer =
     exactRoutes.length === 0 && (questionAsksAboutDatabase(question) || questionAsksAboutServicesOrFlow(question))
       ? buildStructuralEvidenceAnswer(chunks, question)
@@ -2695,6 +3272,7 @@ async function main() {
     })
     .join("\n\n")
   const evidenceInventory = buildEvidenceInventory(chunks, question)
+  const registryPromptContext = buildRegistryPromptContext(registryExpansion)
 
   const historyLines = history.length > 0
     ? [
@@ -2714,6 +3292,9 @@ async function main() {
     `Handler/detail chunks found: ${exactDetailChunks.length}`,
     `Route handlers discovered: ${exactHandlerRefs.map(ref => ref.fullName).join(", ") || "none"}`,
     "",
+    "Domain vocabulary hints:",
+    registryPromptContext,
+    "",
     "Extracted route definitions:",
     routeDefinitions.length > 0 ? routeDefinitions.join("\n\n") : "none",
     "",
@@ -2729,6 +3310,10 @@ async function main() {
     "Answer requirements:",
     "- Answer in the same language as the user's question. If the question is in Bahasa Indonesia, answer in Bahasa Indonesia while keeping code identifiers unchanged.",
     "- Answer from the context only.",
+    "- Answer the user's exact question. If retrieved context is about a different topic, say NOT_FOUND_IN_INDEXED_CODEBASE for the requested topic instead of answering the different topic.",
+    "- Domain vocabulary hints are synonyms for retrieval and disambiguation, not evidence. Do not present a hint as a fact unless it is supported by the source context.",
+    "- For glossary/list questions, synthesize a concise glossary-style answer from all relevant source chunks. Include aliases, code constants, tables, routes, and rules only when they are visible in sources.",
+    "- If the question asks for a list, return a list and cite the source lines for each group of facts.",
     "- If the question names exact routes or paths, prioritize sources whose content or route metadata exactly contains those paths.",
     "- Do not replace an exact route from the question with a different route unless explaining that the exact route was not found.",
     "- When comparing route definitions, compare method, alias, url, and handler exactly as written. Do not say handlers are the same if their names differ.",

@@ -1,8 +1,8 @@
 # Local Codebase AI
 
-CLI-only, local-first RAG prototype for asking questions across one or more locally cloned codebases.
+Local-first RAG prototype for asking questions across one or more locally cloned codebases.
 
-It indexes source files from local repositories, embeds chunks with Ollama, stores vectors and metadata in Qdrant, then answers questions from retrieved code context. It is read-only and does not edit indexed repositories.
+It indexes source files and documentation from local repositories, embeds chunks with Ollama, stores vectors and metadata in Qdrant, then answers questions from retrieved code context. It is read-only and does not edit indexed repositories.
 
 ## Stack
 
@@ -10,6 +10,7 @@ It indexes source files from local repositories, embeds chunks with Ollama, stor
 - TypeScript
 - ts-node
 - commander
+- Express
 - fast-glob
 - ignore
 - Ollama local API
@@ -147,6 +148,18 @@ Limit retrieved chunks:
 npm run ask -- "What database tables are used by request account flow?" --limit 12
 ```
 
+Start the local web UI:
+
+```powershell
+npm run start
+```
+
+Then open:
+
+```text
+http://localhost:3456
+```
+
 ## Answer Regression Tests
 
 After indexing the sample repos you care about, run:
@@ -258,6 +271,28 @@ The indexer also extracts graph edges:
 `ask` uses this graph before semantic retrieval for broad flow-style questions. For example, a PHP caller in `ims-tf` can resolve a config constant to an HTTP route, find the matching route handler in `ims-tf2`, inspect that handler for RPC or external API calls, follow same-name downstream functions in another repo, and then follow model/function calls inside that downstream handler.
 
 When a broad concept has multiple matching entrypoints, `ask` returns multiple paths instead of forcing a single best route. This is useful for legacy flows where the same business action exists under MRG, Askap/MMB, or older direct API callers.
+
+## Domain Vocabulary
+
+Generic business questions often use product names, broker names, or domain words that do not exactly match source identifiers. The file `config/services.json` acts as a small local vocabulary registry.
+
+Examples already included:
+
+- `mmb` maps to Askap/MMB-related terms such as `askap`, `AskapController`, and `AskapApps`
+- `isignal` maps to `tf2-ois`, `ims-tf2`, signal/channel/subscription terms
+- `platform_type` maps to MT4/MT5/metaserver/account-type terms
+
+This helps questions like:
+
+```powershell
+npm run ask -- "Berikan list tipe akun mt4 mmb"
+npm run ask -- "Berikan list tipe akun mt5 mmb"
+npm run ask -- "apa maksud dari platform_type untuk masing masing broker?"
+npm run ask -- "apa itu iSignal?"
+npm run ask -- "apa saja aturan yang ada di iSignal?"
+```
+
+The registry is used as retrieval/disambiguation help only. Answers still have to come from indexed code or documentation sources.
 
 ## Current Limits
 

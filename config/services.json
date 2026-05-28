@@ -1,0 +1,46 @@
+{
+  "entries": [
+    {
+      "name": "mrg",
+      "kind": "broker",
+      "aliases": ["mrg", "mrg broker", "mrg api"],
+      "repos": ["ims-tf", "ims-tf2", "mrg-accounts"],
+      "keywords": ["mrg", "MrgController", "MrgV2Controller", "MRGAccountRpc", "ReqAccountDemo", "RequestDemoAccount"]
+    },
+    {
+      "name": "askap",
+      "kind": "broker",
+      "aliases": ["askap", "mmb", "mmb broker", "askap/mmb"],
+      "repos": ["ims-tf", "ims-tf2", "mrg-accounts"],
+      "keywords": ["askap", "mmb", "AskapController", "AskapApps", "ReqAccountDemo", "RequestDemoAccount", "GetAccountTypes", "GetAccountTypesV2", "accountTypes", "accountTypesV2", "users_demoid"]
+    },
+    {
+      "name": "isignal",
+      "kind": "domain",
+      "aliases": ["isignal", "iSignal", "signal", "copy signal"],
+      "repos": ["tf2-ois", "ims-tf2"],
+      "keywords": ["isignal", "iSignal", "signal", "subscription", "channel", "analyst", "publisher", "subscriber"]
+    },
+    {
+      "name": "platform_type",
+      "kind": "concept",
+      "aliases": ["platform_type", "platform type", "platform", "tipe platform"],
+      "repos": ["ims-tf", "ims-tf2", "mrg-accounts", "tf2-ois"],
+      "keywords": ["platform_type", "metaserver_id", "MT4", "MT5", "mt4DemoType", "mt5DemoType", "MetaTrader"]
+    },
+    {
+      "name": "mt4-account-types",
+      "kind": "concept",
+      "aliases": ["tipe akun mt4", "account type mt4", "mt4 account type", "akun mt4"],
+      "repos": ["ims-tf", "ims-tf2", "mrg-accounts"],
+      "keywords": ["MT4", "mt4DemoType", "GetDemoAccountTypes", "GetAccountTypes", "GetAccountTypesV2", "accountTypes", "accountTypesV2", "account_type", "platform_type", "platform_name", "group_creation"]
+    },
+    {
+      "name": "mt5-account-types",
+      "kind": "concept",
+      "aliases": ["tipe akun mt5", "account type mt5", "mt5 account type", "akun mt5"],
+      "repos": ["ims-tf", "ims-tf2", "mrg-accounts"],
+      "keywords": ["MT5", "mt5DemoType", "GetDemoAccountTypes", "GetAccountTypes", "GetAccountTypesV2", "accountTypes", "accountTypesV2", "account_type", "platform_type", "platform_name", "group_creation", "TF_CAN_REQUEST_MMB_MT5"]
+    }
+  ]
+}

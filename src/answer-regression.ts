@@ -97,6 +97,42 @@ const cases: AnswerCase[] = [
       "/mrg/api/v1/account/demo/delete",
     ],
   },
+  {
+    name: "glossary lists MMB MT4 account types",
+    question: "Berikan list tipe akun mt4 mmb",
+    required: [
+      "Tipe akun MMB MT4",
+      "SILVER",
+      "GOLD",
+      "PREMIUM",
+      "Micro",
+      "ULTIMATE",
+      "i-Profesional",
+      "config.accountTypesV2",
+      "platform_type 0",
+    ],
+    forbidden: [
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
+  {
+    name: "glossary explains hidden MMB MT5 account types",
+    question: "Berikan list tipe akun mt5 mmb",
+    required: [
+      "Tipe akun MMB MT5",
+      "SILVER",
+      "GOLD",
+      "PREMIUM",
+      "Micro",
+      "i-Profesional",
+      "platform_type 5",
+      "show 0",
+      "show == 1",
+    ],
+    forbidden: [
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
 ]
 
 async function ask(question: string, timeoutMs: number): Promise<string> {
