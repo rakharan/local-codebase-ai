@@ -148,6 +148,8 @@ Limit retrieved chunks:
 npm run ask -- "What database tables are used by request account flow?" --limit 12
 ```
 
+`ask` detects the preferred answer language with the local Ollama chat model and falls back to a small local heuristic if detection is unavailable. This only affects presentation; retrieval, source paths, identifiers, and evidence rules stay unchanged.
+
 Start the local web UI:
 
 ```powershell

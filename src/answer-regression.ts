@@ -116,6 +116,22 @@ const cases: AnswerCase[] = [
     ],
   },
   {
+    name: "glossary follows English answer language",
+    question: "Give me the list of MT4 MMB account types",
+    required: [
+      "MMB MT4 account types found",
+      "SILVER",
+      "GOLD",
+      "PREMIUM",
+      "V2 endpoint reads",
+      "platform_type 0",
+    ],
+    forbidden: [
+      "Tipe akun MMB MT4",
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
+  {
     name: "glossary explains hidden MMB MT5 account types",
     question: "Berikan list tipe akun mt5 mmb",
     required: [

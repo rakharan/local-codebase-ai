@@ -11,6 +11,8 @@ type OllamaChatResponse = {
     }
 }
 
+export type AnswerLanguage = "id" | "en" | "unknown"
+
 const MAX_ATTEMPTS = 4
 
 function wait(ms: number): Promise<void> {
@@ -125,4 +127,57 @@ export async function chat(prompt: string): Promise<string> {
     const data = (await res.json()) as OllamaChatResponse
 
     return data.message?.content ?? ""
+}
+
+export async function detectPreferredLanguage(input: string): Promise<AnswerLanguage> {
+    let res
+
+    try {
+        res = await fetchWithRetry(`${config.ollamaUrl}/api/chat`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                model: config.chatModel,
+                stream: false,
+                format: "json",
+                options: {
+                    temperature: 0,
+                    num_predict: 32,
+                },
+                messages: [
+                    {
+                        role: "system",
+                        content: [
+                            "Detect the user's preferred answer language from the message.",
+                            "Return only compact JSON with this shape: {\"language\":\"id\"|\"en\"|\"unknown\"}.",
+                            "Use \"id\" for Bahasa Indonesia, Indonesian slang, or mixed Indonesian-English.",
+                            "Use \"en\" for English.",
+                            "Use \"unknown\" only when the language cannot be inferred.",
+                            "Do not translate. Do not answer the message.",
+                        ].join("\n"),
+                    },
+                    {
+                        role: "user",
+                        content: input,
+                    },
+                ],
+            }),
+        })
+    } catch {
+        return "unknown"
+    }
+
+    if (!res.ok) return "unknown"
+
+    try {
+        const data = (await res.json()) as OllamaChatResponse
+        const content = data.message?.content ?? ""
+        const parsed = JSON.parse(content) as { language?: unknown }
+
+        return parsed.language === "id" || parsed.language === "en" ? parsed.language : "unknown"
+    } catch {
+        return "unknown"
+    }
 }

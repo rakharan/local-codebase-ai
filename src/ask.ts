@@ -2,9 +2,10 @@ import path from "node:path"
 import { Command } from "commander"
 import { qdrant } from "./lib/qdrant.js"
 import { config } from "./lib/config.js"
-import { createEmbedding, chat } from "./lib/ollama.js"
+import { createEmbedding, chat, detectPreferredLanguage } from "./lib/ollama.js"
 import { readRelationshipGraph } from "./lib/graph.js"
 import { buildRegistryPromptContext, expandQuestionWithRegistry } from "./lib/service-registry.js"
+import type { AnswerLanguage } from "./lib/ollama.js"
 import type { RelationshipEdge } from "./lib/graph.js"
 import type { EvidenceType } from "./lib/evidence.js"
 import type { RelationshipHints } from "./lib/relationships.js"
@@ -116,6 +117,7 @@ function parseHistory(json?: string): Array<{ role: string; content: string }> {
 const history = parseHistory(options.history)
 const registryExpansion = expandQuestionWithRegistry(question)
 const retrievalQuestion = registryExpansion.expandedQuestion
+let answerLanguage: AnswerLanguage = "unknown"
 
 function buildFilter() {
   const must = []
@@ -174,8 +176,43 @@ function unique(values: string[], max = 12): string[] {
   return [...new Set(values.map(value => value.trim()).filter(Boolean))].slice(0, max)
 }
 
+function heuristicAnswerLanguage(question: string): AnswerLanguage {
+  if (/\b(apa|apakah|bagaimana|gimana|kenapa|mengapa|jelasin|jelaskan|terangkan|berikan|daftar|tipe|jenis|akun|aturan|beda|bedanya|perbedaan|yang|dan|atau|dari|untuk|dengan|di|ke|validasi|validasinya|returnnya|servis|layanan|tabel|database|alur|endpointnya|bodynya)\b/i.test(question)) {
+    return "id"
+  }
+
+  if (/\b(what|which|when|where|why|how|explain|describe|show|give|list|difference|return|validation|endpoint|service|database|table|flow)\b/i.test(question)) {
+    return "en"
+  }
+
+  return "unknown"
+}
+
+async function detectAnswerLanguage(question: string): Promise<AnswerLanguage> {
+  const heuristic = heuristicAnswerLanguage(question)
+  const detected = await detectPreferredLanguage(question)
+
+  if (detected === "unknown") return heuristic
+  if (heuristic !== "unknown" && heuristic !== detected) return heuristic
+
+  return detected
+}
+
 function shouldAnswerIndonesian(question: string): boolean {
-  return /\b(apa|apakah|bagaimana|gimana|kenapa|mengapa|jelasin|jelaskan|terangkan|berikan|daftar|list|tipe|jenis|akun|aturan|beda|bedanya|perbedaan|yang|dan|atau|dari|untuk|dengan|di|ke|validasi|validasinya|returnnya|servis|layanan|tabel|database|alur|endpointnya|bodynya)\b/i.test(question)
+  return answerLanguage === "id" || (answerLanguage === "unknown" && heuristicAnswerLanguage(question) === "id")
+}
+
+function answerLanguageLabel(question: string): string {
+  const language = answerLanguage === "unknown" ? heuristicAnswerLanguage(question) : answerLanguage
+
+  if (language === "id") return "Indonesian/Bahasa Indonesia"
+  if (language === "en") return "English"
+
+  return "same language as the question"
+}
+
+function localized(id: string, en: string): string {
+  return shouldAnswerIndonesian(question) ? id : en
 }
 
 function localizeAnswer(answer: string, question: string): string {
@@ -2428,7 +2465,10 @@ function buildPlatformTypeGlossaryAnswer(chunks: RetrievedPayload[], question: s
   for (const fact of accountTypeFacts) {
     if (!fact.platformType || !fact.platformName) continue
 
-    facts.push(`Pada config accountTypesV2 MMB/Askap, platform_type ${fact.platformType} dipakai untuk ${fact.platformName}.`)
+    facts.push(localized(
+      `Pada config accountTypesV2 MMB/Askap, platform_type ${fact.platformType} dipakai untuk ${fact.platformName}.`,
+      `In MMB/Askap accountTypesV2 config, platform_type ${fact.platformType} is used for ${fact.platformName}.`,
+    ))
     sources.push(fact.source)
   }
 
@@ -2439,32 +2479,50 @@ function buildPlatformTypeGlossaryAnswer(chunks: RetrievedPayload[], question: s
     if (!/platform_type|mt4DemoType|mt5DemoType|MetaTrader|MT4|MT5/i.test(content)) continue
 
     if (/platform_type\s*={0,2}=\s*0/.test(content) || /["']platform_type["']\s*:\s*0/.test(content)) {
-      facts.push("platform_type 0 dipakai sebagai jalur MT4 di evidence yang ter-index.")
+      facts.push(localized(
+        "platform_type 0 dipakai sebagai jalur MT4 di evidence yang ter-index.",
+        "platform_type 0 is used as the MT4 path in indexed evidence.",
+      ))
       sources.push(source)
     }
 
     if (/platform_type\s*={0,2}=\s*3/.test(content) || /["']platform_type["']\s*:\s*3/.test(content)) {
-      facts.push("platform_type 3 dipakai sebagai jalur MT5 di evidence yang ter-index.")
+      facts.push(localized(
+        "platform_type 3 dipakai sebagai jalur MT5 di evidence yang ter-index.",
+        "platform_type 3 is used as the MT5 path in indexed evidence.",
+      ))
       sources.push(source)
     }
 
     if (/platform_type\s*={0,2}=\s*5/.test(content) || /["']platform_type["']\s*:\s*5/.test(content)) {
-      facts.push("platform_type 5 dipakai sebagai jalur MT5 di evidence yang ter-index.")
+      facts.push(localized(
+        "platform_type 5 dipakai sebagai jalur MT5 di evidence yang ter-index.",
+        "platform_type 5 is used as the MT5 path in indexed evidence.",
+      ))
       sources.push(source)
     }
 
     if (/platform_type\s*:\s*Joi\.number\(\)\.required/.test(content)) {
-      facts.push("platform_type divalidasi sebagai number wajib pada handler/model downstream.")
+      facts.push(localized(
+        "platform_type divalidasi sebagai number wajib pada handler/model downstream.",
+        "platform_type is validated as a required number in the downstream handler/model.",
+      ))
       sources.push(source)
     }
 
     if (/platform_type\s*:\s*request\.body\.platform_type/.test(content)) {
-      facts.push("platform_type diterima dari request body lalu diteruskan ke payload downstream.")
+      facts.push(localized(
+        "platform_type diterima dari request body lalu diteruskan ke payload downstream.",
+        "platform_type is received from the request body and forwarded into the downstream payload.",
+      ))
       sources.push(source)
     }
 
     if (/platform_type\s*:\s*data\.platform_type/.test(content)) {
-      facts.push("platform_type dari data downstream diteruskan ke pembuatan akun demo.")
+      facts.push(localized(
+        "platform_type dari data downstream diteruskan ke pembuatan akun demo.",
+        "platform_type from downstream data is forwarded into demo account creation.",
+      ))
       sources.push(source)
     }
   }
@@ -2475,17 +2533,14 @@ function buildPlatformTypeGlossaryAnswer(chunks: RetrievedPayload[], question: s
   if (uniqueFacts.length === 0) return undefined
 
   return [
-    shouldAnswerIndonesian(question)
-      ? "Fakta yang ditemukan tentang platform_type:"
-      : "Found facts about platform_type:",
+    localized("Fakta yang ditemukan tentang platform_type:", "Found facts about platform_type:"),
     uniqueFacts.map(fact => `- ${fact}`).join("\n"),
     "",
-    shouldAnswerIndonesian(question)
-      ? "Catatan:"
-      : "Notes:",
-    shouldAnswerIndonesian(question)
-      ? "- Mapping di atas hanya berdasarkan source yang ter-retrieve. Jika tiap broker punya mapping tambahan, index repo/dokumentasi broker tersebut lalu tanyakan lagi dengan nama broker spesifik."
-      : "- This mapping is based only on retrieved sources. If each broker has additional mapping rules, index that broker's repo/docs and ask again with the broker name.",
+    localized("Catatan:", "Notes:"),
+    localized(
+      "- Mapping di atas hanya berdasarkan source yang ter-retrieve. Jika tiap broker punya mapping tambahan, index repo/dokumentasi broker tersebut lalu tanyakan lagi dengan nama broker spesifik.",
+      "- This mapping is based only on retrieved sources. If each broker has additional mapping rules, index that broker's repo/docs and ask again with the broker name.",
+    ),
     "",
     "Evidence:",
     uniqueSources.map(source => `- ${source}`).join("\n"),
@@ -2699,25 +2754,31 @@ function buildAccountTypeBehaviorNotes(chunks: RetrievedPayload[], question: str
   const wantedPlatform = accountTypeQuestionPlatform(question)
 
   if (/GetAccountTypesV2/.test(joined) && /config\.accountTypesV2/.test(joined)) {
-    notes.push("Endpoint V2 membaca `config.accountTypesV2`.")
+    notes.push(localized("Endpoint V2 membaca `config.accountTypesV2`.", "V2 endpoint reads `config.accountTypesV2`."))
   }
 
   if (/filter\(x\s*=>\s*x\.show\s*==\s*1\)/.test(joined)) {
-    notes.push("Endpoint V2 memfilter hanya entry dengan `show == 1`.")
+    notes.push(localized("Endpoint V2 memfilter hanya entry dengan `show == 1`.", "V2 endpoint filters to entries with `show == 1`."))
   }
 
   if (/TF_CAN_REQUEST_MMB_MT5/.test(joined) && /platform_type\s*!=\s*5/.test(joined)) {
-    notes.push("Jika user tidak punya rule `TF_CAN_REQUEST_MMB_MT5`, endpoint V2 membuang entry `platform_type == 5`.")
+    notes.push(localized(
+      "Jika user tidak punya rule `TF_CAN_REQUEST_MMB_MT5`, endpoint V2 membuang entry `platform_type == 5`.",
+      "If the user does not have rule `TF_CAN_REQUEST_MMB_MT5`, V2 endpoint removes entries with `platform_type == 5`.",
+    ))
   }
 
   if (/GetAccountTypes\(/.test(joined) && /config\.accountTypes/.test(joined)) {
-    notes.push("Endpoint V1 membaca `config.accountTypes`.")
+    notes.push(localized("Endpoint V1 membaca `config.accountTypes`.", "V1 endpoint reads `config.accountTypes`."))
   }
 
   if (wantedPlatform === "MT5") {
     const mt5Facts = extractAccountTypeFacts(chunks, question)
     if (mt5Facts.length > 0 && mt5Facts.every(fact => fact.show === "0")) {
-      notes.push("Di evidence yang ter-retrieve, semua entry MT5 yang terdefinisi punya `show: 0`; jadi tidak keluar dari endpoint V2 normal setelah filter `show == 1`.")
+      notes.push(localized(
+        "Di evidence yang ter-retrieve, semua entry MT5 yang terdefinisi punya `show: 0`; jadi tidak keluar dari endpoint V2 normal setelah filter `show == 1`.",
+        "In retrieved evidence, every defined MT5 entry has `show: 0`, so it will not be returned by the normal V2 endpoint after the `show == 1` filter.",
+      ))
     }
   }
 
@@ -2759,9 +2820,10 @@ function buildAccountTypeGlossaryAnswer(chunks: RetrievedPayload[], question: st
   ], 12)
 
   const allPrimaryHidden = primaryFacts.length > 0 && primaryFacts.every(fact => fact.show === "0")
-  const title = shouldAnswerIndonesian(question)
-    ? `Tipe akun MMB${wantedPlatform ? ` ${wantedPlatform}` : ""} yang ${allPrimaryHidden ? "terdefinisi di config" : "ditemukan"}:`
-    : `MMB${wantedPlatform ? ` ${wantedPlatform}` : ""} account types ${allPrimaryHidden ? "defined in config" : "found"}:`
+  const title = localized(
+    `Tipe akun MMB${wantedPlatform ? ` ${wantedPlatform}` : ""} yang ${allPrimaryHidden ? "terdefinisi di config" : "ditemukan"}:`,
+    `MMB${wantedPlatform ? ` ${wantedPlatform}` : ""} account types ${allPrimaryHidden ? "defined in config" : "found"}:`,
+  )
 
   return [
     title,
@@ -2769,14 +2831,14 @@ function buildAccountTypeGlossaryAnswer(chunks: RetrievedPayload[], question: st
     hidden.length > 0 && visible.length > 0
       ? [
           "",
-          shouldAnswerIndonesian(question) ? "Entry yang terdefinisi tapi tidak visible (`show: 0`):" : "Defined but hidden entries (`show: 0`):",
+          localized("Entry yang terdefinisi tapi tidak visible (`show: 0`):", "Defined but hidden entries (`show: 0`):"),
           hidden.map(describeFact).join("\n"),
         ].join("\n")
       : undefined,
     behaviorNotes.length > 0
       ? [
           "",
-          shouldAnswerIndonesian(question) ? "Perilaku endpoint/config yang relevan:" : "Relevant endpoint/config behavior:",
+          localized("Perilaku endpoint/config yang relevan:", "Relevant endpoint/config behavior:"),
           behaviorNotes.map(note => `- ${note}`).join("\n"),
         ].join("\n")
       : undefined,
@@ -3014,6 +3076,8 @@ function buildExactSymbolAnswer(symbolNames: string[], chunks: RetrievedChunk[])
 }
 
 async function main() {
+  answerLanguage = await detectAnswerLanguage(question)
+
   const questionRoutes = extractQuestionRoutes(question)
 
   if (questionRoutes.length === 0) {
@@ -3285,7 +3349,7 @@ async function main() {
   const prompt = [
     ...historyLines,
     `Question: ${question}`,
-    `Answer language: ${shouldAnswerIndonesian(question) ? "Indonesian/Bahasa Indonesia" : "same language as the question"}`,
+    `Answer language: ${answerLanguageLabel(question)}`,
     "",
     `Exact routes requested: ${exactRoutes.join(", ") || "none"}`,
     `Exact route matches found: ${exactChunks.length}`,
