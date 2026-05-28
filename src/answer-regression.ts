@@ -101,14 +101,13 @@ const cases: AnswerCase[] = [
     name: "glossary lists MMB MT4 account types",
     question: "Berikan list tipe akun mt4 mmb",
     required: [
-      "Tipe akun MMB MT4",
+      "Tipe akun MMB/Askap MT4",
       "SILVER",
       "GOLD",
       "PREMIUM",
       "Micro",
       "ULTIMATE",
       "i-Profesional",
-      "config.accountTypesV2",
       "platform_type 0",
     ],
     forbidden: [
@@ -119,11 +118,10 @@ const cases: AnswerCase[] = [
     name: "glossary follows English answer language",
     question: "Give me the list of MT4 MMB account types",
     required: [
-      "MMB MT4 account types found",
+      "MMB/Askap MT4 account types found",
       "SILVER",
       "GOLD",
       "PREMIUM",
-      "V2 endpoint reads",
       "platform_type 0",
     ],
     forbidden: [
@@ -135,7 +133,7 @@ const cases: AnswerCase[] = [
     name: "glossary explains hidden MMB MT5 account types",
     question: "Berikan list tipe akun mt5 mmb",
     required: [
-      "Tipe akun MMB MT5",
+      "Tipe akun MMB/Askap MT5",
       "SILVER",
       "GOLD",
       "PREMIUM",
@@ -143,10 +141,41 @@ const cases: AnswerCase[] = [
       "i-Profesional",
       "platform_type 5",
       "show 0",
-      "show == 1",
     ],
     forbidden: [
       "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
+  {
+    name: "glossary lists MRG account types without documentation fallback",
+    question: "apa saja tipe akun mrg",
+    required: [
+      "Tipe akun MRG",
+      "basic",
+      "premium",
+      "syariah",
+      "infinite",
+      "isignal",
+      "components/mrg/libs/config.js",
+    ],
+    forbidden: [
+      "docs:isignal-docs",
+      "MRG Broker Path",
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
+  {
+    name: "glossary definition prefers iSignal overview docs",
+    question: "apa itu isignal",
+    required: [
+      "Auto Copy",
+      "automatically replicate trading signals",
+      "docs:isignal-docs\\index.mdx",
+    ],
+    forbidden: [
+      "CronCheckAutoCopyTrade",
+      "classDef mrg",
+      "MRG Broker Path",
     ],
   },
 ]

@@ -1072,13 +1072,25 @@ function scoreExactTermMatch(payload: RetrievedPayload, terms: string[]): number
     if (repoName.includes("askap")) score += 8
   }
 
+  if (terms.some(term => term.toLowerCase() === "mrg")) {
+    if (filePath.includes("components/mrg")) score += 12
+    if (repoName.includes("mrg")) score += 8
+    if (filePath.includes("whitelabel/account")) score += 8
+  }
+
   if (terms.some(term => /account(types?|_type)|tipe akun|mt4|mt5/i.test(term))) {
     if (filePath.includes("askap/libs/config")) score += 30
+    if (filePath.includes("mrg/libs/config")) score += 30
     if (filePath.includes("askap/controllers/askap")) score += 14
+    if (filePath.includes("mrg/controllers")) score += 14
     if (filePath.includes("askap/route")) score += 8
+    if (filePath.includes("mrg/route")) score += 8
+    if (filePath.includes("whitelabel/account")) score += 10
     if (text.includes("accounttypesv2")) score += 20
     if (text.includes("accounttypes")) score += 12
     if (text.includes("getaccounttypesv2")) score += 10
+    if (text.includes("getaccounttypebyuserid")) score += 10
+    if (text.includes("metaaccounttype.getpublicaccounttypes")) score += 14
   }
 
   return score
@@ -2298,6 +2310,13 @@ function questionAsksAboutAccountTypes(question: string): boolean {
   return /\b(tipe akun|jenis akun|account types?|account_type|accountTypes|accountTypesV2)\b/i.test(question)
 }
 
+function questionBrokerHint(question: string): "mrg" | "askap" | undefined {
+  if (/\bmrg\b/i.test(question)) return "mrg"
+  if (/\b(mmb|askap)\b/i.test(question)) return "askap"
+
+  return undefined
+}
+
 function extractSqlTableNamesFromContent(content: string): string[] {
   return [
     ...[...content.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi)].map(match => match[1] ?? ""),
@@ -2549,6 +2568,7 @@ function buildPlatformTypeGlossaryAnswer(chunks: RetrievedPayload[], question: s
 
 type AccountTypeFact = {
   name: string
+  broker: "mrg" | "askap" | "unknown"
   id: string | undefined
   platformName: string | undefined
   platformType: string | undefined
@@ -2558,6 +2578,15 @@ type AccountTypeFact = {
   leverage: string | undefined
   feature: string | undefined
   source: string
+}
+
+function inferAccountTypeBrokerFromSource(source: string): "mrg" | "askap" | "unknown" {
+  const normalized = source.toLowerCase().replace(/\\/g, "/")
+
+  if (normalized.includes("/components/askap/") || normalized.includes(" askap/")) return "askap"
+  if (normalized.includes("/components/mrg/") || normalized.includes(" mrg/") || normalized.includes("mrg-accounts@")) return "mrg"
+
+  return "unknown"
 }
 
 function accountTypeQuestionPlatform(question: string): "MT4" | "MT5" | undefined {
@@ -2570,22 +2599,27 @@ function accountTypeQuestionPlatform(question: string): "MT4" | "MT5" | undefine
 function objectBlocksFromContent(content: string): string[] {
   const blocks: string[] = []
   let current: string[] = []
-  let inBlock = false
+  let depth = 0
+
+  function braceDelta(line: string): number {
+    const withoutStrings = line.replace(/(["'`])(?:\\.|(?!\1).)*\1/g, "")
+
+    return (withoutStrings.match(/\{/g)?.length ?? 0) - (withoutStrings.match(/\}/g)?.length ?? 0)
+  }
 
   for (const line of content.split(/\r?\n/)) {
-    if (!inBlock && /^\s*\{/.test(line)) {
-      inBlock = true
+    if (depth === 0 && /^\s*\{/.test(line)) {
       current = []
     }
 
-    if (inBlock) {
+    if (depth > 0 || /^\s*\{/.test(line)) {
       current.push(line)
+      depth += braceDelta(line)
     }
 
-    if (inBlock && /^\s*\},?\s*$/.test(line)) {
+    if (depth === 0 && current.length > 0) {
       blocks.push(current.join("\n"))
       current = []
-      inBlock = false
     }
   }
 
@@ -2606,6 +2640,7 @@ function readObjectProp(block: string, key: string): string | undefined {
 
 function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): AccountTypeFact[] {
   const wantedPlatform = accountTypeQuestionPlatform(question)
+  const wantedBroker = questionBrokerHint(question)
   const facts: AccountTypeFact[] = []
   const parseUnits = new Map<string, { content: string; source: string }>()
 
@@ -2618,7 +2653,7 @@ function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): 
     parseUnits.set(`chunk:${source}`, { content, source })
   }
 
-  const chunksByFile = new Map<string, RetrievedPayload[]>()
+  const candidateFileKeys = new Set<string>()
 
   for (const chunk of chunks) {
     const content = chunk.content ?? ""
@@ -2626,6 +2661,16 @@ function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): 
     if (!/accountTypes|accountTypesV2|type_name|platform_type|group_creation/i.test(content)) continue
 
     const key = `${chunk.repoName ?? "unknown"}|${chunk.branchName ?? "unknown"}|${chunk.filePath ?? "unknown"}`
+    candidateFileKeys.add(key)
+  }
+
+  const chunksByFile = new Map<string, RetrievedPayload[]>()
+
+  for (const chunk of chunks) {
+    const key = `${chunk.repoName ?? "unknown"}|${chunk.branchName ?? "unknown"}|${chunk.filePath ?? "unknown"}`
+
+    if (!candidateFileKeys.has(key)) continue
+
     chunksByFile.set(key, [...(chunksByFile.get(key) ?? []), chunk])
   }
 
@@ -2636,9 +2681,28 @@ function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): 
 
     if (!first || !last) continue
 
+    const lineMap = new Map<number, string>()
+
+    for (const chunk of ordered) {
+      const startLine = chunk.startLine ?? 1
+      const lines = (chunk.content ?? "").split(/\r?\n/)
+
+      lines.forEach((line, index) => {
+        const lineNumber = startLine + index
+
+        if (!lineMap.has(lineNumber)) {
+          lineMap.set(lineNumber, line)
+        }
+      })
+    }
+
+    const content = [...lineMap.entries()]
+      .sort((left, right) => left[0] - right[0])
+      .map(([, line]) => line)
+      .join("\n")
     const source = `${first.repoName}@${first.branchName ?? "unknown"} ${first.filePath}:${first.startLine}-${last.endLine}`
     parseUnits.set(`file:${source}`, {
-      content: ordered.map(chunk => chunk.content ?? "").join("\n"),
+      content,
       source,
     })
   }
@@ -2649,8 +2713,10 @@ function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): 
       const platformName = readObjectProp(block, "platform_name")
       const platformType = readObjectProp(block, "platform_type")
       const groupCreation = readObjectProp(block, "group_creation")
+      const hasAccountTypeShape = /["'](?:mindepo|min_first_depo|type_name|group_creation|platform_type|leverage)["']\s*:/.test(block)
 
       if (!name) continue
+      if (!hasAccountTypeShape) continue
       if (!/^[A-Za-z0-9][A-Za-z0-9 _-]{1,40}$/.test(name)) continue
 
       const normalizedPlatform =
@@ -2660,8 +2726,14 @@ function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): 
       if (wantedPlatform && normalizedPlatform && normalizedPlatform !== wantedPlatform) continue
       if (wantedPlatform && !normalizedPlatform) continue
 
+      const broker = inferAccountTypeBrokerFromSource(source)
+      if (wantedBroker && broker !== "unknown" && broker !== wantedBroker) continue
+      if (wantedBroker === "mrg" && /\b(mmb|askap|MMB-)/.test(block)) continue
+      if (wantedBroker === "askap" && /\bmrg\b/i.test(source) && !/\b(mmb|askap|MMB-)/.test(block)) continue
+
       facts.push({
         name,
+        broker,
         id: readObjectProp(block, "id"),
         platformName,
         platformType,
@@ -2678,15 +2750,20 @@ function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): 
   const byKey = new Map<string, AccountTypeFact>()
 
   for (const fact of facts) {
+    const platformKey = fact.platformName?.toLowerCase() ??
+      (fact.platformType === "0" ? "mt4" : fact.platformType === "3" || fact.platformType === "5" ? "mt5" : "")
     const key = [
+      fact.broker,
       fact.name.toLowerCase(),
-      fact.platformName?.toLowerCase() ?? "",
-      fact.platformType ?? "",
-      fact.groupCreation?.toLowerCase() ?? "",
+      platformKey,
     ].join("|")
 
     const existing = byKey.get(key)
-    if (!existing || (existing.show === undefined && fact.show !== undefined)) {
+    if (
+      !existing ||
+      (existing.platformType === undefined && fact.platformType !== undefined) ||
+      (existing.show === undefined && fact.show !== undefined)
+    ) {
       byKey.set(key, fact)
     }
   }
@@ -2702,8 +2779,10 @@ function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): 
 function findBestAccountTypeSource(fact: AccountTypeFact, chunks: RetrievedPayload[]): string | undefined {
   const candidates = chunks.filter(chunk => {
     const content = chunk.content ?? ""
+    const source = `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`
 
     if (!content.includes(fact.name)) return false
+    if (fact.broker !== "unknown" && inferAccountTypeBrokerFromSource(source) !== fact.broker) return false
     if (fact.groupCreation && content.includes(fact.groupCreation)) return true
     if (fact.platformType && content.includes(`"platform_type": ${fact.platformType}`)) return true
     if (fact.platformName && content.includes(`"platform_name": "${fact.platformName}"`)) return true
@@ -2733,7 +2812,7 @@ function findBestAccountTypeSource(fact: AccountTypeFact, chunks: RetrievedPaylo
 }
 
 function sortAccountTypeFacts(facts: AccountTypeFact[]): AccountTypeFact[] {
-  const preferredOrder = ["silver", "gold", "premium", "micro", "ultimate", "i-profesional"]
+  const preferredOrder = ["basic", "silver", "gold", "premium", "syariah", "micro", "ultimate", "isignal", "infinite", "i-profesional"]
 
   return [...facts].sort((left, right) => {
     const leftIndex = preferredOrder.indexOf(left.name.toLowerCase())
@@ -2750,11 +2829,32 @@ function sortAccountTypeFacts(facts: AccountTypeFact[]): AccountTypeFact[] {
 
 function buildAccountTypeBehaviorNotes(chunks: RetrievedPayload[], question: string): string[] {
   const notes: string[] = []
-  const joined = chunks.map(chunk => chunk.content ?? "").join("\n")
   const wantedPlatform = accountTypeQuestionPlatform(question)
+  const wantedBroker = questionBrokerHint(question)
+  const relevantChunks = wantedBroker
+    ? chunks.filter(chunk => {
+        const source = `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`
+        return inferAccountTypeBrokerFromSource(source) === wantedBroker
+      })
+    : chunks
+  const joined = relevantChunks.map(chunk => chunk.content ?? "").join("\n")
 
   if (/GetAccountTypesV2/.test(joined) && /config\.accountTypesV2/.test(joined)) {
     notes.push(localized("Endpoint V2 membaca `config.accountTypesV2`.", "V2 endpoint reads `config.accountTypesV2`."))
+  }
+
+  if (wantedBroker === "mrg" && /GetAccountTypesV2/.test(joined) && /GetAccountTypeByUserId/.test(joined)) {
+    notes.push(localized(
+      "Untuk MRG V2, `ims-tf2` memanggil RPC `GetAccountTypeByUserId`; list finalnya berasal dari service downstream, bukan hanya config lokal.",
+      "For MRG V2, `ims-tf2` calls RPC `GetAccountTypeByUserId`; the final list comes from the downstream service, not only local config.",
+    ))
+  }
+
+  if (wantedBroker === "mrg" && /MetaAccountType\.getPublicAccountTypes/.test(joined)) {
+    notes.push(localized(
+      "`mrg-accounts` mengambil tipe akun publik dari `MetaAccountType.getPublicAccountTypes` lalu mengembalikan `platform_type`, `type_name`, `group_creation`, `leverage`, dan `min_first_depo`.",
+      "`mrg-accounts` reads public account types from `MetaAccountType.getPublicAccountTypes`, then returns `platform_type`, `type_name`, `group_creation`, `leverage`, and `min_first_depo`.",
+    ))
   }
 
   if (/filter\(x\s*=>\s*x\.show\s*==\s*1\)/.test(joined)) {
@@ -2792,6 +2892,8 @@ function buildAccountTypeGlossaryAnswer(chunks: RetrievedPayload[], question: st
   if (facts.length === 0) return undefined
 
   const wantedPlatform = accountTypeQuestionPlatform(question)
+  const wantedBroker = questionBrokerHint(question)
+  const brokerLabel = wantedBroker === "mrg" ? "MRG" : wantedBroker === "askap" ? "MMB/Askap" : "broker"
   const visible = facts.filter(fact => fact.show !== "0")
   const hidden = facts.filter(fact => fact.show === "0")
   const primaryFacts = visible.length > 0 ? visible : facts
@@ -2815,14 +2917,21 @@ function buildAccountTypeGlossaryAnswer(chunks: RetrievedPayload[], question: st
   const sources = unique([
     ...facts.map(fact => fact.source),
     ...chunks
-      .filter(chunk => /GetAccountTypes|account\/types|accountTypesV2|config\.accountTypes/i.test(chunk.content ?? ""))
+      .filter(chunk => {
+        const source = `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`
+        const broker = inferAccountTypeBrokerFromSource(source)
+
+        if (wantedBroker && broker !== wantedBroker) return false
+
+        return /GetAccountTypes|account\/types|accountTypesV2|config\.accountTypes|GetAccountTypeByUserId|MetaAccountType\.getPublicAccountTypes/i.test(chunk.content ?? "")
+      })
       .map(chunk => `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`),
   ], 12)
 
   const allPrimaryHidden = primaryFacts.length > 0 && primaryFacts.every(fact => fact.show === "0")
   const title = localized(
-    `Tipe akun MMB${wantedPlatform ? ` ${wantedPlatform}` : ""} yang ${allPrimaryHidden ? "terdefinisi di config" : "ditemukan"}:`,
-    `MMB${wantedPlatform ? ` ${wantedPlatform}` : ""} account types ${allPrimaryHidden ? "defined in config" : "found"}:`,
+    `Tipe akun ${brokerLabel}${wantedPlatform ? ` ${wantedPlatform}` : ""} yang ${allPrimaryHidden ? "terdefinisi di config" : "ditemukan"}:`,
+    `${brokerLabel}${wantedPlatform ? ` ${wantedPlatform}` : ""} account types ${allPrimaryHidden ? "defined in config" : "found"}:`,
   )
 
   return [
@@ -2848,16 +2957,47 @@ function buildAccountTypeGlossaryAnswer(chunks: RetrievedPayload[], question: st
   ].filter((line): line is string => typeof line === "string").join("\n")
 }
 
+function accountTypeRelevantSourceChunks(chunks: RetrievedPayload[], question: string): RetrievedPayload[] {
+  const wantedBroker = questionBrokerHint(question)
+  const facts = extractAccountTypeFacts(chunks, question)
+  const factSources = new Set(facts.map(fact => fact.source))
+
+  return chunks.filter(chunk => {
+    const source = `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`
+    const content = chunk.content ?? ""
+    const broker = inferAccountTypeBrokerFromSource(source)
+    const sourceFilePrefix = `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:`
+
+    if (factSources.has(source)) return true
+    if ([...factSources].some(factSource => factSource.startsWith(sourceFilePrefix))) return true
+    if (wantedBroker && broker !== wantedBroker) return false
+
+    return /GetAccountTypes|account\/types|accountTypesV2|config\.accountTypes|GetAccountTypeByUserId|MetaAccountType\.getPublicAccountTypes/i.test(content)
+  }).slice(0, 12)
+}
+
+function buildAccountTypeNotFoundAnswer(question: string): string {
+  const broker = questionBrokerHint(question)
+  const brokerText = broker === "mrg" ? "MRG" : broker === "askap" ? "MMB/Askap" : "broker yang diminta"
+
+  return localized(
+    `NOT_FOUND_IN_INDEXED_CODEBASE: Saya tidak menemukan source ter-index yang mendefinisikan list tipe akun ${brokerText} untuk pertanyaan ini. Saya tidak memakai fallback dokumentasi umum karena pertanyaannya meminta account type spesifik.`,
+    `NOT_FOUND_IN_INDEXED_CODEBASE: I did not find indexed source defining the requested ${broker === "mrg" ? "MRG" : broker === "askap" ? "MMB/Askap" : "broker"} account type list. I did not use generic documentation fallback because the question asks for specific account types.`,
+  )
+}
+
 function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
   if (!questionAsksAboutGlossary(question)) return undefined
+  if (questionAsksAboutAccountTypes(question)) return undefined
 
   const lowerQuestion = question.toLowerCase()
   const asksRules = /\b(aturan|rules?|rule|ketentuan|business rules?)\b/i.test(question)
+  const asksDefinition = /\b(apa itu|what is|maksud|meaning|define|definition|glossary|glosarium)\b/i.test(question)
   const subjectTerms = unique([
     ...extractConceptTokens(question),
     ...registryExpansion.terms.filter(term => term.length >= 4),
   ], 24).map(term => term.toLowerCase())
-  const docChunks = chunks.filter(chunk => {
+  const sortedDocChunks = chunks.filter(chunk => {
     if (!chunk.evidenceTypes?.includes("documentation")) return false
 
     const text = [
@@ -2882,7 +3022,11 @@ function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: 
       }
 
       if (filePath.includes("business-rules") || filePath.includes("rules")) value += asksRules ? 20 : 0
-      if (filePath.endsWith("index.mdx") || filePath.endsWith("index.md")) value += asksRules ? 0 : 12
+      if (filePath.includes("glossarium") || filePath.includes("glossary")) value += asksDefinition ? 18 : 4
+      if (filePath.endsWith("index.mdx") || filePath.endsWith("index.md")) value += asksRules ? 0 : 18
+      if (asksDefinition && /\ballows users to automatically|overview|core purpose|internal documentation for/i.test(content)) value += 35
+      if (asksDefinition && (filePath.includes("cron") || filePath.includes("diagram"))) value -= 25
+      if (!asksRules && filePath.includes("business-rules")) value -= asksDefinition ? 8 : 0
 
       return value
     }
@@ -2890,9 +3034,23 @@ function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: 
     return score(right) - score(left)
   })
 
+  const docChunks = asksDefinition
+    ? sortedDocChunks.filter(chunk => {
+        const filePath = chunk.filePath?.toLowerCase() ?? ""
+        const content = chunk.content?.toLowerCase() ?? ""
+        const isTopLevelIndex = /docs:[^/\\]+[/\\]index\.mdx?$/.test(filePath)
+
+        return isTopLevelIndex ||
+          filePath.includes("glossarium") ||
+          filePath.includes("glossary") ||
+          content.includes("allows users to automatically")
+      })
+    : sortedDocChunks
+
   if (docChunks.length === 0) return undefined
 
   const facts: string[] = []
+  const maxFacts = asksDefinition ? 6 : 14
 
   for (const chunk of docChunks) {
     const lines = (chunk.content ?? "")
@@ -2905,19 +3063,25 @@ function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: 
       const lowerLine = line.toLowerCase()
       const isHeader = /^#{1,4}\s+/.test(line)
       const isListOrTable = /^[-*]\s+/.test(line) || /^\|/.test(line) || /^\d+\.\s+/.test(line)
+      const isDiagramOrCode = /^(graph|flowchart|sequenceDiagram|classDef|subgraph|%%|[A-Za-z0-9_]+\[|[A-Za-z0-9_]+-->|[A-Za-z0-9_]+-.->)/.test(line)
+      const isDocusaurusComponent = /^<|^import\s+/.test(line)
+      const isMetadataLine = /^---$/.test(line) || /^>\s+/.test(line)
       const mentionsSubject = subjectTerms.some(term => lowerLine.includes(term))
 
-      if (mentionsSubject || (asksRules && isListOrTable) || (!asksRules && isHeader && lowerLine.includes("isignal"))) {
+      if (isDiagramOrCode || isDocusaurusComponent || isMetadataLine) continue
+      if (asksDefinition && isListOrTable) continue
+
+      if (mentionsSubject || (asksRules && isListOrTable) || (!asksRules && !isListOrTable && !isHeader)) {
         facts.push(`${line} (${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine})`)
       }
 
-      if (facts.length >= 14) break
+      if (facts.length >= maxFacts) break
     }
 
-    if (facts.length >= 14) break
+    if (facts.length >= maxFacts) break
   }
 
-  const uniqueFacts = unique(facts, 14)
+  const uniqueFacts = unique(facts, maxFacts)
 
   if (uniqueFacts.length === 0) return undefined
 
@@ -2931,6 +3095,30 @@ function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: 
       ? "Catatan: ini adalah ringkasan evidence dokumentasi. Untuk detail implementasi, tanyakan flow, endpoint, tabel, atau service spesifik."
       : "Note: this is a documentation evidence summary. For implementation details, ask for a specific flow, endpoint, table, or service.",
   ].join("\n")
+}
+
+function documentationGlossarySourceChunks(chunks: RetrievedPayload[], question: string): RetrievedPayload[] {
+  const asksDefinition = /\b(apa itu|what is|maksud|meaning|define|definition|glossary|glosarium)\b/i.test(question)
+  const asksRules = /\b(aturan|rules?|rule|ketentuan|business rules?)\b/i.test(question)
+
+  return chunks.filter(chunk => {
+    if (!chunk.evidenceTypes?.includes("documentation")) return false
+
+    const filePath = chunk.filePath?.toLowerCase() ?? ""
+    const content = chunk.content?.toLowerCase() ?? ""
+
+    if (asksRules) return filePath.includes("rules")
+    if (asksDefinition) {
+      const isTopLevelIndex = /docs:[^/\\]+[/\\]index\.mdx?$/.test(filePath)
+
+      return isTopLevelIndex ||
+        filePath.includes("glossarium") ||
+        filePath.includes("glossary") ||
+        content.includes("allows users to automatically")
+    }
+
+    return true
+  }).slice(0, 12)
 }
 
 function extractNamedSymbolsFromQuestion(question: string): string[] {
@@ -3111,7 +3299,7 @@ async function main() {
     : []
   const exactTermDetailChunks =
     exactRoutes.length === 0 && exactTermChunks.length > 0
-      ? await retrieveNeighborChunks(exactTermChunks, questionAsksAboutAccountTypes(question) ? 100 : 70)
+      ? await retrieveNeighborChunks(exactTermChunks, questionAsksAboutAccountTypes(question) ? 240 : 70)
       : []
   const exactComparison = exactRoutes.length >= 2 && isExactRouteComparisonQuestion(question)
   const exactEndpointInspection =
@@ -3255,9 +3443,7 @@ async function main() {
   const accountTypeGlossaryAnswer = buildAccountTypeGlossaryAnswer(chunks, question)
 
   if (accountTypeGlossaryAnswer) {
-    const sourceChunks = chunks.filter(chunk => {
-      return /accountTypes|accountTypesV2|GetAccountTypes|account\/types|platform_type|group_creation/i.test(chunk.content ?? "")
-    }).slice(0, 12)
+    const sourceChunks = accountTypeRelevantSourceChunks(chunks, question)
 
     console.log("\nANSWER\n")
     console.log(accountTypeGlossaryAnswer)
@@ -3273,10 +3459,19 @@ async function main() {
     return
   }
 
+  if (questionAsksAboutAccountTypes(question)) {
+    console.log("\nANSWER\n")
+    console.log(buildAccountTypeNotFoundAnswer(question))
+
+    console.log("\nSOURCES\n")
+
+    return
+  }
+
   const documentationGlossaryAnswer = buildDocumentationGlossaryAnswer(chunks, question)
 
   if (documentationGlossaryAnswer) {
-    const sourceChunks = chunks.filter(chunk => chunk.evidenceTypes?.includes("documentation")).slice(0, 12)
+    const sourceChunks = documentationGlossarySourceChunks(chunks, question)
 
     console.log("\nANSWER\n")
     console.log(documentationGlossaryAnswer)

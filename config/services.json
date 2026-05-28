@@ -5,7 +5,7 @@
       "kind": "broker",
       "aliases": ["mrg", "mrg broker", "mrg api"],
       "repos": ["ims-tf", "ims-tf2", "mrg-accounts"],
-      "keywords": ["mrg", "MrgController", "MrgV2Controller", "MRGAccountRpc", "ReqAccountDemo", "RequestDemoAccount"]
+      "keywords": ["mrg", "MrgController", "MrgV2Controller", "MRGAccountRpc", "ReqAccountDemo", "RequestDemoAccount", "GetAccountTypes", "GetAccountTypesV2", "GetAccountTypeByUserId", "accountTypes", "MetaAccountType", "type_name", "group_creation"]
     },
     {
       "name": "askap",
