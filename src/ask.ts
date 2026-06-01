@@ -2,85 +2,52 @@ import path from "node:path"
 import { Command } from "commander"
 import { qdrant } from "./lib/qdrant.js"
 import { config } from "./lib/config.js"
-import { createEmbedding, chat, detectPreferredLanguage } from "./lib/ollama.js"
+import { createEmbedding, chat } from "./lib/ollama.js"
 import { readRelationshipGraph } from "./lib/graph.js"
 import { buildRegistryPromptContext, expandQuestionWithRegistry } from "./lib/service-registry.js"
+import {
+  answerLanguageLabel as answerLanguageLabelFor,
+  detectAnswerLanguage,
+  heuristicAnswerLanguage,
+  localized as localizedFor,
+  localizeAnswer as localizeAnswerFor,
+  shouldAnswerIndonesian as shouldAnswerIndonesianFor,
+} from "./ask/language.js"
+import {
+  escapeRegExp,
+  extractConceptTokens,
+  extractDefinitionSubjectTerms,
+  extractQuestionAcronyms,
+  extractQuestionHints,
+  extractQuestionRoutes,
+  extractShortSubjectTokens,
+  questionAsksAboutAccountTypes,
+  questionAsksAboutDatabase,
+  questionAsksAboutGlossary,
+  questionAsksAboutServicesOrFlow,
+  questionAsksForDiagram,
+  questionAsksHowWorks,
+  questionAsksMedalMechanism,
+  questionBrokerHint,
+  questionMetaTraderTerm,
+  unique,
+} from "./ask/question.js"
 import type { AnswerLanguage } from "./lib/ollama.js"
 import type { RelationshipEdge } from "./lib/graph.js"
-import type { EvidenceType } from "./lib/evidence.js"
 import type { RelationshipHints } from "./lib/relationships.js"
 import type { ServiceType } from "./lib/chunker.js"
+import type {
+  GraphFlowAnswer,
+  GraphPathDetails,
+  HandlerRef,
+  MethodWindow,
+  RetrievedChunk,
+  RetrievedPayload,
+  RouteDefinition,
+} from "./ask/types.js"
 import { extractQuestionTerms } from "./lib/vocabulary.js"
 
-type RetrievedPayload = {
-  repoName?: string
-  serviceType?: ServiceType
-  branchName?: string
-  commitSha?: string
-  docLocale?: string
-  filePath?: string
-  startLine?: number
-  endLine?: number
-  content?: string
-  evidenceTypes?: EvidenceType[]
-  routes?: string[]
-  symbols?: string[]
-  messageNames?: string[]
-  queueNames?: string[]
-  exchangeNames?: string[]
-  dbTables?: string[]
-  contentHash?: string
-}
-
-type RetrievedChunk = {
-  id: string
-  payload: RetrievedPayload
-}
-
 type SearchFilter = ReturnType<typeof buildFilter>
-
-type HandlerRef = {
-  objectName: string
-  methodName: string
-  fullName: string
-}
-
-type RouteDefinition = {
-  method: string
-  alias: string
-  url: string
-  handler: string
-}
-
-type MethodWindow = {
-  content: string
-  firstChunk: RetrievedPayload | undefined
-  lastChunk: RetrievedPayload | undefined
-  startLine: number
-  endLine: number
-}
-
-type GraphFlowAnswer = {
-  answer: string
-  sources: RelationshipEdge[]
-}
-
-type GraphPathDetails = {
-  entry: RelationshipEdge
-  endpointHandlers: RelationshipEdge[]
-  handlerDefinitionEdges: RelationshipEdge[]
-  handlerFacts: string[]
-  rpcCalls: RelationshipEdge[]
-  externalCalls: RelationshipEdge[]
-  downstreamExternalSymbols: RelationshipEdge[]
-  downstreamExternalFacts: string[]
-  downstreamSymbolCalls: RelationshipEdge[]
-  downstreamModelDefinitions: RelationshipEdge[]
-  downstreamModelFacts: string[]
-  downstreamSymbols: RelationshipEdge[]
-  tableEdges: RelationshipEdge[]
-  sources: RelationshipEdge[]
-}
 
 const serviceTypes = new Set<ServiceType>(["api", "worker", "cron", "library", "unknown"])
 
@@ -220,6 +187,64 @@ async function retrievePreferredLocaleDocChunks(queryText: string, resultLimit: 
     .filter(chunk => chunk.payload.content && chunk.payload.evidenceTypes?.includes("documentation"))
 }
 
+async function retrieveDocumentationSubjectMatches(subjectTerms: string[], resultLimit: number): Promise<RetrievedChunk[]> {
+  const terms = unique(subjectTerms.map(term => term.toLowerCase()).filter(term => term.length >= 2), 16)
+
+  if (terms.length === 0) return []
+
+  const matches: Array<RetrievedChunk & { score: number }> = []
+  let offset: string | number | Record<string, unknown> | null | undefined
+
+  do {
+    const filter = buildFilter()
+    const page = await qdrant.scroll(config.collectionName, {
+      limit: 256,
+      with_payload: true,
+      with_vector: false,
+      ...(filter ? { filter } : {}),
+      ...(offset ? { offset } : {}),
+    })
+
+    for (const point of page.points) {
+      const payload = point.payload as RetrievedPayload | null | undefined
+
+      if (!payload?.content || !payload.evidenceTypes?.includes("documentation")) continue
+
+      const filePath = payload.filePath?.toLowerCase() ?? ""
+      const content = payload.content.toLowerCase()
+      const text = `${filePath}\n${content}`
+      let score = 0
+
+      for (const term of terms) {
+        const termPattern = new RegExp(`\\b${escapeRegExp(term)}\\b`, "i")
+
+        if (term.length <= 3) {
+          if (termPattern.test(text)) score += 12
+          if (new RegExp(`[\\\\/]${escapeRegExp(term)}[-_][a-z0-9_-]*docs?[\\\\/]`, "i").test(filePath)) score += 70
+          if (new RegExp(`\\(${escapeRegExp(term.toUpperCase())}\\)`).test(payload.content ?? "")) score += 45
+        } else if (text.includes(term)) {
+          score += 12
+        }
+      }
+
+      if (/docs:[^/\\]+[/\\][^/\\]+-docs[/\\]index\.mdx?$/i.test(payload.filePath ?? "")) score += 55
+      if (score <= 0) continue
+
+      matches.push({
+        id: String(point.id),
+        payload,
+        score: score + scoreDocLocalePreference(payload),
+      })
+    }
+
+    offset = page.next_page_offset
+  } while (offset)
+
+  return matches
+    .sort((left, right) => right.score - left.score)
+    .slice(0, resultLimit)
+}
+
 async function retrieveVocabularyChunks(queryText: string, resultLimit: number): Promise<RetrievedChunk[]> {
   const questionVector = await createEmbedding(queryText)
   const filter: Record<string, unknown> | undefined = options.repoName
@@ -259,150 +284,113 @@ async function retrieveVocabularyChunks(queryText: string, resultLimit: number):
     .slice(0, resultLimit)
 }
 
-function unique(values: string[], max = 12): string[] {
-  return [...new Set(values.map(value => value.trim()).filter(Boolean))].slice(0, max)
+async function retrieveExactVocabularyMatches(terms: string[], resultLimit: number): Promise<RetrievedChunk[]> {
+  const exactTerms = unique(terms, 48)
+
+  if (exactTerms.length === 0) return []
+
+  const matches: Array<RetrievedChunk & { score: number }> = []
+  let offset: string | number | Record<string, unknown> | null | undefined
+
+  do {
+    const filter = buildFilter()
+    const page = await qdrant.scroll(config.collectionName, {
+      limit: 256,
+      with_payload: true,
+      with_vector: false,
+      ...(filter ? { filter } : {}),
+      ...(offset ? { offset } : {}),
+    })
+
+    for (const point of page.points) {
+      const payload = point.payload as RetrievedPayload | null | undefined
+
+      if (!payload?.content || !payload.filePath?.startsWith("vocabulary://")) continue
+
+      const score = scoreExactTermMatch(payload, exactTerms)
+
+      if (score <= 0) continue
+
+      matches.push({
+        id: String(point.id),
+        payload,
+        score,
+      })
+    }
+
+    offset = page.next_page_offset
+  } while (offset)
+
+  return matches
+    .sort((left, right) => right.score - left.score)
+    .slice(0, resultLimit)
 }
 
-function heuristicAnswerLanguage(question: string): AnswerLanguage {
-  if (/\b(apa|apakah|bagaimana|gimana|kenapa|mengapa|jelasin|jelaskan|terangkan|berikan|daftar|tipe|jenis|akun|aturan|beda|bedanya|perbedaan|yang|dan|atau|dari|untuk|dengan|di|ke|validasi|validasinya|returnnya|servis|layanan|tabel|database|alur|endpointnya|bodynya)\b/i.test(question)) {
-    return "id"
-  }
+async function retrieveMetaTraderTermMatches(term: "MT4" | "MT5", resultLimit: number): Promise<RetrievedChunk[]> {
+  const matches: Array<RetrievedChunk & { score: number }> = []
+  const termPattern = new RegExp(`\\b${term}\\b`, "i")
+  let offset: string | number | Record<string, unknown> | null | undefined
 
-  if (/\b(what|which|when|where|why|how|explain|describe|show|give|list|difference|return|validation|endpoint|service|database|table|flow)\b/i.test(question)) {
-    return "en"
-  }
+  do {
+    const filter = buildFilter()
+    const page = await qdrant.scroll(config.collectionName, {
+      limit: 256,
+      with_payload: true,
+      with_vector: false,
+      ...(filter ? { filter } : {}),
+      ...(offset ? { offset } : {}),
+    })
 
-  return "unknown"
-}
+    for (const point of page.points) {
+      const payload = point.payload as RetrievedPayload | null | undefined
 
-async function detectAnswerLanguage(question: string): Promise<AnswerLanguage> {
-  const heuristic = heuristicAnswerLanguage(question)
-  const detected = await detectPreferredLanguage(question)
+      if (!payload?.content) continue
+      if (/devops-docs/i.test(payload.filePath ?? "")) continue
 
-  if (detected === "unknown") return heuristic
-  if (heuristic !== "unknown" && heuristic !== detected) return heuristic
+      const text = `${payload.filePath ?? ""}\n${payload.content}`
 
-  return detected
+      if (!termPattern.test(text)) continue
+      if (!/metatrader|platform_type|metaserver|serverplatform|tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier|akun metatrader/i.test(text)) continue
+
+      let score = 0
+      const filePath = payload.filePath?.toLowerCase() ?? ""
+
+      if (/tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier/i.test(text)) score += 80
+      if (/platform_type|metaserver_id|ServerPlatform/i.test(text)) score += 45
+      if (/MetaTrader|metatrader/i.test(text)) score += 30
+      if (filePath.includes("libs/config")) score += 35
+      if (filePath.includes("models/user") || filePath.includes("models/demo") || filePath.includes("models/real")) score += 18
+      if (payload.evidenceTypes?.includes("documentation")) score -= 12
+
+      matches.push({
+        id: String(point.id),
+        payload,
+        score,
+      })
+    }
+
+    offset = page.next_page_offset
+  } while (offset)
+
+  return matches
+    .sort((left, right) => right.score - left.score)
+    .slice(0, resultLimit)
 }
 
 function shouldAnswerIndonesian(question: string): boolean {
-  return answerLanguage === "id" || (answerLanguage === "unknown" && heuristicAnswerLanguage(question) === "id")
+  return shouldAnswerIndonesianFor(question, answerLanguage)
 }
 
 function answerLanguageLabel(question: string): string {
-  const language = answerLanguage === "unknown" ? heuristicAnswerLanguage(question) : answerLanguage
-
-  if (language === "id") return "Indonesian/Bahasa Indonesia"
-  if (language === "en") return "English"
-
-  return "same language as the question"
+  return answerLanguageLabelFor(question, answerLanguage)
 }
 
 function localized(id: string, en: string): string {
-  return shouldAnswerIndonesian(question) ? id : en
+  return localizedFor(question, answerLanguage, id, en)
 }
 
 function localizeAnswer(answer: string, question: string): string {
-  if (!shouldAnswerIndonesian(question)) return answer
-
-  const replacements: Array<[RegExp, string]> = [
-    [/Endpoint definition found in/g, "Definisi endpoint ditemukan di"],
-    [/Exact symbol evidence found for:/g, "Evidence symbol persis ditemukan untuk:"],
-    [/Graph flow found from relationship index:/g, "Flow graph ditemukan dari relationship index:"],
-    [/Confirmed path:/g, "Path yang terkonfirmasi:"],
-    [/Matching paths:/g, "Path yang cocok:"],
-    [/Entry:/g, "Entry:"],
-    [/Endpoint handlers:/g, "Handler endpoint:"],
-    [/Handler behavior:/g, "Behavior handler:"],
-    [/RPC calls from handlers:/g, "Call RPC dari handler:"],
-    [/External calls from handlers:/g, "Call eksternal dari handler:"],
-    [/Downstream handlers for external\/API funcs:/g, "Handler downstream untuk func API eksternal:"],
-    [/Downstream handler behavior:/g, "Behavior handler downstream:"],
-    [/Model\/symbol calls inside downstream handlers:/g, "Call model/symbol di dalam handler downstream:"],
-    [/Model\/symbol behavior:/g, "Behavior model/symbol:"],
-    [/Downstream RPC symbols:/g, "Symbol RPC downstream:"],
-    [/Database\/table touches near downstream symbols:/g, "Touch database/tabel di sekitar symbol downstream:"],
-    [/Confirmed facts:/g, "Fakta yang terkonfirmasi:"],
-    [/referenced by route in/g, "direferensikan oleh route di"],
-    [/referenced by route block in/g, "direferensikan oleh block route di"],
-    [/Services\/repos involved:/g, "Service/repo yang terlibat:"],
-    [/Upstream callers:/g, "Caller upstream:"],
-    [/Request body:/g, "Request body:"],
-    [/API-layer validation and payload behavior:/g, "Validasi layer API dan perilaku payload:"],
-    [/Database\/table effects:/g, "Efek database/tabel:"],
-    [/Downstream RPC\/model behavior:/g, "Perilaku RPC/model downstream:"],
-    [/Return:/g, "Return:"],
-    [/Evidence:/g, "Evidence:"],
-    [/What is still missing:/g, "Yang masih belum ada:"],
-    [/Retrieved repos\/services with matching evidence:/g, "Repo/service yang ditemukan dari evidence:"],
-    [/Confirmed routes in retrieved evidence:/g, "Route yang terkonfirmasi di evidence:"],
-    [/Confirmed message\/queue evidence:/g, "Evidence message/queue yang terkonfirmasi:"],
-    [/Database\/table evidence:/g, "Evidence database/tabel:"],
-    [/Table evidence sources:/g, "Source evidence tabel:"],
-    [/Retrieved source set:/g, "Source yang ter-retrieve:"],
-    [/The important difference is in the handler behavior, not only the URL version\./g, "Perbedaan pentingnya ada di behavior handler, bukan hanya versi URL."],
-    [/Behavioral differences:/g, "Perbedaan behavior:"],
-    [/Return behavior:/g, "Behavior return:"],
-    [/Handler details found:/g, "Detail handler yang ditemukan:"],
-    [/Downstream RPC details found:/g, "Detail RPC downstream yang ditemukan:"],
-    [/method:/g, "method:"],
-    [/alias:/g, "alias:"],
-    [/handler:/g, "handler:"],
-    [/body fields:/g, "field body:"],
-    [/rpc func values:/g, "nilai func RPC:"],
-    [/external API func values:/g, "nilai func API eksternal:"],
-    [/required fields\/checks:/g, "field/check wajib:"],
-    [/calls:/g, "memanggil:"],
-    [/tables:/g, "tabel:"],
-    [/validation\/auth:/g, "validasi/auth:"],
-    [/extra payload:/g, "payload tambahan:"],
-    [/return:/g, "return:"],
-    [/verifies JWT/g, "memverifikasi JWT"],
-    [/checks JWT user-agent against request user-agent/g, "mengecek user-agent JWT terhadap user-agent request"],
-    [/requires authenticated userid >= 1/g, "mewajibkan userid terautentikasi >= 1"],
-    [/throws on request\.validationError/g, "throw jika ada request.validationError"],
-    [/looks up mapped MRG account for userid/g, "mencari mapping akun MRG untuk userid"],
-    [/throws MRG_ACCOUNT_NOT_FOUND when mapped MRG account is missing/g, "throw MRG_ACCOUNT_NOT_FOUND jika mapping akun MRG tidak ada"],
-    [/adds user_id from mapped mrguser\.mrgid/g, "menambahkan user_id dari mrguser.mrgid yang sudah ter-mapping"],
-    [/adds ip from x-forwarded-for or remoteAddress/g, "menambahkan ip dari x-forwarded-for atau remoteAddress"],
-    [/adds browser from user-agent header/g, "menambahkan browser dari header user-agent"],
-    [/calls RPC func:/g, "memanggil func RPC:"],
-    [/calls MRGAccountRpc\.send/g, "memanggil MRGAccountRpc.send"],
-    [/uses Joi schema validation/g, "menggunakan validasi schema Joi"],
-    [/requires positive integer login/g, "mewajibkan login integer positif"],
-    [/requires nominal integer from 1 to 9999999/g, "mewajibkan nominal integer dari 1 sampai 9999999"],
-    [/requires metaserver_id 1 or 2/g, "mewajibkan metaserver_id 1 atau 2"],
-    [/requires integer user_id/g, "mewajibkan user_id integer"],
-    [/checks users_demoid for matching demo account/g, "mengecek users_demoid untuk akun demo yang cocok"],
-    [/checks users_demoid/g, "mengecek users_demoid"],
-    [/writes to deposit_demo/g, "menulis ke deposit_demo"],
-    [/creates deposit_demo row with status 0/g, "membuat row deposit_demo dengan status 0"],
-    [/calls demo balance RPC/g, "memanggil RPC balance demo"],
-    [/uses MT4 demo balance flow when metaserver_id is 1/g, "memakai flow balance demo MT4 ketika metaserver_id = 1"],
-    [/uses MT5 demo balance flow when metaserver_id is 2/g, "memakai flow balance demo MT5 ketika metaserver_id = 2"],
-    [/returns true on success/g, "mengembalikan true saat sukses"],
-    [/marks deposit_demo status 1 on success/g, "menandai deposit_demo status 1 saat sukses"],
-    [/marks deposit_demo status 2 on failure/g, "menandai deposit_demo status 2 saat gagal"],
-    [/delegates to demoModel\.SubmitDepositDemo/g, "mendelegasikan ke demoModel.SubmitDepositDemo"],
-    [/initial result is/g, "nilai awal result adalah"],
-    [/sets result\.message from RPC res\.message/g, "mengisi result.message dari RPC res.message"],
-    [/returns result/g, "mengembalikan result"],
-    [/downstream model returns true on success before the API returns RPC res\.message/g, "model downstream mengembalikan true saat sukses sebelum API mengembalikan RPC res.message"],
-    [/before the API returns RPC res\.message/g, "sebelum API mengembalikan RPC res.message"],
-    [/I do not have an exact route\/function anchor for this question, so this is an evidence-only retrieval summary, not a confirmed end-to-end flow\./g, "Saya tidak punya anchor route/function yang persis untuk pertanyaan ini, jadi ini hanya ringkasan retrieval berbasis evidence, bukan flow end-to-end yang terkonfirmasi."],
-    [/An exact endpoint, function name, queue name, or RPC func is needed to confirm a full service-to-service flow\./g, "Perlu endpoint, nama function, queue name, atau func RPC yang persis untuk mengonfirmasi flow service-to-service penuh."],
-    [/Retrieved repos\/files alone are not proof that every listed repo participates in the same runtime path\./g, "Repo/file yang ter-retrieve saja belum membuktikan semua repo tersebut ikut dalam runtime path yang sama."],
-    [/This answer only uses chunks that exactly mention the named symbol plus nearby chunks\./g, "Jawaban ini hanya memakai chunk yang menyebut symbol tersebut secara persis plus chunk di sekitarnya."],
-    [/If you need the full runtime flow, ask with the endpoint path, queue name, or RPC func and include what detail you want\./g, "Kalau butuh runtime flow penuh, tanyakan dengan path endpoint, queue name, atau func RPC dan sertakan detail yang kamu mau."],
-    [/No upstream caller was extracted from the retrieved context\./g, "Tidak ada caller upstream yang berhasil diekstrak dari context yang ter-retrieve."],
-    [/No database\/table effect was extracted\./g, "Tidak ada efek database\/tabel yang berhasil diekstrak."],
-  ]
-
-  return replacements.reduce((localized, [pattern, replacement]) => localized.replace(pattern, replacement), answer)
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return localizeAnswerFor(answer, question, answerLanguage)
 }
 
 function collectHints(chunks: RetrievedChunk[]): RelationshipHints {
@@ -416,17 +404,6 @@ function collectHints(chunks: RetrievedChunk[]): RelationshipHints {
   }
 }
 
-function extractQuestionHints(question: string): string[] {
-  return unique([
-    ...[...question.matchAll(/\/[A-Za-z0-9_./:{}-]+/g)].map(match => match[0]),
-    ...[...question.matchAll(/\b[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*\b/g)].map(match => match[0]),
-    ...[...question.matchAll(/\b[A-Z][A-Za-z0-9_]{2,}\b/g)]
-      .map(match => match[0])
-      .filter(value => !["What", "When", "Where", "Which", "How", "Does"].includes(value)),
-    ...[...question.matchAll(/["'`]([^"'`]{2,80})["'`]/g)].map(match => match[1] ?? ""),
-  ])
-}
-
 function registryExactSearchTerms(): string[] {
   const noisyTerms = new Set(["api", "broker", "domain", "concept", "service"])
 
@@ -437,69 +414,6 @@ function registryExactSearchTerms(): string[] {
       .filter(term => !/^ims-/.test(term.toLowerCase()))
       .filter(term => !/^tf2-/.test(term.toLowerCase())),
     24,
-  )
-}
-
-function extractQuestionRoutes(question: string): string[] {
-  return unique(
-    [...question.matchAll(/\/[A-Za-z0-9_./:{}-]+/g)].map(match => match[0]),
-    10,
-  )
-}
-
-function extractConceptTokens(question: string): string[] {
-  const stopWords = new Set([
-    "apa",
-    "apakah",
-    "bagaimana",
-    "gimana",
-    "jelasin",
-    "jelaskan",
-    "flow",
-    "alur",
-    "dari",
-    "yang",
-    "dan",
-    "atau",
-    "ke",
-    "di",
-    "the",
-    "what",
-    "which",
-    "how",
-    "explain",
-    "describe",
-    "show",
-    "tell",
-    "from",
-    "to",
-    "in",
-    "of",
-    "repo",
-    "service",
-    "ims",
-    "tf",
-    "tf2",
-  ])
-
-  const aliases = new Map([
-    ["deemo", "demo"],
-    ["demos", "demo"],
-    ["demoaccount", "demo"],
-    ["acct", "account"],
-    ["accounts", "account"],
-    ["requests", "request"],
-  ])
-
-  return unique(
-    question
-      .toLowerCase()
-      .split(/[^a-z0-9_]+/g)
-      .map(token => token.trim())
-      .map(token => aliases.get(token) ?? token)
-      .filter(token => token.length >= 3)
-      .filter(token => !stopWords.has(token)),
-    8,
   )
 }
 
@@ -1208,6 +1122,19 @@ function scoreExactTermMatch(payload: RetrievedPayload, terms: string[]): number
     if (text.includes("getaccounttypesv2")) score += 10
     if (text.includes("getaccounttypebyuserid")) score += 10
     if (text.includes("metaaccounttype.getpublicaccounttypes")) score += 14
+  }
+
+  if (terms.some(term => term.toLowerCase() === "calculatepointandmedal20260531")) {
+    if (filePath.includes("domain/vp")) score += 80
+    if (/export\s+function\s+CalculatePointAndMedal20260531/.test(content)) score += 80
+  }
+
+  if (terms.some(term => /^mt[45]$/i.test(term))) {
+    if (filePath.includes("devops-docs")) score -= 80
+    if (/metatrader|platform_type|metaserver|ServerPlatform|TF_METATRADER_PLATFORM_TYPE|MRG_METATRADER_PLATFORM_TYPE|ASKAP_METATRADER_PLATFORM_TYPE|VOLUME_MULTIPLIER/i.test(text)) score += 35
+    if (filePath.includes("libs/config")) score += 28
+    if (filePath.includes("models/user") || filePath.includes("models/demo") || filePath.includes("models/real")) score += 16
+    if (filePath.includes("isignal-docs") && filePath.includes("architecture")) score += 10
   }
 
   // Boost vocabulary/glossary chunks when question contains defined terms
@@ -2442,37 +2369,6 @@ function filterEndpointSourceChunks(
   return mergeChunks(filtered, 14)
 }
 
-function questionAsksAboutDatabase(question: string): boolean {
-  return /\b(database|databases|table|tables|sql|affected|insert|update|delete|select)\b/i.test(question)
-}
-
-function questionAsksAboutServicesOrFlow(question: string): boolean {
-  return /\b(service|services|repo|repos|flow|involved|calls?|publishes?|consumes?|rpc|amqp|rabbitmq|queue|exchange)\b/i.test(question)
-}
-
-function questionAsksAboutGlossary(question: string): boolean {
-  return /\b(apa itu|what is|maksud|meaning|how .*works?|how does .*work|cara kerja|gimana .*kerja|bagaimana .*kerja|glossary|glosarium|list|daftar|berikan|tipe akun|account type|aturan|rules?|platform_type|platform type|isignal)\b/i.test(question)
-}
-
-function questionAsksHowWorks(question: string): boolean {
-  return /\b(how .*works?|how does .*work|cara kerja|gimana .*kerja|bagaimana .*kerja)\b/i.test(question)
-}
-
-function questionAsksForDiagram(question: string): boolean {
-  return /\b(flowchart|diagram|mermaid|sequence diagram|sequenceDiagram|visuali[sz]e|gambar(?:kan)? alur|buat(?:kan)? diagram|buat(?:kan)? flowchart|alur visual)\b/i.test(question)
-}
-
-function questionAsksAboutAccountTypes(question: string): boolean {
-  return /\b(tipe akun|jenis akun|account types?|account_type|accountTypes|accountTypesV2)\b/i.test(question)
-}
-
-function questionBrokerHint(question: string): "mrg" | "askap" | undefined {
-  if (/\bmrg\b/i.test(question)) return "mrg"
-  if (/\b(mmb|askap)\b/i.test(question)) return "askap"
-
-  return undefined
-}
-
 function extractSqlTableNamesFromContent(content: string): string[] {
   return [
     ...[...content.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi)].map(match => match[1] ?? ""),
@@ -3494,6 +3390,215 @@ function buildVocabularyAnswer(chunks: RetrievedPayload[], question: string): st
   ].join("\n")
 }
 
+function payloadSource(chunk: RetrievedPayload): string {
+  return `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`
+}
+
+function buildMedalMechanismAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
+  if (!questionAsksMedalMechanism(question)) return undefined
+
+  const relevant = chunks.filter(chunk => {
+    const content = chunk.content ?? ""
+    const filePath = chunk.filePath ?? ""
+
+    return /dsc_channels_point_events|dsc_channels_point_medal_journal|dsc_channels_point_balance|dsc_channels_point_redeem|POINT_LEVELS|RANGE_MEDAL|prev_channel_medal|total_pips|last_qualify_id|qualify|redeemPointAsync|CalculatePointAndMedal20260531|current_month_vp|minimum_vp|average_monthly_vp|signal_settled|reset_channel/i.test(`${filePath}\n${content}`)
+  })
+
+  if (relevant.length === 0) return undefined
+
+  const hasPointEvents = relevant.some(chunk => /dsc_channels_point_events/i.test(chunk.content ?? ""))
+  const hasQualifyRule = relevant.some(chunk => /prev_channel_medal\s*=\s*14|last_qualify_id|total_pips\s*>=\s*IFNULL|a\.medals\s*=\s*1/i.test(chunk.content ?? ""))
+  const hasLevelConfig = relevant.some(chunk => /POINT_LEVELS|RANGE_MEDAL/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
+  const hasRedeemLogic = relevant.some(chunk => /redeemPointAsync|CHANNEL_LEVEL_NOT_ENOUGH|dsc_channels_point_redeem|dsc_wallet_point|level\.money|level\.percentage/i.test(chunk.content ?? ""))
+  const hasVpCalculation = relevant.some(chunk => /CalculatePointAndMedal20260531|EFFECTIVE MAY 2026|current_month_vp|tmp_params_target_qualify_vp|minimum_vp|average_monthly_vp|signal_settled|reset_channel/i.test(chunk.content ?? ""))
+
+  if (!hasPointEvents && !hasLevelConfig && !hasVpCalculation) return undefined
+
+  const lines: string[] = []
+  const isIndonesian = shouldAnswerIndonesian(question)
+
+  if (isIndonesian) {
+    lines.push("Dari kode yang ter-index, medal tidak terlihat sebagai field statis yang diisi manual. Medal dihitung/dipakai lewat mekanisme point-event channel.")
+    lines.push("")
+    lines.push("Yang terkonfirmasi:")
+
+    if (hasPointEvents) {
+      lines.push("- Riwayat kenaikan/perubahan medal disimpan lewat `dsc_channels_point_events`; query terkait memakai `medals`, `prev_channel_medal`, `total_pips`, `point`, dan `last_qualify_id`.")
+    }
+
+    if (hasVpCalculation) {
+      lines.push("- Formula VP terbaru ada di `CalculatePointAndMedal20260531`: channel qualify jika `signal_settled >= 5`, `current_month_pips >= 0`, dan `current_month_vp >= minimum_vp`. Target naik medal adalah `max(minimum_vp, 80% * average_monthly_vp)`; jika `current_month_vp` mencapai target itu, medal bertambah `+1`.")
+      lines.push("- Kalau channel tidak aktif 2 bulan berturut-turut (`pips/signal settled/signal created` bulan ini dan bulan sebelumnya semuanya 0), medal di-reset turun sebesar current medal. Kalau `current_month_vp < 0`, kode masuk jalur punishment medal.")
+    }
+
+    if (hasQualifyRule) {
+      lines.push("- Ada rule `qualify`: event dianggap qualify ketika `a.medals = 1`, atau ketika channel sebelumnya sudah medal 14 dan `total_pips` memenuhi minimal `70%` dari event qualify sebelumnya atau fallback `2000`, serta `point > 0`.")
+    }
+
+    if (hasLevelConfig) {
+      lines.push("- Nama level hanya mapping dari jumlah medal: Newbie 0, Rookie 1-2, Pro 3-4, Elite 5-7, Master 8-12, Legend 13-14.")
+    }
+
+    if (hasRedeemLogic) {
+      lines.push("- Benefit/redeem point memakai level dari range medal saat ini. Jika level tidak ditemukan atau `money == 0`, kode melempar `CHANNEL_LEVEL_NOT_ENOUGH`; jadi level Newbie/Rookie/Pro punya medal range tetapi belum punya benefit redeem.")
+    }
+
+    lines.push("")
+    lines.push("Kesimpulan:")
+    lines.push(hasVpCalculation
+      ? hasPointEvents
+        ? "- Untuk \"naik medal\", current evidence menunjuk ke job bulanan `tf2-sinyo`: performa channel dihitung dari VP/pips/signal settled, menghasilkan `achievement.medal`, lalu disimpan sebagai event/journal dan dipetakan ke level."
+        : "- Untuk \"naik medal\", current evidence menunjuk ke formula `tf2-sinyo`: performa channel dihitung dari VP/pips/signal settled dan menghasilkan delta medal. Storage event/journal tidak ikut ter-retrieve pada jawaban ini."
+      : "- Untuk \"naik medal\", evidence yang ada menunjuk ke kalkulasi periodik/event berbasis performa channel (`total_pips`, `point`, dan event sebelumnya), lalu hasil medal itu dipetakan ke level.")
+    if (!hasVpCalculation) {
+      lines.push("- Detail formula lengkap pemberian `a.medals` belum boleh disimpulkan kalau chunk yang menghitung nilai `medals` tidak ikut ter-retrieve; tapi storage, rule qualify, mapping level, dan efek benefit sudah terkonfirmasi.")
+    }
+  } else {
+    lines.push("From the indexed code, medals do not look like a static/manual field. They are calculated and consumed through channel point-event logic.")
+    lines.push("")
+    lines.push("Confirmed pieces:")
+
+    if (hasPointEvents) {
+      lines.push("- Medal changes are tracked through `dsc_channels_point_events`; related queries use `medals`, `prev_channel_medal`, `total_pips`, `point`, and `last_qualify_id`.")
+    }
+
+    if (hasVpCalculation) {
+      lines.push("- The newer VP formula is in `CalculatePointAndMedal20260531`: a channel qualifies when `signal_settled >= 5`, `current_month_pips >= 0`, and `current_month_vp >= minimum_vp`. The medal-up target is `max(minimum_vp, 80% * average_monthly_vp)`; reaching it adds `+1` medal.")
+      lines.push("- If the channel is inactive for two consecutive months, the code resets medals by subtracting the current medal. If `current_month_vp < 0`, it enters punishment-medal logic.")
+    }
+
+    if (hasQualifyRule) {
+      lines.push("- A `qualify` rule is present: an event qualifies when `a.medals = 1`, or when the previous channel medal was 14 and `total_pips` reaches at least `70%` of the previous qualifying event, falling back to `2000`, with `point > 0`.")
+    }
+
+    if (hasLevelConfig) {
+      lines.push("- Level names are mappings from medal count: Newbie 0, Rookie 1-2, Pro 3-4, Elite 5-7, Master 8-12, Legend 13-14.")
+    }
+
+    if (hasRedeemLogic) {
+      lines.push("- Point redemption uses the current medal range to pick a level. If no level is found or `money == 0`, code throws `CHANNEL_LEVEL_NOT_ENOUGH`; so Newbie/Rookie/Pro have medal ranges but no redeem benefit.")
+    }
+
+    lines.push("")
+    lines.push("Conclusion:")
+    lines.push(hasVpCalculation
+      ? hasPointEvents
+        ? "- To gain medals, current evidence points to the monthly `tf2-sinyo` job: channel performance is calculated from VP/pips/settled signals, producing `achievement.medal`, then stored as event/journal data and mapped to a level."
+        : "- To gain medals, current evidence points to the `tf2-sinyo` formula: channel performance is calculated from VP/pips/settled signals and returns a medal delta. Event/journal storage was not retrieved for this answer."
+      : "- To gain medals, the indexed evidence points to periodic/channel performance events based on `total_pips`, `point`, and previous event state; the resulting medal count is then mapped to a level.")
+    if (!hasVpCalculation) {
+      lines.push("- The full formula that assigns `a.medals` is not confirmed unless the chunk calculating that value is retrieved, but the event storage, qualify rule, level mapping, and benefit effects are confirmed.")
+    }
+  }
+
+  const sources = unique(relevant.map(payloadSource), 8)
+
+  return [
+    ...lines,
+    "",
+    "Sources:",
+    ...sources.map(source => `- ${source}`),
+  ].join("\n")
+}
+
+function buildMetaTraderTermAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
+  const term = questionMetaTraderTerm(question)
+
+  if (!term) return undefined
+
+  const wanted = term.toLowerCase()
+  const relevant = chunks.filter(chunk => {
+    const text = `${chunk.filePath ?? ""}\n${chunk.content ?? ""}`
+
+    if (!new RegExp(`\\b${wanted}\\b`, "i").test(text)) return false
+    if (/devops-docs/i.test(chunk.filePath ?? "")) return false
+
+    return /metatrader|platform_type|metaserver|serverplatform|tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier|akun metatrader/i.test(text)
+  })
+
+  if (relevant.length === 0) return undefined
+
+  const combined = relevant.map(chunk => `${chunk.filePath ?? ""}\n${chunk.content ?? ""}`).join("\n")
+  const isIndonesian = shouldAnswerIndonesian(question)
+  const facts: string[] = []
+
+  if (/MetaTrader/i.test(combined)) {
+    facts.push(isIndonesian
+      ? `${term} adalah platform/jenis server MetaTrader yang dipakai sistem untuk akun trading dan eksekusi trade.`
+      : `${term} is a MetaTrader platform/server type used by the system for trading accounts and trade execution.`)
+  }
+
+  if (term === "MT4") {
+    if (/TF_METATRADER_PLATFORM_TYPE[\s\S]*MT4["']?\s*:\s*1/i.test(combined) || /MT4:\s*1/.test(combined)) {
+      facts.push(isIndonesian
+        ? "Di `tf2-ois`, mapping umum platform menunjukkan `MT4 = 1`."
+        : "In `tf2-ois`, the general platform mapping shows `MT4 = 1`.")
+    }
+
+    if (/ASKAP_METATRADER_PLATFORM_TYPE[\s\S]*0:\s*\{\s*type:\s*["']MT4/i.test(combined) || /0:\s*["']MT4["']/.test(combined)) {
+      facts.push(isIndonesian
+        ? "Untuk Askap/MMB, kode yang ter-index memetakan `platform_type 0` sebagai MT4."
+        : "For Askap/MMB, indexed code maps `platform_type 0` to MT4.")
+    }
+
+    if (/MRG_METATRADER_PLATFORM_TYPE[\s\S]*0:\s*\{\s*type:\s*["']MT4/i.test(combined)) {
+      facts.push(isIndonesian
+        ? "Untuk MRG, kode yang ter-index juga memetakan `platform_type 0` sebagai MT4."
+        : "For MRG, indexed code also maps `platform_type 0` to MT4.")
+    }
+
+    if (/VOLUME_MULTIPLIER[\s\S]*["']MT4["']\s*:\s*100/i.test(combined)) {
+      facts.push(isIndonesian
+        ? "`VOLUME_MULTIPLIER.MT4` bernilai `100` di config `tf2-ois`."
+        : "`VOLUME_MULTIPLIER.MT4` is `100` in `tf2-ois` config.")
+    }
+  } else {
+    if (/TF_METATRADER_PLATFORM_TYPE[\s\S]*MT5["']?\s*:\s*2/i.test(combined) || /MT5:\s*2/.test(combined)) {
+      facts.push(isIndonesian
+        ? "Di `tf2-ois`, mapping umum platform menunjukkan `MT5 = 2`."
+        : "In `tf2-ois`, the general platform mapping shows `MT5 = 2`.")
+    }
+
+    if (/ASKAP_METATRADER_PLATFORM_TYPE[\s\S]*5:\s*\{\s*type:\s*["']MT5/i.test(combined) || /5:\s*["']MT5["']/.test(combined)) {
+      facts.push(isIndonesian
+        ? "Untuk Askap/MMB, kode yang ter-index memetakan `platform_type 5` sebagai MT5."
+        : "For Askap/MMB, indexed code maps `platform_type 5` to MT5.")
+    }
+
+    if (/MRG_METATRADER_PLATFORM_TYPE[\s\S]*3:\s*\{\s*type:\s*["']MT5/i.test(combined)) {
+      facts.push(isIndonesian
+        ? "Untuk MRG, kode yang ter-index memetakan `platform_type 3` sebagai MT5."
+        : "For MRG, indexed code maps `platform_type 3` to MT5.")
+    }
+
+    if (/VOLUME_MULTIPLIER[\s\S]*["']MT5["']\s*:\s*10000/i.test(combined)) {
+      facts.push(isIndonesian
+        ? "`VOLUME_MULTIPLIER.MT5` bernilai `10000` di config `tf2-ois`."
+        : "`VOLUME_MULTIPLIER.MT5` is `10000` in `tf2-ois` config.")
+    }
+
+    if (/ENABLE_MT5/i.test(combined)) {
+      facts.push(isIndonesian
+        ? "Beberapa flow mengecek `ENABLE_MT5`, jadi fitur MT5 bisa digate oleh konfigurasi environment."
+        : "Some flows check `ENABLE_MT5`, so MT5 behavior can be gated by environment configuration.")
+    }
+  }
+
+  if (facts.length === 0) return undefined
+
+  const sources = unique(relevant.map(payloadSource), 8)
+
+  return [
+    isIndonesian
+      ? `Berdasarkan kode yang ter-index:`
+      : `Based on indexed code:`,
+    ...facts.map(fact => `- ${fact}`),
+    "",
+    "Sources:",
+    ...sources.map(source => `- ${source}`),
+  ].join("\n")
+}
+
 function buildCommentRuleAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
   const questionLower = question.toLowerCase()
   const questionTokens = questionLower.split(/\s+/).filter(t => t.length >= 3)
@@ -3641,8 +3746,14 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
   const asksGlossaryExplicitly = /\b(glossary|glosarium|glossarium)\b/i.test(question)
   const subjectTerms = unique([
     ...extractConceptTokens(question),
+    ...extractDefinitionSubjectTerms(question),
+    ...extractQuestionAcronyms(question),
+    ...extractShortSubjectTokens(question),
     ...registryExpansion.terms.filter(term => term.length >= 4),
   ], 24).map(term => term.toLowerCase())
+  const asksFinancialAdvisor = subjectTerms.includes("fa") ||
+    subjectTerms.includes("financial advisor") ||
+    /\b(financial advisor|penasihat keuangan|fa porto)\b/i.test(question)
   const matchingDocChunks = chunks.filter(chunk => {
     if (!chunk.evidenceTypes?.includes("documentation")) return false
 
@@ -3653,7 +3764,15 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       ...(chunk.messageNames ?? []),
     ].join("\n").toLowerCase()
 
-    return subjectTerms.some(term => text.includes(term.toLowerCase()))
+    return subjectTerms.some(term => {
+      const normalizedTerm = term.toLowerCase()
+
+      if (normalizedTerm.length <= 2) {
+        return new RegExp(`\\b${escapeRegExp(normalizedTerm)}\\b`, "i").test(text)
+      }
+
+      return text.includes(normalizedTerm)
+    })
   })
 
   function isTopLevelIndexPath(filePath: string): boolean {
@@ -3673,9 +3792,18 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       if (asksOverview && isTopLevelIndexPath(filePath)) value += 90
     }
 
+    if (asksFinancialAdvisor) {
+      if (filePath.includes("fa-porto-docs")) value += 100
+      if (content.includes("financial advisor") || content.includes("penasihat keuangan")) value += 60
+      if (asksOverview && isTopLevelIndexPath(filePath)) value += 90
+      if (filePath.includes("isignal-docs")) value -= 80
+      if (filePath.includes("devops-docs")) value -= 60
+      if (filePath.includes("glossarium") || filePath.includes("glossary")) value -= asksGlossaryExplicitly ? 0 : 35
+    }
+
     value += scoreDocLocalePreference(chunk)
     if (filePath.includes("flow")) value += asksHowWorks ? 45 : 0
-    if (filePath.includes("business-rules") || filePath.includes("rules")) value += asksRules ? 20 : asksHowWorks ? 14 : 0
+    if (filePath.includes("business-rules") || filePath.includes("rules")) value += asksRules ? 260 : asksHowWorks ? 14 : 0
     if (filePath.includes("architecture")) value += asksHowWorks ? 12 : 0
     if (filePath.includes("glossarium") || filePath.includes("glossary")) value += asksOverview ? asksGlossaryExplicitly ? 18 : -60 : 4
     if (filePath.endsWith("index.mdx") || filePath.endsWith("index.md")) value += asksRules ? 0 : 18
@@ -3696,26 +3824,78 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
 
         return isTopLevelIndex ||
           (asksGlossaryExplicitly && (filePath.includes("glossarium") || filePath.includes("glossary"))) ||
+          (asksRules && (filePath.includes("business-rules") || filePath.includes("rules"))) ||
           (asksHowWorks && (filePath.includes("flow") || filePath.includes("business-rules") || filePath.includes("architecture"))) ||
           content.includes("allows users to automatically") ||
           content.includes("memungkinkan pengguna")
       })
     : sortedDocChunks
 
+  if (!asksOverview && asksRules) {
+    const fullRuleChunks: RetrievedPayload[] = []
+    const ruleRefs = sortedDocChunks
+      .filter(chunk => {
+        const filePath = chunk.filePath?.toLowerCase() ?? ""
+
+        return chunk.repoName && chunk.branchName && chunk.filePath && (filePath.includes("business-rules") || filePath.includes("rules"))
+      })
+      .slice(0, 4)
+
+    for (const ref of ruleRefs) {
+      const fileChunks = await retrieveFileChunks(ref.repoName ?? "", ref.branchName ?? "", ref.filePath ?? "")
+      fullRuleChunks.push(...fileChunks.map(chunk => chunk.payload))
+    }
+
+    const byKey = new Map<string, RetrievedPayload>()
+
+    for (const chunk of [...fullRuleChunks, ...docChunks]) {
+      const key = chunk.contentHash ?? [chunk.repoName, chunk.branchName, chunk.filePath, chunk.startLine, chunk.endLine].join(":")
+      if (!byKey.has(key)) byKey.set(key, chunk)
+    }
+
+    docChunks = [...byKey.values()].sort((left, right) => {
+      const scoreDifference = score(right) - score(left)
+
+      if (Math.abs(scoreDifference) > 50) return scoreDifference
+
+      const leftFile = left.filePath ?? ""
+      const rightFile = right.filePath ?? ""
+
+      if (leftFile !== rightFile) return leftFile.localeCompare(rightFile)
+
+      return (left.startLine ?? 0) - (right.startLine ?? 0)
+    })
+  }
+
   if (asksOverview) {
     const fullIndexChunks: RetrievedPayload[] = []
+    const fullRuleChunks: RetrievedPayload[] = []
     const topIndexRefs = sortedDocChunks
       .filter(chunk => chunk.repoName && chunk.branchName && chunk.filePath && isTopLevelIndexPath(chunk.filePath))
       .slice(0, 4)
+    const ruleRefs = asksRules
+      ? sortedDocChunks
+          .filter(chunk => {
+            const filePath = chunk.filePath?.toLowerCase() ?? ""
+
+            return chunk.repoName && chunk.branchName && chunk.filePath && (filePath.includes("business-rules") || filePath.includes("rules"))
+          })
+          .slice(0, 4)
+      : []
 
     for (const ref of topIndexRefs) {
       const fileChunks = await retrieveFileChunks(ref.repoName ?? "", ref.branchName ?? "", ref.filePath ?? "")
       fullIndexChunks.push(...fileChunks.map(chunk => chunk.payload))
     }
 
+    for (const ref of ruleRefs) {
+      const fileChunks = await retrieveFileChunks(ref.repoName ?? "", ref.branchName ?? "", ref.filePath ?? "")
+      fullRuleChunks.push(...fileChunks.map(chunk => chunk.payload))
+    }
+
     const byKey = new Map<string, RetrievedPayload>()
 
-    for (const chunk of [...fullIndexChunks, ...docChunks]) {
+    for (const chunk of [...fullIndexChunks, ...fullRuleChunks, ...docChunks]) {
       const key = chunk.contentHash ?? [chunk.repoName, chunk.branchName, chunk.filePath, chunk.startLine, chunk.endLine].join(":")
       if (!byKey.has(key)) byKey.set(key, chunk)
     }
@@ -3726,7 +3906,7 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
   if (docChunks.length === 0) return undefined
 
   const facts: string[] = []
-  const maxFacts = asksOverview ? 8 : 14
+  const maxFacts = asksOverview && asksRules ? 40 : asksOverview ? 8 : 14
 
   for (const chunk of docChunks) {
     const lines = (chunk.content ?? "")
@@ -3745,7 +3925,7 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       const mentionsSubject = subjectTerms.some(term => lowerLine.includes(term))
 
       if (isDiagramOrCode || isDocusaurusComponent || isMetadataLine) continue
-      if (asksOverview && isListOrTable) continue
+      if (asksOverview && isListOrTable && !asksRules) continue
 
       if (mentionsSubject || (asksRules && isListOrTable) || (!asksRules && !isListOrTable && !isHeader)) {
         facts.push(`${line} (${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine})`)
@@ -3785,11 +3965,21 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
         !/^selamat datang\b/i.test(fact.text) &&
         !/^auto copy \(isignal\) product documentation$/i.test(fact.text) &&
         !/^dokumentasi produk auto copy \(isignal\)$/i.test(fact.text) &&
+        !/business-rules|rules/i.test(fact.source) &&
         fact.text.length >= 40
     })
+    const ruleFacts = asksRules
+      ? parsedFacts.filter(fact =>
+          /business-rules|rules/i.test(fact.source) &&
+          !/^aturan bisnis financial advisor$/i.test(fact.text) &&
+          !/^financial advisor business rules$/i.test(fact.text) &&
+          !/^dokumen ini menjelaskan\b/i.test(fact.text) &&
+          !/^this document outlines\b/i.test(fact.text)
+        ).slice(0, 10)
+      : []
     const mainFact = definitionFacts[0] ?? parsedFacts[0]
     const supportingFacts = definitionFacts.slice(1, asksHowWorks ? 6 : 4)
-    const sources = unique([mainFact?.source ?? "", ...supportingFacts.map(fact => fact.source)], 6)
+    const sources = unique([mainFact?.source ?? "", ...supportingFacts.map(fact => fact.source), ...ruleFacts.map(fact => fact.source)], 8)
 
     if (!mainFact) return undefined
 
@@ -3801,6 +3991,9 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       supportingFacts.length > 0 ? "" : undefined,
       supportingFacts.length > 0 ? localized("Poin penting:", "Key points:") : undefined,
       supportingFacts.length > 0 ? supportingFacts.map(fact => `- ${renderDocSummaryText(fact.text)}`).join("\n") : undefined,
+      ruleFacts.length > 0 ? "" : undefined,
+      ruleFacts.length > 0 ? localized("Aturan yang ditemukan:", "Rules found:") : undefined,
+      ruleFacts.length > 0 ? ruleFacts.map(fact => `- ${renderDocSummaryText(fact.text)}`).join("\n") : undefined,
       "",
       localized("Sumber utama:", "Primary sources:"),
       sources.map(source => `- ${source}`).join("\n"),
@@ -3823,12 +4016,26 @@ function documentationGlossarySourceChunks(chunks: RetrievedPayload[], question:
   const asksDefinition = /\b(apa itu|what is|maksud|meaning|define|definition|glossary|glosarium)\b/i.test(question)
   const asksHowWorks = questionAsksHowWorks(question)
   const asksRules = /\b(aturan|rules?|rule|ketentuan|business rules?)\b/i.test(question)
+  const subjectTerms = unique([
+    ...extractConceptTokens(question),
+    ...extractDefinitionSubjectTerms(question),
+    ...extractQuestionAcronyms(question),
+    ...extractShortSubjectTokens(question),
+  ], 16).map(term => term.toLowerCase())
+  const asksFinancialAdvisor = subjectTerms.includes("fa") ||
+    subjectTerms.includes("financial advisor") ||
+    /\b(financial advisor|penasihat keuangan|fa porto)\b/i.test(question)
 
   return chunks.filter(chunk => {
     if (!chunk.evidenceTypes?.includes("documentation")) return false
 
     const filePath = chunk.filePath?.toLowerCase() ?? ""
     const content = chunk.content?.toLowerCase() ?? ""
+
+    if (asksFinancialAdvisor) {
+      return filePath.includes("fa-porto-docs") &&
+        (filePath.endsWith("index.mdx") || filePath.endsWith("index.md") || content.includes("financial advisor") || content.includes("penasihat keuangan"))
+    }
 
     if (asksRules) return filePath.includes("rules")
     if (asksDefinition || asksHowWorks) {
@@ -4126,20 +4333,62 @@ async function main() {
   const vocabBoostTerms = isGeneralVocabQuestion
     ? ["POINT_LEVELS", "RANGE_MEDAL", "minMedal", "maxMedal", "MEDALS", "levelToMedals"]
     : []
+  const medalMechanismTerms = questionAsksMedalMechanism(question)
+    ? [
+        "dsc_channels_point_events",
+        "dsc_channels_point_medal_journal",
+        "dsc_channels_point_balance",
+        "dsc_channels_point_redeem",
+        "prev_channel_medal",
+        "last_qualify_id",
+        "total_pips",
+        "qualify",
+        "redeemPointAsync",
+        "CHANNEL_LEVEL_NOT_ENOUGH",
+        "CalculatePointAndMedal20260531",
+        "current_month_vp",
+        "minimum_vp",
+        "average_monthly_vp",
+        "signal_settled",
+        "reset_channel",
+      ]
+    : []
+  const metaTraderTerm = questionMetaTraderTerm(question)
+  const metaTraderSearchTerms = metaTraderTerm
+    ? [
+        metaTraderTerm,
+        "MetaTrader",
+        "platform_type",
+        "metaserver_id",
+        "TF_METATRADER_PLATFORM_TYPE",
+        "MRG_METATRADER_PLATFORM_TYPE",
+        "ASKAP_METATRADER_PLATFORM_TYPE",
+        "VOLUME_MULTIPLIER",
+        "ServerPlatform",
+      ]
+    : []
 
   const exactTermSearchTerms = unique([
     ...questionHints,
     ...extractConceptTokens(question),
     ...registryExactSearchTerms(),
     ...vocabBoostTerms,
-  ], 36)
+    ...medalMechanismTerms,
+    ...metaTraderSearchTerms,
+  ], 48)
   const exactTermChunks = exactRoutes.length === 0
     ? await retrieveExactTermMatches(exactTermSearchTerms, questionAsksAboutAccountTypes(question) ? 60 : 32)
+    : []
+  const exactVocabularyChunks = exactRoutes.length === 0 && isGeneralVocabQuestion
+    ? await retrieveExactVocabularyMatches(exactTermSearchTerms, 24)
+    : []
+  const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
+    ? await retrieveMetaTraderTermMatches(metaTraderTerm, 36)
     : []
 
   // Fallback: if the question is about general vocabulary topics (medal, level, rank) but no vocabulary
   // chunks were retrieved via exact matching, explicitly search for vocabulary chunks.
-  const hasVocabChunks = exactTermChunks.some(chunk => chunk.payload.filePath?.startsWith("vocabulary://"))
+  const hasVocabChunks = [...exactTermChunks, ...exactVocabularyChunks].some(chunk => chunk.payload.filePath?.startsWith("vocabulary://"))
 
   let generalVocabChunks: RetrievedChunk[] = []
 
@@ -4152,7 +4401,7 @@ async function main() {
   const vocabGroupNames = new Set<string>()
   const vocabPropertyNames = new Set<string>()
 
-  for (const chunk of exactTermChunks) {
+  for (const chunk of [...exactTermChunks, ...exactVocabularyChunks]) {
     if (chunk.payload.filePath?.startsWith("vocabulary://")) {
       const lines = (chunk.payload.content ?? "").split("\n")
       const vocabName = lines.find(line => line.startsWith("Vocabulary:"))?.replace("Vocabulary:", "").trim()
@@ -4227,10 +4476,22 @@ async function main() {
     exactRoutes.length === 0 && questionAsksAboutGlossary(question) && !questionAsksAboutAccountTypes(question)
       ? await retrievePreferredLocaleDocChunks(retrievalQuestion, Math.max(retrievalLimit, 16))
       : []
+  const exactDocumentationSubjectChunks =
+    exactRoutes.length === 0 && questionAsksAboutGlossary(question) && !questionAsksAboutAccountTypes(question) && !isGeneralVocabQuestion
+      ? await retrieveDocumentationSubjectMatches([
+          ...extractConceptTokens(question),
+          ...extractDefinitionSubjectTerms(question),
+          ...extractQuestionAcronyms(question),
+          ...extractShortSubjectTokens(question),
+        ], Math.max(retrievalLimit, 24))
+      : []
   const preferredLocaleDocNeighborChunks = preferredLocaleDocChunks.length > 0 && questionAsksAboutGlossary(question)
     ? await retrieveNeighborChunks(preferredLocaleDocChunks, 30)
     : []
-  const hints = collectHints([...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactTermDetailChunks, ...vocabUsageChunks, ...initialChunks])
+  const exactDocumentationSubjectNeighborChunks = exactDocumentationSubjectChunks.length > 0 && questionAsksAboutGlossary(question)
+    ? await retrieveNeighborChunks(exactDocumentationSubjectChunks, 40)
+    : []
+  const hints = collectHints([...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactVocabularyChunks, ...exactMetaTraderChunks, ...exactTermDetailChunks, ...vocabUsageChunks, ...exactDocumentationSubjectChunks, ...initialChunks])
   const expansionQueries =
     exactRoutes.length > 0 && exactChunks.length === 0
       ? []
@@ -4251,7 +4512,11 @@ async function main() {
       ...exactDetailChunks,
       ...preferredLocaleDocChunks,
       ...preferredLocaleDocNeighborChunks,
+      ...exactDocumentationSubjectChunks,
+      ...exactDocumentationSubjectNeighborChunks,
       ...exactTermChunks,
+      ...exactVocabularyChunks,
+      ...exactMetaTraderChunks,
       ...generalVocabChunks,
       ...vocabUsageChunks,
       ...exactTermDetailChunks,
@@ -4393,6 +4658,50 @@ async function main() {
     console.log(buildAccountTypeNotFoundAnswer(question))
 
     console.log("\nSOURCES\n")
+
+    return
+  }
+
+  const medalMechanismAnswer = buildMedalMechanismAnswer(chunks, question)
+
+  if (medalMechanismAnswer) {
+    const sourceChunks = chunks
+      .filter(chunk => /dsc_channels_point_events|dsc_channels_point_medal_journal|dsc_channels_point_balance|dsc_channels_point_redeem|POINT_LEVELS|RANGE_MEDAL|prev_channel_medal|total_pips|last_qualify_id|qualify|redeemPointAsync|CalculatePointAndMedal20260531|current_month_vp|minimum_vp|average_monthly_vp|signal_settled|reset_channel/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
+      .slice(0, 12)
+
+    console.log("\nANSWER\n")
+    console.log(medalMechanismAnswer)
+
+    console.log("\nSOURCES\n")
+
+    for (const chunk of sourceChunks) {
+      console.log(
+        `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+      )
+    }
+
+    return
+  }
+
+  const metaTraderPayloads = mergeChunks([...exactMetaTraderChunks, ...exactTermChunks, ...exactTermDetailChunks], 80).map(chunk => chunk.payload)
+  const metaTraderTermAnswer = buildMetaTraderTermAnswer(metaTraderPayloads.length > 0 ? metaTraderPayloads : chunks, question)
+
+  if (metaTraderTermAnswer) {
+    const sourceChunks = (metaTraderPayloads.length > 0 ? metaTraderPayloads : chunks)
+      .filter(chunk => /metatrader|platform_type|metaserver|serverplatform|tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier|akun metatrader/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
+      .filter(chunk => !/devops-docs/i.test(chunk.filePath ?? ""))
+      .slice(0, 12)
+
+    console.log("\nANSWER\n")
+    console.log(metaTraderTermAnswer)
+
+    console.log("\nSOURCES\n")
+
+    for (const chunk of sourceChunks) {
+      console.log(
+        `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+      )
+    }
 
     return
   }

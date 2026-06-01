@@ -179,6 +179,88 @@ const cases: AnswerCase[] = [
     ],
   },
   {
+    name: "short acronym definition prefers FA product docs",
+    question: "apa itu FA",
+    required: [
+      "Penasihat Keuangan",
+      "FA",
+      "docs:fa-porto-docs\\index.mdx",
+    ],
+    forbidden: [
+      "Legacy Archives",
+      "docs:devops-docs",
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
+  {
+    name: "short acronym definition with rules includes FA business rules",
+    question: "apa itu FA dan apa saja aturan nya",
+    required: [
+      "Penasihat Keuangan",
+      "Aturan yang ditemukan",
+      "Pendaftaran",
+      "2 portfolio aktif",
+      "Wishlist",
+      "docs:fa-porto-docs\\features\\business-rules.md",
+    ],
+    forbidden: [
+      "Legacy Archives",
+      "docs:devops-docs",
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
+  {
+    name: "short lowercase acronym rules prefers FA business rules",
+    question: "apa saja rules fa",
+    required: [
+      "Financial Advisor",
+      "Pendaftaran",
+      "2 portfolio aktif",
+      "Wishlist",
+      "tf2_signals_incubation",
+      "docs:fa-porto-docs\\features\\business-rules.md",
+    ],
+    forbidden: [
+      "docs:isignal-docs\\features\\business-rules.md",
+      "dsc_signals_copy",
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
+  {
+    name: "short technical term explains MT4 from code config",
+    question: "apa itu mt4",
+    required: [
+      "MT4 adalah platform/jenis server MetaTrader",
+      "MT4 = 1",
+      "platform_type 0",
+      "VOLUME_MULTIPLIER.MT4",
+      "tf2-ois@develop libs/config.js",
+    ],
+    forbidden: [
+      "Legacy Archives",
+      "docs:devops-docs",
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
+  {
+    name: "short technical term explains MT5 from code config",
+    question: "apa itu mt5",
+    required: [
+      "MT5 adalah platform/jenis server MetaTrader",
+      "MT5 = 2",
+      "platform_type 5",
+      "platform_type 3",
+      "VOLUME_MULTIPLIER.MT5",
+      "ENABLE_MT5",
+      "tf2-ois@develop libs/config.js",
+    ],
+    forbidden: [
+      "Legacy Archives",
+      "docs:devops-docs",
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
+  {
     name: "documentation how-it-works returns Mermaid flowchart",
     question: "how isignal works?",
     required: [
@@ -209,6 +291,21 @@ const cases: AnswerCase[] = [
     forbidden: [
       "NOT_FOUND_IN_INDEXED_CODEBASE",
       "docs:devops-docs",
+    ],
+  },
+  {
+    name: "medal mechanism explains implicit VP formula",
+    question: "how do we gain medal",
+    required: [
+      "CalculatePointAndMedal20260531",
+      "signal_settled >= 5",
+      "current_month_vp >= minimum_vp",
+      "80% * average_monthly_vp",
+      "src/domain/vp.ts",
+    ],
+    forbidden: [
+      "For a channel to reach Newbie",
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
     ],
   },
 ]
