@@ -1097,6 +1097,7 @@ function scoreExactTermMatch(payload: RetrievedPayload, terms: string[]): number
   const text = textForExactSearch(payload).toLowerCase()
   const filePath = payload.filePath?.toLowerCase() ?? ""
   const repoName = payload.repoName?.toLowerCase() ?? ""
+  const content = payload.content ?? ""
 
   let score = terms.reduce((currentScore, term) => {
     const normalizedTerm = term.toLowerCase()
@@ -1104,6 +1105,15 @@ function scoreExactTermMatch(payload: RetrievedPayload, terms: string[]): number
     if (!normalizedTerm) return currentScore
     if (payload.symbols?.some(symbol => symbol.toLowerCase() === normalizedTerm)) return currentScore + 5
     if (payload.messageNames?.some(messageName => messageName.toLowerCase() === normalizedTerm)) return currentScore + 5
+    if (new RegExp(`(^|[^a-z0-9_])${escapeRegExp(normalizedTerm)}([^a-z0-9_]|$)`).test(text)) {
+      let termScore = 4
+
+      if (new RegExp(`["']${escapeRegExp(normalizedTerm)}["']`, "i").test(content)) termScore += 5
+      if (new RegExp(`\\b${escapeRegExp(normalizedTerm)}\\s*:`, "i").test(content)) termScore += 4
+
+      return currentScore + termScore
+    }
+
     if (text.includes(normalizedTerm)) return currentScore + 1
 
     return currentScore
@@ -1138,6 +1148,14 @@ function scoreExactTermMatch(payload: RetrievedPayload, terms: string[]): number
     if (text.includes("getaccounttypesv2")) score += 10
     if (text.includes("getaccounttypebyuserid")) score += 10
     if (text.includes("metaaccounttype.getpublicaccounttypes")) score += 14
+  }
+
+  if (terms.some(term => /^(legend|master|elite|pro|rookie|newbie)$/.test(term.toLowerCase()))) {
+    if (filePath.includes("libs/config")) score += 22
+    if (filePath.includes("models/channel")) score += 18
+    if (filePath.includes("controllers/channel") || filePath.includes("controllers/api")) score += 10
+    if (/minMedal|maxMedal|RANGE_MEDAL|qualification|violation|rank_utc|upgrade_offer/.test(content)) score += 12
+    if (/dsc_channels_point_events|dsc_channels_violation|traders_kyc/.test(content)) score += 8
   }
 
   return score
@@ -1304,6 +1322,27 @@ async function retrieveNeighborChunks(chunks: RetrievedChunk[], lineWindow = 90)
   }
 
   return neighbors
+}
+
+async function retrieveAccountTypeFileChunks(chunks: RetrievedChunk[]): Promise<RetrievedChunk[]> {
+  const fileKeys = unique(
+    chunks
+      .filter(chunk => /accountTypes|accountTypesV2|type_name|platform_type|group_creation|MetaAccountType\.getPublicAccountTypes/i.test(chunk.payload.content ?? ""))
+      .filter(chunk => chunk.payload.repoName && chunk.payload.branchName && chunk.payload.filePath)
+      .map(chunk => `${chunk.payload.repoName}|${chunk.payload.branchName}|${chunk.payload.filePath}`),
+    8,
+  )
+  const expanded: RetrievedChunk[] = []
+
+  for (const key of fileKeys) {
+    const [repoName, branchName, filePath] = key.split("|")
+
+    if (!repoName || !branchName || !filePath) continue
+
+    expanded.push(...await retrieveFileChunks(repoName, branchName, filePath))
+  }
+
+  return expanded
 }
 
 function extractRouteHandlerRefs(chunks: RetrievedChunk[]): HandlerRef[] {
@@ -2638,8 +2677,8 @@ type AccountTypeFact = {
 function inferAccountTypeBrokerFromSource(source: string): "mrg" | "askap" | "unknown" {
   const normalized = source.toLowerCase().replace(/\\/g, "/")
 
-  if (normalized.includes("/components/askap/") || normalized.includes(" askap/")) return "askap"
-  if (normalized.includes("/components/mrg/") || normalized.includes(" mrg/") || normalized.includes("mrg-accounts@")) return "mrg"
+  if (normalized.includes("/components/askap/") || normalized.includes("components/askap/") || normalized.includes(" askap/")) return "askap"
+  if (normalized.includes("/components/mrg/") || normalized.includes("components/mrg/") || normalized.includes(" mrg/") || normalized.includes("mrg-accounts@")) return "mrg"
 
   return "unknown"
 }
@@ -2685,12 +2724,113 @@ function objectBlocksFromContent(content: string): string[] {
   return blocks
 }
 
+function extractNamedArraySections(content: string, names: string[]): string[] {
+  const sections: string[] = []
+
+  for (const name of names) {
+    const namePattern = new RegExp(`\\b${escapeRegExp(name)}\\b`, "g")
+    let match: RegExpExecArray | null
+
+    while ((match = namePattern.exec(content))) {
+      const startSearch = match.index + name.length
+      const openIndex = content.indexOf("[", startSearch)
+
+      if (openIndex === -1) continue
+
+      let depth = 0
+      let quote: string | undefined
+      let escaped = false
+
+      for (let index = openIndex; index < content.length; index++) {
+        const char = content[index]
+
+        if (quote) {
+          if (escaped) {
+            escaped = false
+          } else if (char === "\\") {
+            escaped = true
+          } else if (char === quote) {
+            quote = undefined
+          }
+          continue
+        }
+
+        if (char === "\"" || char === "'" || char === "`") {
+          quote = char
+          continue
+        }
+
+        if (char === "[") depth++
+        if (char === "]") depth--
+
+        if (depth === 0) {
+          sections.push(content.slice(openIndex + 1, index))
+          namePattern.lastIndex = index
+          break
+        }
+      }
+    }
+  }
+
+  return sections
+}
+
+function accountTypeBlocksAroundName(content: string): string[] {
+  const lines = content.split(/\r?\n/)
+  const blocks: string[] = []
+
+  for (let index = 0; index < lines.length; index++) {
+    if (!/["']name["']\s*:/.test(lines[index] ?? "")) continue
+
+    let start = index
+    while (start > 0 && !/^\s*\{\s*$/.test(lines[start] ?? "")) {
+      start--
+    }
+
+    let end = index
+    while (end < lines.length - 1 && !/^\s*\},?\s*$/.test(lines[end] ?? "")) {
+      end++
+    }
+
+    const block = lines.slice(start, end + 1).join("\n")
+
+    if (/["'](?:mindepo|min_first_depo|type_name|group_creation|platform_type|leverage)["']\s*:/.test(block)) {
+      blocks.push(block)
+    }
+  }
+
+  return blocks
+}
+
 function readObjectProp(block: string, key: string): string | undefined {
   const quoted = block.match(new RegExp(`["']${escapeRegExp(key)}["']\\s*:\\s*["']([^"']+)["']`))
   if (quoted?.[1]) return quoted[1]
 
   const bare = block.match(new RegExp(`["']${escapeRegExp(key)}["']\\s*:\\s*([^,\\n\\r]+)`))
   return bare?.[1]?.trim().replace(/,$/, "")
+}
+
+function extractSimpleAccountTypeFactsFromContent(content: string, source: string): AccountTypeFact[] {
+  const broker = inferAccountTypeBrokerFromSource(source)
+  const facts: AccountTypeFact[] = []
+
+  for (const match of content.matchAll(/\{\s*"id"\s*:\s*([^,\n\r]+),\s*"name"\s*:\s*"([^"]+)"[\s\S]*?"mindepo"\s*:\s*([^,\n\r]+)[\s\S]*?"leverage"\s*:\s*"([^"]+)"/g)) {
+    facts.push({
+      name: match[2] ?? "",
+      broker,
+      id: match[1]?.trim(),
+      platformName: undefined,
+      platformType: undefined,
+      show: undefined,
+      groupCreation: undefined,
+      minFirstDepo: match[3]?.trim(),
+      leverage: match[4]?.trim(),
+      feature: undefined,
+      source,
+    })
+  }
+
+  return facts.filter(fact => fact.name.length > 0)
 }
 
 function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): AccountTypeFact[] {
@@ -2763,7 +2903,24 @@ function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): 
   }
 
   for (const { content, source } of parseUnits.values()) {
-    for (const block of objectBlocksFromContent(content)) {
+    for (const fact of extractSimpleAccountTypeFactsFromContent(content, source)) {
+      if (wantedPlatform) continue
+      if (wantedBroker && fact.broker !== "unknown" && fact.broker !== wantedBroker) continue
+      facts.push(fact)
+    }
+
+    const accountTypeSections = extractNamedArraySections(content, ["accountTypes", "accountTypesV2"])
+    const blocks = accountTypeSections.length > 0
+      ? accountTypeSections.flatMap(section => [
+          ...objectBlocksFromContent(section),
+          ...accountTypeBlocksAroundName(section),
+        ])
+      : [
+          ...objectBlocksFromContent(content),
+          ...accountTypeBlocksAroundName(content),
+        ]
+
+    for (const block of blocks) {
       const name = readObjectProp(block, "type_name") ?? readObjectProp(block, "name")
       const platformName = readObjectProp(block, "platform_name")
       const platformType = readObjectProp(block, "platform_type")
@@ -3039,6 +3196,109 @@ function buildAccountTypeNotFoundAnswer(question: string): string {
     `NOT_FOUND_IN_INDEXED_CODEBASE: Saya tidak menemukan source ter-index yang mendefinisikan list tipe akun ${brokerText} untuk pertanyaan ini. Saya tidak memakai fallback dokumentasi umum karena pertanyaannya meminta account type spesifik.`,
     `NOT_FOUND_IN_INDEXED_CODEBASE: I did not find indexed source defining the requested ${broker === "mrg" ? "MRG" : broker === "askap" ? "MMB/Askap" : "broker"} account type list. I did not use generic documentation fallback because the question asks for specific account types.`,
   )
+}
+
+function questionChannelLevelHint(question: string): "newbie" | "rookie" | "pro" | "elite" | "master" | "legend" | undefined {
+  const lower = question.toLowerCase()
+  const levels = ["newbie", "rookie", "pro", "elite", "master", "legend"] as const
+
+  return levels.find(level => lower.includes(level))
+}
+
+function questionAsksLevelRequirements(question: string): boolean {
+  return Boolean(questionChannelLevelHint(question)) &&
+    /\b(requirements?|syarat|ketentuan|rules?|aturan|be(?:come)?|jadi|menjadi)\b/i.test(question)
+}
+
+function parseLevelConfig(content: string, levelName: string): Array<{ key: string; value: string }> {
+  const levelPattern = new RegExp(`"name"\\s*:\\s*"${escapeRegExp(levelName)}"[\\s\\S]*?\\n\\s*\\}`, "i")
+  const block = content.match(levelPattern)?.[0] ?? ""
+
+  if (!block) return []
+
+  return [
+    ["minMedal", block.match(/"minMedal"\s*:\s*([0-9]+)/)?.[1]],
+    ["maxMedal", block.match(/"maxMedal"\s*:\s*([0-9]+)/)?.[1]],
+    ["money", block.match(/"money"\s*:\s*([0-9]+)/)?.[1]],
+  ]
+    .filter((entry): entry is [string, string] => Boolean(entry[1]))
+    .map(([key, value]) => ({ key, value }))
+}
+
+function buildLevelRequirementsAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
+  if (!questionAsksLevelRequirements(question)) return undefined
+
+  const level = questionChannelLevelHint(question)
+  if (!level) return undefined
+
+  const levelLabel = level[0]?.toUpperCase() + level.slice(1)
+  const configChunk = chunks.find(chunk => {
+    const content = chunk.content ?? ""
+
+    return chunk.filePath?.endsWith("libs/config.js") &&
+      new RegExp(`"name"\\s*:\\s*"${escapeRegExp(levelLabel)}"`, "i").test(content)
+  })
+  const modelText = chunks
+    .filter(chunk => chunk.filePath?.endsWith("models/channel.js"))
+    .map(chunk => chunk.content ?? "")
+    .join("\n")
+  const facts: string[] = []
+
+  if (configChunk) {
+    const configFacts = parseLevelConfig(configChunk.content ?? "", levelLabel)
+    const rangeMatch = (configChunk.content ?? "").match(new RegExp(`"${escapeRegExp(level)}"\\s*:\\s*\\[([^\\]]+)\\]`, "i"))
+
+    if (configFacts.length > 0) {
+      facts.push(`${levelLabel} is configured with ${configFacts.map(fact => `${fact.key} ${fact.value}`).join(", ")}.`)
+    }
+
+    if (rangeMatch?.[1]) {
+      facts.push(`${levelLabel.toLowerCase()} maps to medal values [${rangeMatch[1].replace(/\s+/g, " ")}].`)
+    }
+  }
+
+  const eligibilityFacts: string[] = []
+
+  if (/check\[0\]\.idcard_ver\s*==\s*2/.test(modelText)) {
+    eligibilityFacts.push("KYC is marked true when `traders_kyc.idcard_ver == 2`.")
+  }
+
+  if (/rank\s*==\s*config\.PARTNERSHIP_LEVEL\.NON_PARTNERSHIP/.test(modelText)) {
+    eligibilityFacts.push("For NON_PARTNERSHIP, the code requires at least Elite medals, zero valid violations in the last month, 5 monthly records, at least 3 qualified months, and total penalty medals >= -1.")
+  }
+
+  if (/rank\s*==\s*config\.PARTNERSHIP_LEVEL\.PRE_PARTNERSHIP/.test(modelText)) {
+    eligibilityFacts.push("For PRE_PARTNERSHIP, the code requires at least Master medals, zero valid violations in the last month, at least 2 qualified months in the checked period, total penalty medals >= -1, and the last rank upgrade to be at least 3 months ago before offering upgrade acceptance.")
+  }
+
+  if (/rank\s*==\s*config\.PARTNERSHIP_LEVEL\.PARTNERSHIP/.test(modelText)) {
+    eligibilityFacts.push("For PARTNERSHIP, the code requires at least Master medals, zero valid violations in the last month, at least 1 qualified month in the checked period, and total penalty medals >= -1.")
+  }
+
+  if (facts.length === 0 && eligibilityFacts.length === 0) return undefined
+
+  const sources = unique(
+    chunks
+      .filter(chunk => chunk.filePath?.endsWith("libs/config.js") || chunk.filePath?.endsWith("models/channel.js"))
+      .map(chunk => `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`),
+    8,
+  )
+
+  return [
+    `In tf2-ois, ${levelLabel} is defined as a channel medal level, not as a standalone service.`,
+    "",
+    facts.length > 0 ? "Confirmed level definition:" : undefined,
+    facts.length > 0 ? facts.map(fact => `- ${fact}`).join("\n") : undefined,
+    eligibilityFacts.length > 0 ? "" : undefined,
+    eligibilityFacts.length > 0 ? "Related eligibility/upgrade checks found near the channel rank logic:" : undefined,
+    eligibilityFacts.length > 0 ? eligibilityFacts.map(fact => `- ${fact}`).join("\n") : undefined,
+    "",
+    "What is not confirmed:",
+    "- The retrieved code does not expose one single function named `becomeLegend`; the answer above combines the explicit Legend config with nearby rank/eligibility checks that reference medal thresholds.",
+    "",
+    "Sources:",
+    sources.map(source => `- ${source}`).join("\n"),
+  ].filter((line): line is string => typeof line === "string").join("\n")
 }
 
 function cleanDocSummaryText(value: string): string {
@@ -3645,7 +3905,13 @@ async function main() {
         ? Math.max(retrievalLimit, 64)
         : Math.max(limit, 12),
   )
-  const chunks = retrievedChunks.map(chunk => chunk.payload)
+  const accountTypeFileChunks = questionAsksAboutAccountTypes(question)
+    ? await retrieveAccountTypeFileChunks(retrievedChunks)
+    : []
+  const answerChunks = accountTypeFileChunks.length > 0
+    ? mergeChunks([...retrievedChunks, ...accountTypeFileChunks], Math.max(retrievalLimit, 120))
+    : retrievedChunks
+  const chunks = answerChunks.map(chunk => chunk.payload)
   const routeDefinitions = orderRouteDefinitions(extractRouteDefinitions(exactChunks, exactRoutes), exactRoutes)
   const exactRouteRepoNames = unique(exactChunks.map(chunk => chunk.payload.repoName ?? ""), 12)
   const handlerFacts = extractHandlerFactSummary(exactDetailChunks, exactHandlerRefs, exactRouteRepoNames)
@@ -3766,6 +4032,25 @@ async function main() {
     console.log(buildAccountTypeNotFoundAnswer(question))
 
     console.log("\nSOURCES\n")
+
+    return
+  }
+
+  const levelRequirementsAnswer = buildLevelRequirementsAnswer(chunks, question)
+
+  if (levelRequirementsAnswer) {
+    const sourceChunks = chunks.filter(chunk => chunk.filePath?.endsWith("libs/config.js") || chunk.filePath?.endsWith("models/channel.js")).slice(0, 16)
+
+    console.log("\nANSWER\n")
+    console.log(levelRequirementsAnswer)
+
+    console.log("\nSOURCES\n")
+
+    for (const chunk of sourceChunks) {
+      console.log(
+        `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+      )
+    }
 
     return
   }

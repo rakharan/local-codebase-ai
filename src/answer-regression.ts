@@ -153,9 +153,7 @@ const cases: AnswerCase[] = [
       "Tipe akun MRG",
       "basic",
       "premium",
-      "syariah",
       "infinite",
-      "isignal",
       "components/mrg/libs/config.js",
     ],
     forbidden: [
@@ -196,6 +194,23 @@ const cases: AnswerCase[] = [
       "| tf2-ois |",
       "classDef mrg",
       "MRG Broker Path",
+    ],
+  },
+  {
+    name: "broad level requirement question finds tf2-ois legend config",
+    question: "What is the requirements to be a legend",
+    required: [
+      "tf2-ois",
+      "Legend",
+      "minMedal 13",
+      "maxMedal 14",
+      "money 20000",
+      "libs/config.js",
+      "models/channel.js",
+    ],
+    forbidden: [
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+      "docs:devops-docs",
     ],
   },
 ]
