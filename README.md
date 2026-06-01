@@ -110,7 +110,13 @@ For Docusaurus docs, point the docs indexer at the `docs` folder:
 npm run index-docs -- C:\GIT\work\tf-documentation\my-website\docs --repo-name tf-documentation
 ```
 
-The docs indexer reads Markdown/MDX files, uses frontmatter `repos` when present, and maps known docs folders like `isignal-docs`, `wallet-docs`, and `devops-docs` to related service repos. Re-running it is incremental: unchanged doc chunks are skipped and stale chunks for the same repo/branch are removed.
+For localized Docusaurus docs, index the locale folder too:
+
+```powershell
+npm run index-docs -- C:\GIT\work\tf-documentation\my-website\i18n\id\docusaurus-plugin-content-docs\current --repo-name tf-documentation --locale id
+```
+
+The docs indexer reads Markdown/MDX files, uses frontmatter `repos` when present, and maps known docs folders like `isignal-docs`, `wallet-docs`, and `devops-docs` to related service repos. Re-running it is incremental: unchanged doc chunks are skipped and stale chunks for the same repo/docs branch are removed. Localized docs are stored under locale-specific docs branches such as `docs:id`, so Indonesian and default docs can coexist. Indonesian questions prefer `id` docs when available and fall back to default docs when a page is still untranslated.
 
 ## Branches
 

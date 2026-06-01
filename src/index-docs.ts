@@ -15,6 +15,7 @@ program
   .option("--repo-name <repoName>", "Fallback repo name if no mapping matches", "tf-documentation")
   .option("--service-type <serviceType>", "Service type for doc chunks", "unknown")
   .option("--branch <branchName>", "Branch name for doc chunks", "docs")
+  .option("--locale <locale>", "Documentation locale, or auto to infer Docusaurus i18n locale from path", "auto")
   .option("--dry-run", "Read and chunk files without touching Qdrant/Ollama.", false)
   .option("--replace-repo", "Delete all existing doc chunks for mapped repos.", false)
   .parse()
@@ -31,11 +32,22 @@ const options = program.opts<{
   repoName: string
   serviceType: string
   branch: string
+  locale: string
   dryRun: boolean
   replaceRepo: boolean
 }>()
 
 const serviceType = options.serviceType as "api" | "worker" | "cron" | "library" | "unknown"
+
+function inferDocsLocale(dir: string): string {
+  const normalized = dir.replace(/\\/g, "/")
+  const match = normalized.match(/\/i18n\/([^/]+)\/docusaurus-plugin-content-docs\/current\/?$/)
+
+  return match?.[1] ?? "default"
+}
+
+const docLocale = options.locale === "auto" ? inferDocsLocale(docsPath) : options.locale
+const docsBranchName = docLocale === "default" ? options.branch : `${options.branch}:${docLocale}`
 
 function normalizeRepoName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9_-]/g, "")
@@ -164,6 +176,7 @@ function chunkMarkdown(file: DocFile, repoName: string, branchName: string): Cod
       const chunkContent = [
         `Documentation: ${currentHeader}`,
         `Source: ${file.relativePath}`,
+        `Locale: ${docLocale}`,
         baseMetadata,
         "",
         subContent,
@@ -179,6 +192,7 @@ function chunkMarkdown(file: DocFile, repoName: string, branchName: string): Cod
         serviceType,
         branchName,
         commitSha: "docs",
+        docLocale,
         filePath: `docs:${file.relativePath}`,
         startLine: subStart,
         endLine: subEnd,
@@ -298,6 +312,7 @@ async function upsertChunk(chunk: CodeChunk): Promise<void> {
   const embeddingInput = [
     `Repository: ${chunk.repoName}`,
     `Branch: ${chunk.branchName}`,
+    `Documentation locale: ${chunk.docLocale ?? "default"}`,
     `Service type: ${chunk.serviceType}`,
     `Evidence types: ${chunk.evidenceTypes.join(", ")}`,
     `Routes: ${chunk.relationshipHints.routes.join(", ")}`,
@@ -322,6 +337,7 @@ async function upsertChunk(chunk: CodeChunk): Promise<void> {
           serviceType: chunk.serviceType,
           branchName: chunk.branchName,
           commitSha: chunk.commitSha,
+          docLocale: chunk.docLocale,
           evidenceTypes: chunk.evidenceTypes,
           routes: chunk.relationshipHints.routes,
           symbols: chunk.relationshipHints.symbols,
@@ -343,6 +359,8 @@ async function upsertChunk(chunk: CodeChunk): Promise<void> {
 async function main() {
   console.log(`Reading docs: ${docsPath}`)
   console.log(`Mode: ${options.dryRun ? "dry-run" : "index"}`)
+  console.log(`Locale: ${docLocale}`)
+  console.log(`Docs branch: ${docsBranchName}`)
   console.log(`Replace repo: ${options.replaceRepo ? "yes" : "no"}`)
 
   const files = await readDocFiles(docsPath)
@@ -359,7 +377,7 @@ async function main() {
 
     for (const repoName of targetRepos) {
       repoNames.add(repoName)
-      const chunks = chunkMarkdown(file, repoName, options.branch)
+      const chunks = chunkMarkdown(file, repoName, docsBranchName)
 
       if (!chunksByRepo.has(repoName)) {
         chunksByRepo.set(repoName, [])
@@ -386,14 +404,14 @@ async function main() {
 
   for (const repoName of repoNames) {
     if (options.replaceRepo) {
-      console.log(`Deleting existing doc chunks for ${repoName}@${options.branch}`)
-      const existing = await fetchExistingIndex(repoName, options.branch)
+      console.log(`Deleting existing doc chunks for ${repoName}@${docsBranchName}`)
+      const existing = await fetchExistingIndex(repoName, docsBranchName)
       await deleteStaleChunks([...existing.ids])
     }
   }
 
   for (const [repoName, chunks] of chunksByRepo.entries()) {
-    const existing = await fetchExistingIndex(repoName, options.branch)
+    const existing = await fetchExistingIndex(repoName, docsBranchName)
     const currentIds = new Set(chunks.map(chunk => chunk.id))
     const staleIds = [...existing.ids].filter(id => !currentIds.has(String(id)))
     const chunksToIndex = chunks.filter(chunk => !existing.hashes.has(chunk.contentHash))

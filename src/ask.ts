@@ -16,6 +16,7 @@ type RetrievedPayload = {
   serviceType?: ServiceType
   branchName?: string
   commitSha?: string
+  docLocale?: string
   filePath?: string
   startLine?: number
   endLine?: number
@@ -170,6 +171,52 @@ async function retrieve(queryText: string, resultLimit: number): Promise<Retriev
       payload: point.payload as RetrievedPayload,
     }))
     .filter(chunk => chunk.payload.content)
+}
+
+async function retrievePreferredLocaleDocChunks(queryText: string, resultLimit: number): Promise<RetrievedChunk[]> {
+  if (answerLanguage !== "id" || options.branch) return []
+
+  const questionVector = await createEmbedding(queryText)
+  const must: Array<Record<string, unknown>> = [
+    {
+      key: "branchName",
+      match: {
+        value: "docs:id",
+      },
+    },
+  ]
+
+  if (options.repoName) {
+    must.push({
+      key: "repoName",
+      match: {
+        value: options.repoName,
+      },
+    })
+  }
+
+  if (serviceType) {
+    must.push({
+      key: "serviceType",
+      match: {
+        value: serviceType,
+      },
+    })
+  }
+
+  const results = await qdrant.query(config.collectionName, {
+    query: questionVector,
+    limit: resultLimit,
+    with_payload: true,
+    filter: { must },
+  })
+
+  return results.points
+    .map(point => ({
+      id: String(point.id),
+      payload: point.payload as RetrievedPayload,
+    }))
+    .filter(chunk => chunk.payload.content && chunk.payload.evidenceTypes?.includes("documentation"))
 }
 
 function unique(values: string[], max = 12): string[] {
@@ -3010,6 +3057,24 @@ function renderDocSummaryText(value: string): string {
   return normalized
 }
 
+function docLocaleForChunk(chunk: RetrievedPayload): string {
+  if (chunk.docLocale) return chunk.docLocale
+
+  const branchName = chunk.branchName ?? ""
+  const localeMatch = branchName.match(/^docs:([^:]+)$/)
+
+  return localeMatch?.[1] ?? "default"
+}
+
+function scoreDocLocalePreference(chunk: RetrievedPayload): number {
+  const locale = docLocaleForChunk(chunk)
+
+  if (answerLanguage === "id") return locale === "id" ? 80 : 0
+  if (answerLanguage === "en") return locale === "default" ? 15 : 0
+
+  return 0
+}
+
 async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: string): Promise<string | undefined> {
   if (!questionAsksAboutGlossary(question)) return undefined
   if (questionAsksAboutAccountTypes(question)) return undefined
@@ -3017,11 +3082,12 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
   const lowerQuestion = question.toLowerCase()
   const asksRules = /\b(aturan|rules?|rule|ketentuan|business rules?)\b/i.test(question)
   const asksDefinition = /\b(apa itu|what is|maksud|meaning|define|definition|glossary|glosarium)\b/i.test(question)
+  const asksGlossaryExplicitly = /\b(glossary|glosarium|glossarium)\b/i.test(question)
   const subjectTerms = unique([
     ...extractConceptTokens(question),
     ...registryExpansion.terms.filter(term => term.length >= 4),
   ], 24).map(term => term.toLowerCase())
-  const sortedDocChunks = chunks.filter(chunk => {
+  const matchingDocChunks = chunks.filter(chunk => {
     if (!chunk.evidenceTypes?.includes("documentation")) return false
 
     const text = [
@@ -3032,44 +3098,72 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
     ].join("\n").toLowerCase()
 
     return subjectTerms.some(term => text.includes(term.toLowerCase()))
-  }).sort((left, right) => {
-    function score(chunk: RetrievedPayload): number {
-      const filePath = chunk.filePath?.toLowerCase() ?? ""
-      const repoName = chunk.repoName?.toLowerCase() ?? ""
-      const content = chunk.content?.toLowerCase() ?? ""
-      let value = 0
-
-      if (subjectTerms.includes("isignal")) {
-        if (filePath.includes("isignal-docs")) value += 40
-        if (repoName.includes("isignal")) value += 20
-        if (content.includes("auto copy")) value += 10
-      }
-
-      if (filePath.includes("business-rules") || filePath.includes("rules")) value += asksRules ? 20 : 0
-      if (filePath.includes("glossarium") || filePath.includes("glossary")) value += asksDefinition ? 18 : 4
-      if (filePath.endsWith("index.mdx") || filePath.endsWith("index.md")) value += asksRules ? 0 : 18
-      if (asksDefinition && /\ballows users to automatically|overview|core purpose|internal documentation for/i.test(content)) value += 35
-      if (asksDefinition && (filePath.includes("cron") || filePath.includes("diagram"))) value -= 25
-      if (!asksRules && filePath.includes("business-rules")) value -= asksDefinition ? 8 : 0
-
-      return value
-    }
-
-    return score(right) - score(left)
   })
 
-  const docChunks = asksDefinition
+  function isTopLevelIndexPath(filePath: string): boolean {
+    return /docs:[^/\\]+[/\\]index\.mdx?$/.test(filePath.toLowerCase())
+  }
+
+  function score(chunk: RetrievedPayload): number {
+    const filePath = chunk.filePath?.toLowerCase() ?? ""
+    const repoName = chunk.repoName?.toLowerCase() ?? ""
+    const content = chunk.content?.toLowerCase() ?? ""
+    let value = 0
+
+    if (subjectTerms.includes("isignal")) {
+      if (filePath.includes("isignal-docs")) value += 40
+      if (repoName.includes("isignal")) value += 20
+      if (content.includes("auto copy")) value += 10
+      if (asksDefinition && isTopLevelIndexPath(filePath)) value += 90
+    }
+
+    value += scoreDocLocalePreference(chunk)
+    if (filePath.includes("business-rules") || filePath.includes("rules")) value += asksRules ? 20 : 0
+    if (filePath.includes("glossarium") || filePath.includes("glossary")) value += asksDefinition ? asksGlossaryExplicitly ? 18 : -60 : 4
+    if (filePath.endsWith("index.mdx") || filePath.endsWith("index.md")) value += asksRules ? 0 : 18
+    if (asksDefinition && /\ballows users to automatically|memungkinkan pengguna|pengenalan|overview|tujuan utama|core purpose|internal documentation for|dokumentasi internal/i.test(content)) value += 35
+    if (asksDefinition && (filePath.includes("cron") || filePath.includes("diagram"))) value -= 25
+    if (!asksRules && filePath.includes("business-rules")) value -= asksDefinition ? 8 : 0
+
+    return value
+  }
+
+  const sortedDocChunks = matchingDocChunks.sort((left, right) => score(right) - score(left))
+
+  let docChunks = asksDefinition
     ? sortedDocChunks.filter(chunk => {
         const filePath = chunk.filePath?.toLowerCase() ?? ""
         const content = chunk.content?.toLowerCase() ?? ""
-        const isTopLevelIndex = /docs:[^/\\]+[/\\]index\.mdx?$/.test(filePath)
+        const isTopLevelIndex = isTopLevelIndexPath(filePath)
 
         return isTopLevelIndex ||
           filePath.includes("glossarium") ||
           filePath.includes("glossary") ||
-          content.includes("allows users to automatically")
+          content.includes("allows users to automatically") ||
+          content.includes("memungkinkan pengguna")
       })
     : sortedDocChunks
+
+  if (asksDefinition) {
+    const fullIndexChunks: RetrievedPayload[] = []
+    const topIndexRefs = sortedDocChunks
+      .filter(chunk => chunk.repoName && chunk.branchName && chunk.filePath && isTopLevelIndexPath(chunk.filePath))
+      .slice(0, 4)
+
+    for (const ref of topIndexRefs) {
+      const fileChunks = await retrieveFileChunks(ref.repoName ?? "", ref.branchName ?? "", ref.filePath ?? "")
+      fullIndexChunks.push(...fileChunks.map(chunk => chunk.payload))
+    }
+
+    const byKey = new Map<string, RetrievedPayload>()
+
+    for (const chunk of [...fullIndexChunks, ...docChunks]) {
+      const key = chunk.contentHash ?? [chunk.repoName, chunk.branchName, chunk.filePath, chunk.startLine, chunk.endLine].join(":")
+      if (!byKey.has(key)) byKey.set(key, chunk)
+    }
+
+    docChunks = [...byKey.values()].sort((left, right) => score(right) - score(left))
+  }
 
   if (docChunks.length === 0) return undefined
 
@@ -3081,14 +3175,14 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       .split(/\r?\n/)
       .map(line => line.trim())
       .filter(Boolean)
-      .filter(line => !/^(Documentation|Source|title|description|file):/i.test(line))
+      .filter(line => !/^(Documentation|Source|Locale|title|description|file):/i.test(line))
 
     for (const line of lines) {
       const lowerLine = line.toLowerCase()
       const isHeader = /^#{1,4}\s+/.test(line)
       const isListOrTable = /^[-*]\s+/.test(line) || /^\|/.test(line) || /^\d+\.\s+/.test(line)
       const isDiagramOrCode = /^(graph|flowchart|sequenceDiagram|classDef|subgraph|%%|[A-Za-z0-9_]+\[|[A-Za-z0-9_]+-->|[A-Za-z0-9_]+-.->)/.test(line)
-      const isDocusaurusComponent = /^<|^import\s+/.test(line)
+      const isDocusaurusComponent = /^<|^import\s+|DocCardList|useCurrentSidebarCategory|items=\{/.test(line)
       const isMetadataLine = /^---$/.test(line) || /^>\s+/.test(line)
       const mentionsSubject = subjectTerms.some(term => lowerLine.includes(term))
 
@@ -3118,12 +3212,21 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
     }
   }
 
-  const parsedFacts = uniqueFacts.map(parseDocFact).filter(fact => fact.text.length > 0)
+  const parsedFacts = uniqueFacts
+    .map(parseDocFact)
+    .filter(fact => fact.text.length > 0)
+    .filter((fact, index, facts) => {
+      const key = fact.text.toLowerCase()
+
+      return facts.findIndex(other => other.text.toLowerCase() === key) === index
+    })
 
   if (asksDefinition) {
     const definitionFacts = parsedFacts.filter(fact => {
       return !/^welcome to\b/i.test(fact.text) &&
+        !/^selamat datang\b/i.test(fact.text) &&
         !/^auto copy \(isignal\) product documentation$/i.test(fact.text) &&
+        !/^dokumentasi produk auto copy \(isignal\)$/i.test(fact.text) &&
         fact.text.length >= 40
     })
     const mainFact = definitionFacts[0] ?? parsedFacts[0]
@@ -3177,7 +3280,7 @@ function documentationGlossarySourceChunks(chunks: RetrievedPayload[], question:
     }
 
     return true
-  }).slice(0, 12)
+  }).sort((left, right) => scoreDocLocalePreference(right) - scoreDocLocalePreference(left)).slice(0, 12)
 }
 
 function extractNamedSymbolsFromQuestion(question: string): string[] {
@@ -3377,6 +3480,13 @@ async function main() {
       : []
   const retrievalLimit = questionAsksAboutGlossary(question) ? Math.max(limit, 18) : limit
   const initialChunks = exactRoutes.length > 0 ? [] : await retrieve(retrievalQuestion, retrievalLimit)
+  const preferredLocaleDocChunks =
+    exactRoutes.length === 0 && questionAsksAboutGlossary(question) && !questionAsksAboutAccountTypes(question)
+      ? await retrievePreferredLocaleDocChunks(retrievalQuestion, Math.max(retrievalLimit, 16))
+      : []
+  const preferredLocaleDocNeighborChunks = preferredLocaleDocChunks.length > 0 && questionAsksAboutGlossary(question)
+    ? await retrieveNeighborChunks(preferredLocaleDocChunks, 30)
+    : []
   const hints = collectHints([...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactTermDetailChunks, ...initialChunks])
   const expansionQueries =
     exactRoutes.length > 0 && exactChunks.length === 0
@@ -3393,13 +3503,22 @@ async function main() {
   }
 
   const retrievedChunks = mergeChunks(
-    [...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactTermDetailChunks, ...initialChunks, ...expandedChunks],
+    [
+      ...exactChunks,
+      ...exactDetailChunks,
+      ...preferredLocaleDocChunks,
+      ...preferredLocaleDocNeighborChunks,
+      ...exactTermChunks,
+      ...exactTermDetailChunks,
+      ...initialChunks,
+      ...expandedChunks,
+    ],
     exactRoutes.length > 0
       ? Math.max(limit, 24)
       : questionAsksAboutAccountTypes(question)
         ? Math.max(retrievalLimit, 36)
         : questionAsksAboutGlossary(question)
-        ? Math.max(retrievalLimit, 24)
+        ? Math.max(retrievalLimit, 64)
         : Math.max(limit, 12),
   )
   const chunks = retrievedChunks.map(chunk => chunk.payload)
@@ -3573,6 +3692,7 @@ async function main() {
         `repo: ${chunk.repoName}`,
         `branch: ${chunk.branchName}`,
         `commit: ${chunk.commitSha}`,
+        `docLocale: ${chunk.docLocale ?? "default"}`,
         `serviceType: ${chunk.serviceType}`,
         `evidenceTypes: ${chunk.evidenceTypes?.join(", ") ?? "unknown"}`,
         `routes: ${chunk.routes?.join(", ") ?? ""}`,

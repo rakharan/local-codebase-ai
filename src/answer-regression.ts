@@ -169,9 +169,9 @@ const cases: AnswerCase[] = [
     question: "apa itu isignal",
     required: [
       "Auto Copy",
-      "trading signals",
-      "master channel",
-      "signal ingestion",
+      "sinyal perdagangan",
+      "channel master",
+      "pengolahan sinyal",
       "docs:isignal-docs\\index.mdx",
     ],
     forbidden: [

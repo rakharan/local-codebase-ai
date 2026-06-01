@@ -11,6 +11,7 @@ export type CodeChunk = {
   serviceType: ServiceType
   branchName: string
   commitSha: string
+  docLocale?: string
   filePath: string
   startLine: number
   endLine: number
