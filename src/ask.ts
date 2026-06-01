@@ -2353,6 +2353,10 @@ function questionAsksAboutGlossary(question: string): boolean {
   return /\b(apa itu|what is|maksud|meaning|how .*works?|how does .*work|cara kerja|gimana .*kerja|bagaimana .*kerja|glossary|glosarium|list|daftar|berikan|tipe akun|account type|aturan|rules?|platform_type|platform type|isignal)\b/i.test(question)
 }
 
+function questionAsksHowWorks(question: string): boolean {
+  return /\b(how .*works?|how does .*work|cara kerja|gimana .*kerja|bagaimana .*kerja)\b/i.test(question)
+}
+
 function questionAsksForDiagram(question: string): boolean {
   return /\b(flowchart|diagram|mermaid|sequence diagram|sequenceDiagram|visuali[sz]e|gambar(?:kan)? alur|buat(?:kan)? diagram|buat(?:kan)? flowchart|alur visual)\b/i.test(question)
 }
@@ -3087,7 +3091,7 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
   const lowerQuestion = question.toLowerCase()
   const asksRules = /\b(aturan|rules?|rule|ketentuan|business rules?)\b/i.test(question)
   const asksDefinition = /\b(apa itu|what is|maksud|meaning|define|definition|glossary|glosarium)\b/i.test(question)
-  const asksHowWorks = /\b(how .*works?|how does .*work|cara kerja|gimana .*kerja|bagaimana .*kerja)\b/i.test(question)
+  const asksHowWorks = questionAsksHowWorks(question)
   const asksOverview = asksDefinition || asksHowWorks
   const asksGlossaryExplicitly = /\b(glossary|glosarium|glossarium)\b/i.test(question)
   const subjectTerms = unique([
@@ -3272,7 +3276,7 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
 
 function documentationGlossarySourceChunks(chunks: RetrievedPayload[], question: string): RetrievedPayload[] {
   const asksDefinition = /\b(apa itu|what is|maksud|meaning|define|definition|glossary|glosarium)\b/i.test(question)
-  const asksHowWorks = /\b(how .*works?|how does .*work|cara kerja|gimana .*kerja|bagaimana .*kerja)\b/i.test(question)
+  const asksHowWorks = questionAsksHowWorks(question)
   const asksRules = /\b(aturan|rules?|rule|ketentuan|business rules?)\b/i.test(question)
 
   return chunks.filter(chunk => {
@@ -3335,7 +3339,7 @@ function scoreMermaidBlock(block: string, question: string): number {
 }
 
 async function buildMermaidDiagramAnswer(chunks: RetrievedPayload[], question: string): Promise<MermaidDiagramAnswer | undefined> {
-  if (!questionAsksForDiagram(question)) return undefined
+  if (!questionAsksForDiagram(question) && !questionAsksHowWorks(question)) return undefined
 
   const docChunks = chunks
     .filter(chunk => chunk.evidenceTypes?.includes("documentation"))

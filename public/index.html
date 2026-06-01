@@ -736,23 +736,15 @@ function renderMarkdown(text) {
   // Render Mermaid fences as diagrams and label normal code blocks.
   wrapper.querySelectorAll('pre code').forEach((block) => {
     const pre = block.parentElement;
-    const lang = Array.from(block.classList).find(c => c.startsWith('language-'))?.replace('language-', '') || '';
+    const langClass = [
+      ...Array.from(block.classList),
+      ...Array.from(pre.classList),
+    ].find(c => c.toLowerCase().includes('mermaid') || c.startsWith('language-')) || '';
+    const lang = langClass.replace(/^language-/, '');
+    const rawCode = block.textContent || '';
 
-    if (lang.toLowerCase() === 'mermaid') {
-      const shell = document.createElement('div');
-      shell.className = 'mermaid-shell';
-
-      const toolbar = document.createElement('div');
-      toolbar.className = 'mermaid-toolbar';
-      toolbar.textContent = 'Mermaid';
-
-      const diagram = document.createElement('div');
-      diagram.className = 'mermaid-diagram';
-      diagram.textContent = block.textContent || '';
-
-      shell.appendChild(toolbar);
-      shell.appendChild(diagram);
-      pre.replaceWith(shell);
+    if (isMermaidCodeBlock(lang, rawCode)) {
+      pre.replaceWith(createMermaidShell(rawCode));
       return;
     }
 
@@ -765,6 +757,47 @@ function renderMarkdown(text) {
   });
 
   return wrapper;
+}
+
+function isMermaidCodeBlock(lang, code) {
+  return lang.toLowerCase().includes('mermaid') ||
+    /^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|gantt)\b/i.test((code || '').trim());
+}
+
+function createMermaidShell(source) {
+  const shell = document.createElement('div');
+  shell.className = 'mermaid-shell';
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'mermaid-toolbar';
+  toolbar.textContent = 'Mermaid';
+
+  const diagram = document.createElement('div');
+  diagram.className = 'mermaid-diagram';
+  diagram.textContent = source || '';
+
+  shell.appendChild(toolbar);
+  shell.appendChild(diagram);
+
+  return shell;
+}
+
+function convertMermaidCodeBlocks(root = document) {
+  root.querySelectorAll('pre code').forEach((block) => {
+    const pre = block.parentElement;
+    if (!pre || pre.closest('.mermaid-shell')) return;
+
+    const langClass = [
+      ...Array.from(block.classList),
+      ...Array.from(pre.classList),
+    ].find(c => c.toLowerCase().includes('mermaid') || c.startsWith('language-')) || '';
+    const lang = langClass.replace(/^language-/, '');
+    const rawCode = block.textContent || '';
+
+    if (isMermaidCodeBlock(lang, rawCode)) {
+      pre.replaceWith(createMermaidShell(rawCode));
+    }
+  });
 }
 
 async function renderMermaidDiagrams() {
@@ -847,6 +880,8 @@ function renderMessages() {
       `;
     }
   }).join('');
+
+  convertMermaidCodeBlocks(chatMessages);
 
   // Trigger syntax highlighting
   if (window.Prism) {

@@ -181,15 +181,15 @@ const cases: AnswerCase[] = [
     ],
   },
   {
-    name: "documentation how-it-works avoids raw table dumps",
+    name: "documentation how-it-works returns Mermaid flowchart",
     question: "how isignal works?",
     required: [
-      "How it works from indexed documentation",
-      "Auto Copy",
-      "trading signals",
-      "master channels",
-      "Primary sources",
-      "docs:isignal-docs\\index.mdx",
+      "Flowchart from indexed documentation",
+      "```mermaid",
+      "graph TB",
+      "SignalBroadcast",
+      "Trade Publisher",
+      "docs:isignal-docs\\architecture\\diagrams.mdx",
     ],
     forbidden: [
       "| CronCheckAutoCopyTrade |",
