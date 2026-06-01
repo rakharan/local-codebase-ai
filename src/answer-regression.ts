@@ -180,6 +180,24 @@ const cases: AnswerCase[] = [
       "MRG Broker Path",
     ],
   },
+  {
+    name: "documentation how-it-works avoids raw table dumps",
+    question: "how isignal works?",
+    required: [
+      "How it works from indexed documentation",
+      "Auto Copy",
+      "trading signals",
+      "master channels",
+      "Primary sources",
+      "docs:isignal-docs\\index.mdx",
+    ],
+    forbidden: [
+      "| CronCheckAutoCopyTrade |",
+      "| tf2-ois |",
+      "classDef mrg",
+      "MRG Broker Path",
+    ],
+  },
 ]
 
 async function ask(question: string, timeoutMs: number): Promise<string> {

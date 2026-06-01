@@ -2350,7 +2350,7 @@ function questionAsksAboutServicesOrFlow(question: string): boolean {
 }
 
 function questionAsksAboutGlossary(question: string): boolean {
-  return /\b(apa itu|what is|maksud|meaning|glossary|glosarium|list|daftar|berikan|tipe akun|account type|aturan|rules?|platform_type|platform type|isignal)\b/i.test(question)
+  return /\b(apa itu|what is|maksud|meaning|how .*works?|how does .*work|cara kerja|gimana .*kerja|bagaimana .*kerja|glossary|glosarium|list|daftar|berikan|tipe akun|account type|aturan|rules?|platform_type|platform type|isignal)\b/i.test(question)
 }
 
 function questionAsksAboutAccountTypes(question: string): boolean {
@@ -3082,6 +3082,8 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
   const lowerQuestion = question.toLowerCase()
   const asksRules = /\b(aturan|rules?|rule|ketentuan|business rules?)\b/i.test(question)
   const asksDefinition = /\b(apa itu|what is|maksud|meaning|define|definition|glossary|glosarium)\b/i.test(question)
+  const asksHowWorks = /\b(how .*works?|how does .*work|cara kerja|gimana .*kerja|bagaimana .*kerja)\b/i.test(question)
+  const asksOverview = asksDefinition || asksHowWorks
   const asksGlossaryExplicitly = /\b(glossary|glosarium|glossarium)\b/i.test(question)
   const subjectTerms = unique([
     ...extractConceptTokens(question),
@@ -3114,15 +3116,17 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       if (filePath.includes("isignal-docs")) value += 40
       if (repoName.includes("isignal")) value += 20
       if (content.includes("auto copy")) value += 10
-      if (asksDefinition && isTopLevelIndexPath(filePath)) value += 90
+      if (asksOverview && isTopLevelIndexPath(filePath)) value += 90
     }
 
     value += scoreDocLocalePreference(chunk)
-    if (filePath.includes("business-rules") || filePath.includes("rules")) value += asksRules ? 20 : 0
-    if (filePath.includes("glossarium") || filePath.includes("glossary")) value += asksDefinition ? asksGlossaryExplicitly ? 18 : -60 : 4
+    if (filePath.includes("flow")) value += asksHowWorks ? 45 : 0
+    if (filePath.includes("business-rules") || filePath.includes("rules")) value += asksRules ? 20 : asksHowWorks ? 14 : 0
+    if (filePath.includes("architecture")) value += asksHowWorks ? 12 : 0
+    if (filePath.includes("glossarium") || filePath.includes("glossary")) value += asksOverview ? asksGlossaryExplicitly ? 18 : -60 : 4
     if (filePath.endsWith("index.mdx") || filePath.endsWith("index.md")) value += asksRules ? 0 : 18
-    if (asksDefinition && /\ballows users to automatically|memungkinkan pengguna|pengenalan|overview|tujuan utama|core purpose|internal documentation for|dokumentasi internal/i.test(content)) value += 35
-    if (asksDefinition && (filePath.includes("cron") || filePath.includes("diagram"))) value -= 25
+    if (asksOverview && /\ballows users to automatically|memungkinkan pengguna|pengenalan|overview|tujuan utama|core purpose|internal documentation for|dokumentasi internal|end-to-end|signal ingestion|pengolahan sinyal/i.test(content)) value += 35
+    if (asksOverview && (filePath.includes("cron") || filePath.includes("diagram"))) value -= asksHowWorks ? 8 : 25
     if (!asksRules && filePath.includes("business-rules")) value -= asksDefinition ? 8 : 0
 
     return value
@@ -3130,21 +3134,21 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
 
   const sortedDocChunks = matchingDocChunks.sort((left, right) => score(right) - score(left))
 
-  let docChunks = asksDefinition
+  let docChunks = asksOverview
     ? sortedDocChunks.filter(chunk => {
         const filePath = chunk.filePath?.toLowerCase() ?? ""
         const content = chunk.content?.toLowerCase() ?? ""
         const isTopLevelIndex = isTopLevelIndexPath(filePath)
 
         return isTopLevelIndex ||
-          filePath.includes("glossarium") ||
-          filePath.includes("glossary") ||
+          (asksGlossaryExplicitly && (filePath.includes("glossarium") || filePath.includes("glossary"))) ||
+          (asksHowWorks && (filePath.includes("flow") || filePath.includes("business-rules") || filePath.includes("architecture"))) ||
           content.includes("allows users to automatically") ||
           content.includes("memungkinkan pengguna")
       })
     : sortedDocChunks
 
-  if (asksDefinition) {
+  if (asksOverview) {
     const fullIndexChunks: RetrievedPayload[] = []
     const topIndexRefs = sortedDocChunks
       .filter(chunk => chunk.repoName && chunk.branchName && chunk.filePath && isTopLevelIndexPath(chunk.filePath))
@@ -3168,7 +3172,7 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
   if (docChunks.length === 0) return undefined
 
   const facts: string[] = []
-  const maxFacts = asksDefinition ? 6 : 14
+  const maxFacts = asksOverview ? 8 : 14
 
   for (const chunk of docChunks) {
     const lines = (chunk.content ?? "")
@@ -3187,7 +3191,7 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       const mentionsSubject = subjectTerms.some(term => lowerLine.includes(term))
 
       if (isDiagramOrCode || isDocusaurusComponent || isMetadataLine) continue
-      if (asksDefinition && isListOrTable) continue
+      if (asksOverview && isListOrTable) continue
 
       if (mentionsSubject || (asksRules && isListOrTable) || (!asksRules && !isListOrTable && !isHeader)) {
         facts.push(`${line} (${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine})`)
@@ -3221,7 +3225,7 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       return facts.findIndex(other => other.text.toLowerCase() === key) === index
     })
 
-  if (asksDefinition) {
+  if (asksOverview) {
     const definitionFacts = parsedFacts.filter(fact => {
       return !/^welcome to\b/i.test(fact.text) &&
         !/^selamat datang\b/i.test(fact.text) &&
@@ -3230,16 +3234,18 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
         fact.text.length >= 40
     })
     const mainFact = definitionFacts[0] ?? parsedFacts[0]
-    const supportingFacts = definitionFacts.slice(1, 4)
+    const supportingFacts = definitionFacts.slice(1, asksHowWorks ? 6 : 4)
     const sources = unique([mainFact?.source ?? "", ...supportingFacts.map(fact => fact.source)], 6)
 
     if (!mainFact) return undefined
 
     return [
-      localized("Ringkasan berdasarkan dokumentasi:", "Summary from indexed documentation:"),
+      asksHowWorks
+        ? localized("Cara kerja berdasarkan dokumentasi:", "How it works from indexed documentation:")
+        : localized("Ringkasan berdasarkan dokumentasi:", "Summary from indexed documentation:"),
       renderDocSummaryText(mainFact.text),
       supportingFacts.length > 0 ? "" : undefined,
-      supportingFacts.length > 0 ? localized("Poin pendukung:", "Supporting points:") : undefined,
+      supportingFacts.length > 0 ? localized("Poin penting:", "Key points:") : undefined,
       supportingFacts.length > 0 ? supportingFacts.map(fact => `- ${renderDocSummaryText(fact.text)}`).join("\n") : undefined,
       "",
       localized("Sumber utama:", "Primary sources:"),
@@ -3261,6 +3267,7 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
 
 function documentationGlossarySourceChunks(chunks: RetrievedPayload[], question: string): RetrievedPayload[] {
   const asksDefinition = /\b(apa itu|what is|maksud|meaning|define|definition|glossary|glosarium)\b/i.test(question)
+  const asksHowWorks = /\b(how .*works?|how does .*work|cara kerja|gimana .*kerja|bagaimana .*kerja)\b/i.test(question)
   const asksRules = /\b(aturan|rules?|rule|ketentuan|business rules?)\b/i.test(question)
 
   return chunks.filter(chunk => {
@@ -3270,12 +3277,12 @@ function documentationGlossarySourceChunks(chunks: RetrievedPayload[], question:
     const content = chunk.content?.toLowerCase() ?? ""
 
     if (asksRules) return filePath.includes("rules")
-    if (asksDefinition) {
+    if (asksDefinition || asksHowWorks) {
       const isTopLevelIndex = /docs:[^/\\]+[/\\]index\.mdx?$/.test(filePath)
 
       return isTopLevelIndex ||
-        filePath.includes("glossarium") ||
-        filePath.includes("glossary") ||
+        (asksDefinition && (filePath.includes("glossarium") || filePath.includes("glossary"))) ||
+        (asksHowWorks && (filePath.includes("flow") || filePath.includes("business-rules") || filePath.includes("architecture"))) ||
         content.includes("allows users to automatically")
     }
 
