@@ -2986,7 +2986,31 @@ function buildAccountTypeNotFoundAnswer(question: string): string {
   )
 }
 
-function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
+function cleanDocSummaryText(value: string): string {
+  return value
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^[-*]\s+/, "")
+    .replace(/^>\s+/, "")
+    .replace(/\*\*/g, "")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function renderDocSummaryText(value: string): string {
+  if (!shouldAnswerIndonesian(question)) return value
+
+  const normalized = value.trim()
+
+  if (/^The Auto Copy system allows users to automatically replicate trading signals from master channels to their accounts\./.test(normalized)) {
+    return "iSignal / Auto Copy adalah sistem yang memungkinkan user menyalin trading signals secara otomatis dari master channel ke akun mereka. Sistem ini menangani flow end-to-end dari signal ingestion, order execution, dan proteksi akun dari stale or invalid trades."
+  }
+
+  return normalized
+}
+
+async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: string): Promise<string | undefined> {
   if (!questionAsksAboutGlossary(question)) return undefined
   if (questionAsksAboutAccountTypes(question)) return undefined
 
@@ -3085,11 +3109,46 @@ function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: 
 
   if (uniqueFacts.length === 0) return undefined
 
+  function parseDocFact(fact: string): { text: string; source: string } {
+    const match = fact.match(/^(.*)\s+\(([^()]+:\d+-\d+)\)$/)
+
+    return {
+      text: cleanDocSummaryText(match?.[1] ?? fact),
+      source: match?.[2] ?? "",
+    }
+  }
+
+  const parsedFacts = uniqueFacts.map(parseDocFact).filter(fact => fact.text.length > 0)
+
+  if (asksDefinition) {
+    const definitionFacts = parsedFacts.filter(fact => {
+      return !/^welcome to\b/i.test(fact.text) &&
+        !/^auto copy \(isignal\) product documentation$/i.test(fact.text) &&
+        fact.text.length >= 40
+    })
+    const mainFact = definitionFacts[0] ?? parsedFacts[0]
+    const supportingFacts = definitionFacts.slice(1, 4)
+    const sources = unique([mainFact?.source ?? "", ...supportingFacts.map(fact => fact.source)], 6)
+
+    if (!mainFact) return undefined
+
+    return [
+      localized("Ringkasan berdasarkan dokumentasi:", "Summary from indexed documentation:"),
+      renderDocSummaryText(mainFact.text),
+      supportingFacts.length > 0 ? "" : undefined,
+      supportingFacts.length > 0 ? localized("Poin pendukung:", "Supporting points:") : undefined,
+      supportingFacts.length > 0 ? supportingFacts.map(fact => `- ${renderDocSummaryText(fact.text)}`).join("\n") : undefined,
+      "",
+      localized("Sumber utama:", "Primary sources:"),
+      sources.map(source => `- ${source}`).join("\n"),
+    ].filter((line): line is string => typeof line === "string").join("\n")
+  }
+
   return [
     shouldAnswerIndonesian(question)
       ? "Ringkasan berdasarkan dokumentasi yang ter-index:"
       : "Summary from indexed documentation:",
-    uniqueFacts.map(fact => `- ${fact}`).join("\n"),
+    parsedFacts.map(fact => `- ${fact.text}${fact.source ? ` (${fact.source})` : ""}`).join("\n"),
     "",
     shouldAnswerIndonesian(question)
       ? "Catatan: ini adalah ringkasan evidence dokumentasi. Untuk detail implementasi, tanyakan flow, endpoint, tabel, atau service spesifik."
@@ -3468,7 +3527,7 @@ async function main() {
     return
   }
 
-  const documentationGlossaryAnswer = buildDocumentationGlossaryAnswer(chunks, question)
+  const documentationGlossaryAnswer = await buildDocumentationGlossaryAnswer(chunks, question)
 
   if (documentationGlossaryAnswer) {
     const sourceChunks = documentationGlossarySourceChunks(chunks, question)

@@ -102,6 +102,16 @@ npm run index -- C:/GIT/work/ims-tf `
 
 `--replace-repo` deletes all existing chunks with the same `repoName` before indexing. Use it after an accidental broad index or when changing from a full-repo index to a scoped index.
 
+## Index Documentation
+
+For Docusaurus docs, point the docs indexer at the `docs` folder:
+
+```powershell
+npm run index-docs -- C:\GIT\work\tf-documentation\my-website\docs --repo-name tf-documentation
+```
+
+The docs indexer reads Markdown/MDX files, uses frontmatter `repos` when present, and maps known docs folders like `isignal-docs`, `wallet-docs`, and `devops-docs` to related service repos. Re-running it is incremental: unchanged doc chunks are skipped and stale chunks for the same repo/branch are removed.
+
 ## Branches
 
 The indexer reads the currently checked-out Git branch and commit from the target repo.

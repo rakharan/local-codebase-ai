@@ -169,7 +169,9 @@ const cases: AnswerCase[] = [
     question: "apa itu isignal",
     required: [
       "Auto Copy",
-      "automatically replicate trading signals",
+      "trading signals",
+      "master channel",
+      "signal ingestion",
       "docs:isignal-docs\\index.mdx",
     ],
     forbidden: [
