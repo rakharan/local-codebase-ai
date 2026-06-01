@@ -2353,6 +2353,10 @@ function questionAsksAboutGlossary(question: string): boolean {
   return /\b(apa itu|what is|maksud|meaning|how .*works?|how does .*work|cara kerja|gimana .*kerja|bagaimana .*kerja|glossary|glosarium|list|daftar|berikan|tipe akun|account type|aturan|rules?|platform_type|platform type|isignal)\b/i.test(question)
 }
 
+function questionAsksForDiagram(question: string): boolean {
+  return /\b(flowchart|diagram|mermaid|sequence diagram|sequenceDiagram|visuali[sz]e|gambar(?:kan)? alur|buat(?:kan)? diagram|buat(?:kan)? flowchart|alur visual)\b/i.test(question)
+}
+
 function questionAsksAboutAccountTypes(question: string): boolean {
   return /\b(tipe akun|jenis akun|account types?|account_type|accountTypes|accountTypesV2)\b/i.test(question)
 }
@@ -3078,6 +3082,7 @@ function scoreDocLocalePreference(chunk: RetrievedPayload): number {
 async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: string): Promise<string | undefined> {
   if (!questionAsksAboutGlossary(question)) return undefined
   if (questionAsksAboutAccountTypes(question)) return undefined
+  if (questionAsksForDiagram(question)) return undefined
 
   const lowerQuestion = question.toLowerCase()
   const asksRules = /\b(aturan|rules?|rule|ketentuan|business rules?)\b/i.test(question)
@@ -3288,6 +3293,114 @@ function documentationGlossarySourceChunks(chunks: RetrievedPayload[], question:
 
     return true
   }).sort((left, right) => scoreDocLocalePreference(right) - scoreDocLocalePreference(left)).slice(0, 12)
+}
+
+type MermaidDiagramAnswer = {
+  answer: string
+  sources: RetrievedPayload[]
+}
+
+function stripDocChunkMetadata(content: string): string {
+  return content
+    .split(/\r?\n/)
+    .filter(line => !/^(Documentation|Source|Locale|title|description|file):/i.test(line.trim()))
+    .join("\n")
+}
+
+function extractMermaidBlocks(content: string): string[] {
+  const blocks = [
+    ...[...content.matchAll(/```mermaid\s*([\s\S]*?)```/gi)].map(match => match[1] ?? ""),
+    ...[...content.matchAll(/<ZoomableMermaid\s+chart=\{`\s*([\s\S]*?)`\s*\}\s*\/?>/gi)].map(match => match[1] ?? ""),
+  ]
+
+  return blocks
+    .map(block => block.trim())
+    .filter(block => /^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|gantt)\b/i.test(block))
+}
+
+function scoreMermaidBlock(block: string, question: string): number {
+  const lowerBlock = block.toLowerCase()
+  const lowerQuestion = question.toLowerCase()
+  let score = 0
+
+  for (const token of extractConceptTokens(question)) {
+    if (lowerBlock.includes(token.toLowerCase())) score += 10
+  }
+
+  if (/\bsignal|isignal|auto copy\b/i.test(lowerQuestion) && /signal|isignal|auto copy/i.test(block)) score += 30
+  if (/\bflow|works?|cara kerja|alur\b/i.test(lowerQuestion) && /flow|start|-->|publish|consume|process/i.test(block)) score += 20
+  if (/\barchitecture|arsitektur\b/i.test(lowerQuestion) && /architecture|service|api|worker/i.test(block)) score += 16
+
+  return score
+}
+
+async function buildMermaidDiagramAnswer(chunks: RetrievedPayload[], question: string): Promise<MermaidDiagramAnswer | undefined> {
+  if (!questionAsksForDiagram(question)) return undefined
+
+  const docChunks = chunks
+    .filter(chunk => chunk.evidenceTypes?.includes("documentation"))
+    .filter(chunk => /mermaid|graph\s+(?:TB|TD|LR|RL|BT)|flowchart|sequenceDiagram|ZoomableMermaid/i.test(chunk.content ?? ""))
+
+  const candidateFiles = unique(
+    docChunks
+      .map(chunk => [chunk.repoName, chunk.branchName, chunk.filePath].join("|"))
+      .filter(key => !key.includes("undefined")),
+    8,
+  )
+
+  const candidates: Array<{ block: string; source: RetrievedPayload; score: number }> = []
+
+  for (const key of candidateFiles) {
+    const [repoName, branchName, filePath] = key.split("|")
+    if (!repoName || !branchName || !filePath) continue
+
+    const fileChunks = await retrieveFileChunks(repoName, branchName, filePath)
+    const fullContent = fileChunks.map(chunk => stripDocChunkMetadata(chunk.payload.content ?? "")).join("\n")
+
+    for (const block of extractMermaidBlocks(fullContent)) {
+      const signatureLine = block
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .find(line => line.length > 12 &&
+          !/^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|journey|gantt|classDef|style|%%)\b/i.test(line))
+      const source = fileChunks.find(chunk => {
+        const content = chunk.payload.content ?? ""
+
+        return signatureLine ? content.includes(signatureLine) : /mermaid|ZoomableMermaid/i.test(content)
+      })?.payload ?? fileChunks[0]?.payload
+
+      if (!source) continue
+
+      candidates.push({
+        block,
+        source,
+        score: scoreMermaidBlock(block, question),
+      })
+    }
+  }
+
+  candidates.sort((left, right) => right.score - left.score)
+
+  const best = candidates[0]
+  if (!best) return undefined
+
+  const answer = [
+    localized("Flowchart dari dokumentasi ter-index:", "Flowchart from indexed documentation:"),
+    "",
+    "```mermaid",
+    best.block,
+    "```",
+    "",
+    localized(
+      "Catatan: diagram ini diambil dari Mermaid yang sudah ter-index. Edge yang tidak ada di diagram/source tidak ditambahkan.",
+      "Note: this diagram is taken from indexed Mermaid documentation. Edges not present in the diagram/source were not added.",
+    ),
+  ].join("\n")
+
+  return {
+    answer,
+    sources: [best.source],
+  }
 }
 
 function extractNamedSymbolsFromQuestion(question: string): string[] {
@@ -3653,6 +3766,23 @@ async function main() {
     return
   }
 
+  const mermaidDiagramAnswer = await buildMermaidDiagramAnswer(chunks, question)
+
+  if (mermaidDiagramAnswer) {
+    console.log("\nANSWER\n")
+    console.log(mermaidDiagramAnswer.answer)
+
+    console.log("\nSOURCES\n")
+
+    for (const chunk of mermaidDiagramAnswer.sources) {
+      console.log(
+        `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+      )
+    }
+
+    return
+  }
+
   const documentationGlossaryAnswer = await buildDocumentationGlossaryAnswer(chunks, question)
 
   if (documentationGlossaryAnswer) {
@@ -3759,6 +3889,8 @@ async function main() {
     "- Domain vocabulary hints are synonyms for retrieval and disambiguation, not evidence. Do not present a hint as a fact unless it is supported by the source context.",
     "- For glossary/list questions, synthesize a concise glossary-style answer from all relevant source chunks. Include aliases, code constants, tables, routes, and rules only when they are visible in sources.",
     "- If the question asks for a list, return a list and cite the source lines for each group of facts.",
+    "- If the question asks for a diagram, flowchart, Mermaid, or visual flow, include a fenced ```mermaid code block that uses only confirmed entities and edges from the context. Keep node labels short and include repo/service names when known.",
+    "- If an indexed source contains a relevant Mermaid diagram, you may reuse or simplify that Mermaid diagram, but do not add unconfirmed edges.",
     "- If the question names exact routes or paths, prioritize sources whose content or route metadata exactly contains those paths.",
     "- Do not replace an exact route from the question with a different route unless explaining that the exact route was not found.",
     "- When comparing route definitions, compare method, alias, url, and handler exactly as written. Do not say handlers are the same if their names differ.",

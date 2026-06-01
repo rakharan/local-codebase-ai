@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Local Codebase AI</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
@@ -424,6 +425,37 @@
     font-size: 0.8rem;
     color: inherit;
   }
+  .mermaid-shell {
+    margin: 12px 0;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    background: #f6f8fa;
+    overflow: auto;
+  }
+  .mermaid-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    padding: 6px 10px;
+    border-bottom: 1px solid #d0d7de;
+    background: #ffffff;
+    color: #57606a;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .mermaid-diagram {
+    min-width: 360px;
+    padding: 16px;
+    color: #24292f;
+  }
+  .mermaid-error {
+    margin: 0;
+    padding: 14px;
+    white-space: pre-wrap;
+    color: #f85149;
+    background: #161b22;
+    border-top: 1px solid #30363d;
+  }
   .markdown-body blockquote {
     border-left: 3px solid #58a6ff;
     margin: 10px 0;
@@ -597,9 +629,27 @@ const settingsPanel = document.getElementById('settingsPanel');
 
 const STORAGE_KEY = 'lca_recent_searches';
 const MAX_RECENT = 10;
+let mermaidRenderCounter = 0;
 
 // In-memory conversation history
 let messages = [];
+
+if (window.mermaid) {
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'strict',
+    theme: 'base',
+    themeVariables: {
+      primaryColor: '#dbeafe',
+      primaryTextColor: '#0f172a',
+      primaryBorderColor: '#2563eb',
+      lineColor: '#475569',
+      secondaryColor: '#dcfce7',
+      tertiaryColor: '#fef3c7',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+    },
+  });
+}
 
 // Configure marked
 marked.setOptions({
@@ -683,10 +733,29 @@ function renderMarkdown(text) {
   wrapper.className = 'markdown-body';
   wrapper.innerHTML = html;
 
-  // Add language labels to code blocks
+  // Render Mermaid fences as diagrams and label normal code blocks.
   wrapper.querySelectorAll('pre code').forEach((block) => {
     const pre = block.parentElement;
     const lang = Array.from(block.classList).find(c => c.startsWith('language-'))?.replace('language-', '') || '';
+
+    if (lang.toLowerCase() === 'mermaid') {
+      const shell = document.createElement('div');
+      shell.className = 'mermaid-shell';
+
+      const toolbar = document.createElement('div');
+      toolbar.className = 'mermaid-toolbar';
+      toolbar.textContent = 'Mermaid';
+
+      const diagram = document.createElement('div');
+      diagram.className = 'mermaid-diagram';
+      diagram.textContent = block.textContent || '';
+
+      shell.appendChild(toolbar);
+      shell.appendChild(diagram);
+      pre.replaceWith(shell);
+      return;
+    }
+
     pre.style.position = 'relative';
 
     const label = document.createElement('div');
@@ -696,6 +765,29 @@ function renderMarkdown(text) {
   });
 
   return wrapper;
+}
+
+async function renderMermaidDiagrams() {
+  if (!window.mermaid) return;
+
+  const diagrams = Array.from(document.querySelectorAll('.mermaid-diagram:not([data-rendered])'));
+
+  for (const diagram of diagrams) {
+    const source = diagram.textContent || '';
+    const id = `mermaid-${Date.now()}-${mermaidRenderCounter++}`;
+
+    try {
+      const { svg } = await mermaid.render(id, source);
+      diagram.innerHTML = svg;
+      diagram.dataset.rendered = 'true';
+    } catch (err) {
+      const error = document.createElement('pre');
+      error.className = 'mermaid-error';
+      error.textContent = `Mermaid render error: ${err.message || err}\n\n${source}`;
+      diagram.replaceChildren(error);
+      diagram.dataset.rendered = 'true';
+    }
+  }
 }
 
 function newChat() {
@@ -760,6 +852,8 @@ function renderMessages() {
   if (window.Prism) {
     Prism.highlightAll();
   }
+
+  renderMermaidDiagrams();
 
   // Scroll to bottom
   chatMessages.scrollTop = chatMessages.scrollHeight;
