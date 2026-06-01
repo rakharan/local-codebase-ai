@@ -10,6 +10,7 @@ import type { RelationshipEdge } from "./lib/graph.js"
 import type { EvidenceType } from "./lib/evidence.js"
 import type { RelationshipHints } from "./lib/relationships.js"
 import type { ServiceType } from "./lib/chunker.js"
+import { extractQuestionTerms } from "./lib/vocabulary.js"
 
 type RetrievedPayload = {
   repoName?: string
@@ -217,6 +218,45 @@ async function retrievePreferredLocaleDocChunks(queryText: string, resultLimit: 
       payload: point.payload as RetrievedPayload,
     }))
     .filter(chunk => chunk.payload.content && chunk.payload.evidenceTypes?.includes("documentation"))
+}
+
+async function retrieveVocabularyChunks(queryText: string, resultLimit: number): Promise<RetrievedChunk[]> {
+  const questionVector = await createEmbedding(queryText)
+  const filter: Record<string, unknown> | undefined = options.repoName
+    ? {
+        must: [
+          {
+            key: "repoName",
+            match: {
+              value: options.repoName,
+            },
+          },
+        ],
+      }
+    : undefined
+
+  // Search broadly and filter client-side for vocabulary chunks.
+  // Semantic search for general vocab questions may not rank vocabulary chunks
+  // highly enough if we constrain to documentation evidence type only.
+  const query = {
+    query: questionVector,
+    limit: resultLimit * 3,
+    with_payload: true,
+    ...(filter ? { filter } : {}),
+  }
+
+  const results = await qdrant.query(config.collectionName, query)
+
+  return results.points
+    .map(point => ({
+      id: String(point.id),
+      payload: point.payload as RetrievedPayload,
+    }))
+    .filter(chunk =>
+      chunk.payload.content &&
+      chunk.payload.filePath?.startsWith("vocabulary://")
+    )
+    .slice(0, resultLimit)
 }
 
 function unique(values: string[], max = 12): string[] {
@@ -1105,7 +1145,7 @@ function scoreExactTermMatch(payload: RetrievedPayload, terms: string[]): number
     if (!normalizedTerm) return currentScore
     if (payload.symbols?.some(symbol => symbol.toLowerCase() === normalizedTerm)) return currentScore + 5
     if (payload.messageNames?.some(messageName => messageName.toLowerCase() === normalizedTerm)) return currentScore + 5
-    if (new RegExp(`(^|[^a-z0-9_])${escapeRegExp(normalizedTerm)}([^a-z0-9_]|$)`).test(text)) {
+    if (new RegExp(`(^|[^a-z0-9_])${escapeRegExp(normalizedTerm)}([^a-z0-9_]|$)`, "i").test(text)) {
       let termScore = 4
 
       if (new RegExp(`["']${escapeRegExp(normalizedTerm)}["']`, "i").test(content)) termScore += 5
@@ -1114,7 +1154,7 @@ function scoreExactTermMatch(payload: RetrievedPayload, terms: string[]): number
       return currentScore + termScore
     }
 
-    if (text.includes(normalizedTerm)) return currentScore + 1
+    if (text.toLowerCase().includes(normalizedTerm)) return currentScore + 1
 
     return currentScore
   }, 0)
@@ -1135,6 +1175,26 @@ function scoreExactTermMatch(payload: RetrievedPayload, terms: string[]): number
     if (filePath.includes("whitelabel/account")) score += 8
   }
 
+  // Boost chunks that contain multi-word phrases from the question
+  const contentLower = content.toLowerCase()
+  const phraseTerms = terms.filter(t => t.length >= 3).map(t => t.toLowerCase())
+
+  for (let i = 0; i < phraseTerms.length - 1; i++) {
+    const phrase = `${phraseTerms[i]} ${phraseTerms[i + 1]}`
+
+    if (contentLower.includes(phrase)) {
+      score += 12
+    }
+  }
+
+  for (let i = 0; i < phraseTerms.length - 2; i++) {
+    const phrase = `${phraseTerms[i]} ${phraseTerms[i + 1]} ${phraseTerms[i + 2]}`
+
+    if (contentLower.includes(phrase)) {
+      score += 20
+    }
+  }
+
   if (terms.some(term => /account(types?|_type)|tipe akun|mt4|mt5/i.test(term))) {
     if (filePath.includes("askap/libs/config")) score += 30
     if (filePath.includes("mrg/libs/config")) score += 30
@@ -1150,12 +1210,14 @@ function scoreExactTermMatch(payload: RetrievedPayload, terms: string[]): number
     if (text.includes("metaaccounttype.getpublicaccounttypes")) score += 14
   }
 
-  if (terms.some(term => /^(legend|master|elite|pro|rookie|newbie)$/.test(term.toLowerCase()))) {
-    if (filePath.includes("libs/config")) score += 22
-    if (filePath.includes("models/channel")) score += 18
-    if (filePath.includes("controllers/channel") || filePath.includes("controllers/api")) score += 10
-    if (/minMedal|maxMedal|RANGE_MEDAL|qualification|violation|rank_utc|upgrade_offer/.test(content)) score += 12
-    if (/dsc_channels_point_events|dsc_channels_violation|traders_kyc/.test(content)) score += 8
+  // Boost vocabulary/glossary chunks when question contains defined terms
+  if (filePath.startsWith("vocabulary://")) {
+    const definedTerms = (payload.symbols ?? []).map(s => s.toLowerCase())
+    const matchingTerms = terms.filter(term => definedTerms.includes(term.toLowerCase()))
+
+    if (matchingTerms.length > 0) {
+      score += 25 + matchingTerms.length * 5
+    }
   }
 
   return score
@@ -3198,107 +3260,330 @@ function buildAccountTypeNotFoundAnswer(question: string): string {
   )
 }
 
-function questionChannelLevelHint(question: string): "newbie" | "rookie" | "pro" | "elite" | "master" | "legend" | undefined {
-  const lower = question.toLowerCase()
-  const levels = ["newbie", "rookie", "pro", "elite", "master", "legend"] as const
+function buildVocabularyAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
+  const vocabChunks = chunks.filter(chunk => chunk.filePath?.startsWith("vocabulary://"))
 
-  return levels.find(level => lower.includes(level))
-}
+  if (vocabChunks.length === 0) return undefined
 
-function questionAsksLevelRequirements(question: string): boolean {
-  return Boolean(questionChannelLevelHint(question)) &&
-    /\b(requirements?|syarat|ketentuan|rules?|aturan|be(?:come)?|jadi|menjadi)\b/i.test(question)
-}
+  const lowerQuestion = question.toLowerCase()
 
-function parseLevelConfig(content: string, levelName: string): Array<{ key: string; value: string }> {
-  const levelPattern = new RegExp(`"name"\\s*:\\s*"${escapeRegExp(levelName)}"[\\s\\S]*?\\n\\s*\\}`, "i")
-  const block = content.match(levelPattern)?.[0] ?? ""
+  type TermInfo = {
+    term: string
+    vocabName: string
+    kind: string
+    source: string
+    repoName: string
+    value: string | undefined
+    properties: Record<string, string>
+  }
 
-  if (!block) return []
+  const termMap = new Map<string, TermInfo>()
+  const vocabGroupNames = new Set<string>()
 
-  return [
-    ["minMedal", block.match(/"minMedal"\s*:\s*([0-9]+)/)?.[1]],
-    ["maxMedal", block.match(/"maxMedal"\s*:\s*([0-9]+)/)?.[1]],
-    ["money", block.match(/"money"\s*:\s*([0-9]+)/)?.[1]],
-  ]
-    .filter((entry): entry is [string, string] => Boolean(entry[1]))
-    .map(([key, value]) => ({ key, value }))
-}
+  for (const chunk of vocabChunks) {
+    const content = chunk.content ?? ""
+    const lines = content.split("\n")
+    const vocabName = lines.find(line => line.startsWith("Vocabulary:"))?.replace("Vocabulary:", "").trim() ?? ""
+    const kind = lines.find(line => line.startsWith("Kind:"))?.replace("Kind:", "").trim() ?? ""
+    const source = lines.find(line => line.startsWith("Source:"))?.replace("Source:", "").trim() ?? ""
+    const repoName = chunk.repoName ?? ""
 
-function buildLevelRequirementsAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
-  if (!questionAsksLevelRequirements(question)) return undefined
+    if (vocabName) vocabGroupNames.add(vocabName)
 
-  const level = questionChannelLevelHint(question)
-  if (!level) return undefined
+    let currentTerm: string | undefined
+    let currentValue: string | undefined
+    let currentProperties: Record<string, string> = {}
 
-  const levelLabel = level[0]?.toUpperCase() + level.slice(1)
-  const configChunk = chunks.find(chunk => {
+    for (const line of lines) {
+      if (line.startsWith("- ")) {
+        // Save previous term before starting a new one
+        if (currentTerm) {
+          const existing = termMap.get(currentTerm.toLowerCase())
+          const propCount = Object.keys(currentProperties).length
+
+          if (!existing || Object.keys(existing.properties).length < propCount) {
+            termMap.set(currentTerm.toLowerCase(), {
+              term: currentTerm,
+              vocabName,
+              kind,
+              source,
+              repoName,
+              value: currentValue,
+              properties: { ...currentProperties },
+            })
+          }
+        }
+
+        // Parse new term line: `- TermName` or `- TermName: value`
+        const match = line.match(/^- ([^:]+?)(?::\s*(.+))?$/)
+        currentTerm = match?.[1]?.trim()
+        currentValue = match?.[2]?.trim()
+        currentProperties = {}
+      } else if (line.startsWith("    ") && currentTerm) {
+        // Property line: `    key: value`
+        const propMatch = line.match(/^\s{4}([^:]+):\s*(.+)$/)
+
+        if (propMatch && propMatch[1] && propMatch[2]) {
+          currentProperties[propMatch[1].trim()] = propMatch[2].trim()
+        }
+      }
+    }
+
+    // Save the last term
+    if (currentTerm) {
+      const existing = termMap.get(currentTerm.toLowerCase())
+      const propCount = Object.keys(currentProperties).length
+
+      if (!existing || Object.keys(existing.properties).length < propCount) {
+        termMap.set(currentTerm.toLowerCase(), {
+          term: currentTerm,
+          vocabName,
+          kind,
+          source,
+          repoName,
+          value: currentValue,
+          properties: { ...currentProperties },
+        })
+      }
+    }
+  }
+
+  const matchingTerms = [...termMap.values()].filter(info => lowerQuestion.includes(info.term.toLowerCase()))
+
+  // Also detect general questions about the vocabulary group (e.g., "persyaratan naik medal" without naming a specific level)
+  const generalVocabKeywords = ["medal", "level", "rank", "persyaratan", "naik", "requirement", "syarat", "tier", "grade"]
+  const isGeneralVocabQuestion = generalVocabKeywords.some(kw => lowerQuestion.includes(kw))
+
+  if (matchingTerms.length === 0 && !isGeneralVocabQuestion) return undefined
+
+  // For general questions, include all terms from vocabulary groups that contain medal/level related properties
+  let termsToInclude = matchingTerms
+
+  if (matchingTerms.length === 0 && isGeneralVocabQuestion) {
+    const medalRelatedGroups = [...vocabGroupNames].filter(gn =>
+      [...termMap.values()].some(info =>
+        info.vocabName === gn &&
+        (Object.keys(info.properties).some(p => p.toLowerCase().includes("medal")) ||
+         info.term.toLowerCase().includes("medal"))
+      )
+    )
+
+    if (medalRelatedGroups.length > 0) {
+      termsToInclude = [...termMap.values()].filter(info => medalRelatedGroups.includes(info.vocabName))
+    } else {
+      // Fall back to all terms if no medal-specific groups found
+      termsToInclude = [...termMap.values()]
+    }
+  }
+
+  if (termsToInclude.length === 0) return undefined
+
+  // Look for related usage chunks that explain what vocabulary properties mean
+  const usageHints = new Map<string, string>()
+
+  for (const chunk of chunks) {
+    if (chunk.filePath?.startsWith("vocabulary://")) continue
+
     const content = chunk.content ?? ""
 
-    return chunk.filePath?.endsWith("libs/config.js") &&
-      new RegExp(`"name"\\s*:\\s*"${escapeRegExp(levelLabel)}"`, "i").test(content)
-  })
-  const modelText = chunks
-    .filter(chunk => chunk.filePath?.endsWith("models/channel.js"))
-    .map(chunk => chunk.content ?? "")
-    .join("\n")
-  const facts: string[] = []
-
-  if (configChunk) {
-    const configFacts = parseLevelConfig(configChunk.content ?? "", levelLabel)
-    const rangeMatch = (configChunk.content ?? "").match(new RegExp(`"${escapeRegExp(level)}"\\s*:\\s*\\[([^\\]]+)\\]`, "i"))
-
-    if (configFacts.length > 0) {
-      facts.push(`${levelLabel} is configured with ${configFacts.map(fact => `${fact.key} ${fact.value}`).join(", ")}.`)
+    // Look for semantic hints about what properties mean
+    if (/level\.money\s*==\s*0/.test(content)) {
+      usageHints.set("money-zero", "when money is 0, point redemption is blocked")
     }
 
-    if (rangeMatch?.[1]) {
-      facts.push(`${levelLabel.toLowerCase()} maps to medal values [${rangeMatch[1].replace(/\s+/g, " ")}].`)
+    if (/level\.money\s*\*|\*\s*level\.money|point\s*\*\s*money|money\s*\*\s*point/.test(content)) {
+      usageHints.set("money", "used as a per-point multiplier in point calculations")
+    }
+
+    if (/per_point|per point|per-point/.test(content)) {
+      usageHints.set("money", "represents the per-point monetary value")
+    }
+
+    if (/formatMoney\(level\.money\)/.test(content)) {
+      if (!usageHints.has("money")) {
+        usageHints.set("money", "formatted as a monetary value per point")
+      }
     }
   }
 
-  const eligibilityFacts: string[] = []
+  const paragraphs: string[] = []
+  const sources: string[] = []
 
-  if (/check\[0\]\.idcard_ver\s*==\s*2/.test(modelText)) {
-    eligibilityFacts.push("KYC is marked true when `traders_kyc.idcard_ver == 2`.")
+  for (const info of termsToInclude) {
+    const displayTerm = info.term.length > 0 && info.term[0] ? info.term[0].toUpperCase() + info.term.slice(1) : info.term
+    const isLevelVocab = /level|point|medal|rank/i.test(info.vocabName)
+    const isAccountVocab = /account|type|platform/i.test(info.vocabName)
+
+    // Separate properties into requirements vs config fields
+    const requirementKeys = ["minMedal", "maxMedal", "min", "max", "threshold", "requirement"]
+    const requirementProps: Record<string, string> = {}
+    const otherProps: Record<string, string> = {}
+
+    for (const [key, val] of Object.entries(info.properties)) {
+      if (requirementKeys.some(req => key.toLowerCase().includes(req))) {
+        requirementProps[key] = val
+      } else {
+        otherProps[key] = val
+      }
+    }
+
+    // Build the intro based on what info we have
+    if (Object.keys(requirementProps).length > 0) {
+      if (isLevelVocab) {
+        paragraphs.push(`For a channel to reach **${displayTerm}** level, the medal range requirement is:`)
+      } else if (isAccountVocab) {
+        paragraphs.push(`The **${displayTerm}** account type has these threshold settings:`)
+      } else {
+        paragraphs.push(`**${displayTerm}** has these requirement thresholds:`)
+      }
+
+      for (const [key, val] of Object.entries(requirementProps)) {
+        paragraphs.push(`- ${key}: ${val}`)
+      }
+    }
+
+    if (Object.keys(otherProps).length > 0) {
+      const moneyHint = usageHints.get("money")
+      const moneyValue = otherProps.money
+
+      if (isLevelVocab && Object.keys(requirementProps).length > 0) {
+        paragraphs.push(`As a privilege of reaching **${displayTerm}** level:`)
+      }
+
+      if (moneyValue && moneyHint) {
+        paragraphs.push(`- Each point is worth **Rp ${Number(moneyValue).toLocaleString("id-ID")}** (${moneyHint})`)
+        delete otherProps.money
+      }
+
+      for (const [key, val] of Object.entries(otherProps)) {
+        paragraphs.push(`- ${key}: ${val}`)
+      }
+    }
+
+    if (info.value && Object.keys(info.properties).length === 0) {
+      paragraphs.push(`- mapped to ${info.value}`)
+    }
+
+    if (info.source) {
+      sources.push(`- ${info.repoName}@${"unknown"} ${info.source} (${info.vocabName})`)
+    }
   }
 
-  if (/rank\s*==\s*config\.PARTNERSHIP_LEVEL\.NON_PARTNERSHIP/.test(modelText)) {
-    eligibilityFacts.push("For NON_PARTNERSHIP, the code requires at least Elite medals, zero valid violations in the last month, 5 monthly records, at least 3 qualified months, and total penalty medals >= -1.")
+  // Add sources from usage chunks that mention the vocabulary or term
+  for (const chunk of chunks) {
+    if (chunk.filePath?.startsWith("vocabulary://")) continue
+    if (!chunk.repoName) continue
+
+    const content = chunk.content ?? ""
+    const hasMoneyHint = /level\.money\s*\*|\*\s*level\.money|point\s*\*\s*money|money\s*\*\s*point|formatMoney\(level\.money\)|per_point/.test(content)
+    const mentionsVocab = vocabGroupNames.size > 0 && [...vocabGroupNames].some(name => content.includes(name))
+    const mentionsTerm = termsToInclude.some(info => content.toLowerCase().includes(info.term.toLowerCase()))
+
+    if (hasMoneyHint || mentionsVocab || mentionsTerm) {
+      sources.push(`- ${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`)
+    }
   }
 
-  if (/rank\s*==\s*config\.PARTNERSHIP_LEVEL\.PRE_PARTNERSHIP/.test(modelText)) {
-    eligibilityFacts.push("For PRE_PARTNERSHIP, the code requires at least Master medals, zero valid violations in the last month, at least 2 qualified months in the checked period, total penalty medals >= -1, and the last rank upgrade to be at least 3 months ago before offering upgrade acceptance.")
-  }
-
-  if (/rank\s*==\s*config\.PARTNERSHIP_LEVEL\.PARTNERSHIP/.test(modelText)) {
-    eligibilityFacts.push("For PARTNERSHIP, the code requires at least Master medals, zero valid violations in the last month, at least 1 qualified month in the checked period, and total penalty medals >= -1.")
-  }
-
-  if (facts.length === 0 && eligibilityFacts.length === 0) return undefined
-
-  const sources = unique(
-    chunks
-      .filter(chunk => chunk.filePath?.endsWith("libs/config.js") || chunk.filePath?.endsWith("models/channel.js"))
-      .map(chunk => `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`),
-    8,
-  )
+  if (paragraphs.length === 0) return undefined
 
   return [
-    `In tf2-ois, ${levelLabel} is defined as a channel medal level, not as a standalone service.`,
-    "",
-    facts.length > 0 ? "Confirmed level definition:" : undefined,
-    facts.length > 0 ? facts.map(fact => `- ${fact}`).join("\n") : undefined,
-    eligibilityFacts.length > 0 ? "" : undefined,
-    eligibilityFacts.length > 0 ? "Related eligibility/upgrade checks found near the channel rank logic:" : undefined,
-    eligibilityFacts.length > 0 ? eligibilityFacts.map(fact => `- ${fact}`).join("\n") : undefined,
-    "",
-    "What is not confirmed:",
-    "- The retrieved code does not expose one single function named `becomeLegend`; the answer above combines the explicit Legend config with nearby rank/eligibility checks that reference medal thresholds.",
+    ...paragraphs,
     "",
     "Sources:",
-    sources.map(source => `- ${source}`).join("\n"),
-  ].filter((line): line is string => typeof line === "string").join("\n")
+    ...unique(sources, 8),
+  ].join("\n")
+}
+
+function buildCommentRuleAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
+  const questionLower = question.toLowerCase()
+  const questionTokens = questionLower.split(/\s+/).filter(t => t.length >= 3)
+
+  // Indonesian business rule comment markers
+  const ruleMarkers = [/\bJIKA\b/i, /\bMAKA\b/i, /\bIF\b/i, /\bTHEN\b/i, /\bKETIKA\b/i, /\bWHEN\b/i]
+
+  const matches: Array<{ comment: string, source: string, score: number }> = []
+
+  for (const chunk of chunks) {
+    const content = chunk.content ?? ""
+    const lines = content.split("\n")
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+
+      // Only process single-line comments
+      if (!trimmed.startsWith("//")) continue
+
+      const commentText = trimmed.slice(2).trim()
+      const commentLower = commentText.toLowerCase()
+
+      // Check if this comment looks like a business rule
+      const hasRuleMarker = ruleMarkers.some(marker => marker.test(commentText))
+      if (!hasRuleMarker) continue
+
+      // Score how many question tokens appear in the comment
+      let tokenScore = 0
+
+      for (const token of questionTokens) {
+        if (commentLower.includes(token)) {
+          tokenScore += token.length >= 5 ? 3 : 2
+        }
+      }
+
+      // Boost score for phrase matches
+      for (let i = 0; i < questionTokens.length - 1; i++) {
+        const phrase = `${questionTokens[i]} ${questionTokens[i + 1]}`
+
+        if (commentLower.includes(phrase)) {
+          tokenScore += 5
+        }
+      }
+
+      if (tokenScore >= 6) {
+        matches.push({
+          comment: commentText,
+          source: `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`,
+          score: tokenScore,
+        })
+      }
+    }
+  }
+
+  if (matches.length === 0) return undefined
+
+  // Sort by score descending, pick the best
+  matches.sort((a, b) => b.score - a.score)
+
+  const best = matches[0]
+
+  if (!best) return undefined
+
+  const isIndonesian = shouldAnswerIndonesian(question)
+
+  // Build a natural answer from the comment
+  let answer = best.comment.replace(/^\/\/\s*/, "")
+
+  // Clean up the comment text for presentation
+  answer = answer.replace(/^JIKA\s+/i, isIndonesian ? "Jika " : "If ")
+  answer = answer.replace(/^IF\s+/i, isIndonesian ? "Jika " : "If ")
+  answer = answer.replace(/^KETIKA\s+/i, isIndonesian ? "Ketika " : "When ")
+  answer = answer.replace(/^WHEN\s+/i, isIndonesian ? "Ketika " : "When ")
+  answer = answer.replace(/\s+MAKA\s+/i, isIndonesian ? ", maka " : ", then ")
+  answer = answer.replace(/\s+THEN\s+/i, isIndonesian ? ", maka " : ", then ")
+
+  // If the comment is in all caps, convert to sentence case
+  const letters = answer.replace(/[^a-zA-Z]/g, "")
+  const uppercaseLetters = answer.replace(/[^A-Z]/g, "")
+
+  if (letters.length > 0 && uppercaseLetters.length / letters.length > 0.7) {
+    answer = answer.toLowerCase().replace(/^\w/, c => c.toUpperCase())
+  }
+
+  // Make it a complete sentence
+  if (!/[.!?]$/.test(answer)) {
+    answer += "."
+  }
+
+  return `${answer}\n\nSources:\n- ${best.source}`
 }
 
 function cleanDocSummaryText(value: string): string {
@@ -3835,14 +4120,88 @@ async function main() {
   const exactRoutes = unique([...questionRoutes, ...conceptRoutes], 10)
   const exactChunks = await retrieveExactRouteMatches(exactRoutes)
   const questionHints = extractQuestionHints(question)
+  const generalVocabKeywords = ["medal", "level", "rank", "persyaratan", "naik", "requirement", "syarat", "tier", "grade"]
+  const isGeneralVocabQuestion = generalVocabKeywords.some(kw => question.toLowerCase().includes(kw))
+
+  const vocabBoostTerms = isGeneralVocabQuestion
+    ? ["POINT_LEVELS", "RANGE_MEDAL", "minMedal", "maxMedal", "MEDALS", "levelToMedals"]
+    : []
+
   const exactTermSearchTerms = unique([
     ...questionHints,
-    ...(questionAsksAboutGlossary(question) ? extractConceptTokens(question) : []),
+    ...extractConceptTokens(question),
     ...registryExactSearchTerms(),
+    ...vocabBoostTerms,
   ], 36)
   const exactTermChunks = exactRoutes.length === 0
     ? await retrieveExactTermMatches(exactTermSearchTerms, questionAsksAboutAccountTypes(question) ? 60 : 32)
     : []
+
+  // Fallback: if the question is about general vocabulary topics (medal, level, rank) but no vocabulary
+  // chunks were retrieved via exact matching, explicitly search for vocabulary chunks.
+  const hasVocabChunks = exactTermChunks.some(chunk => chunk.payload.filePath?.startsWith("vocabulary://"))
+
+  let generalVocabChunks: RetrievedChunk[] = []
+
+  if (isGeneralVocabQuestion && !hasVocabChunks) {
+    generalVocabChunks = await retrieveVocabularyChunks(question, 16)
+  }
+
+  // If vocabulary chunks were found, also retrieve code chunks that reference
+  // the vocabulary group names and their properties (e.g., POINT_LEVELS and level.money usage)
+  const vocabGroupNames = new Set<string>()
+  const vocabPropertyNames = new Set<string>()
+
+  for (const chunk of exactTermChunks) {
+    if (chunk.payload.filePath?.startsWith("vocabulary://")) {
+      const lines = (chunk.payload.content ?? "").split("\n")
+      const vocabName = lines.find(line => line.startsWith("Vocabulary:"))?.replace("Vocabulary:", "").trim()
+
+      if (vocabName) vocabGroupNames.add(vocabName)
+
+      // Extract property names from indented lines in the Terms section only
+      let inTermsSection = false
+
+      for (const line of lines) {
+        if (line === "Terms:") {
+          inTermsSection = true
+          continue
+        }
+
+        if (line === "Context:") {
+          inTermsSection = false
+          continue
+        }
+
+        if (!inTermsSection) continue
+
+        // Only capture property lines (4-space indented) under a term, not the term line itself
+        if (line.startsWith("    ")) {
+          const propMatch = line.match(/^\s{4}([^:]+):/)
+
+          if (propMatch && propMatch[1]) {
+            const propName = propMatch[1].trim().replace(/^["']|["']$/g, "")
+
+            if (propName && propName !== "name" && propName !== "label") {
+              vocabPropertyNames.add(propName)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const vocabSearchTerms = [...vocabGroupNames]
+
+  for (const prop of vocabPropertyNames) {
+    vocabSearchTerms.push(prop)
+    vocabSearchTerms.push(`level.${prop}`)
+  }
+
+  const vocabUsageChunks = vocabSearchTerms.length > 0
+    ? await retrieveExactTermMatches(vocabSearchTerms, 48)
+    : []
+
   const exactTermDetailChunks =
     exactRoutes.length === 0 && exactTermChunks.length > 0
       ? await retrieveNeighborChunks(exactTermChunks, questionAsksAboutAccountTypes(question) ? 240 : 70)
@@ -3871,7 +4230,7 @@ async function main() {
   const preferredLocaleDocNeighborChunks = preferredLocaleDocChunks.length > 0 && questionAsksAboutGlossary(question)
     ? await retrieveNeighborChunks(preferredLocaleDocChunks, 30)
     : []
-  const hints = collectHints([...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactTermDetailChunks, ...initialChunks])
+  const hints = collectHints([...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactTermDetailChunks, ...vocabUsageChunks, ...initialChunks])
   const expansionQueries =
     exactRoutes.length > 0 && exactChunks.length === 0
       ? []
@@ -3893,6 +4252,8 @@ async function main() {
       ...preferredLocaleDocChunks,
       ...preferredLocaleDocNeighborChunks,
       ...exactTermChunks,
+      ...generalVocabChunks,
+      ...vocabUsageChunks,
       ...exactTermDetailChunks,
       ...initialChunks,
       ...expandedChunks,
@@ -3902,7 +4263,7 @@ async function main() {
       : questionAsksAboutAccountTypes(question)
         ? Math.max(retrievalLimit, 36)
         : questionAsksAboutGlossary(question)
-        ? Math.max(retrievalLimit, 64)
+        ? Math.max(retrievalLimit, 96)
         : Math.max(limit, 12),
   )
   const accountTypeFileChunks = questionAsksAboutAccountTypes(question)
@@ -4036,13 +4397,13 @@ async function main() {
     return
   }
 
-  const levelRequirementsAnswer = buildLevelRequirementsAnswer(chunks, question)
+  const vocabularyAnswer = buildVocabularyAnswer(chunks, question)
 
-  if (levelRequirementsAnswer) {
-    const sourceChunks = chunks.filter(chunk => chunk.filePath?.endsWith("libs/config.js") || chunk.filePath?.endsWith("models/channel.js")).slice(0, 16)
+  if (vocabularyAnswer) {
+    const sourceChunks = chunks.filter(chunk => chunk.filePath?.startsWith("vocabulary://")).slice(0, 12)
 
     console.log("\nANSWER\n")
-    console.log(levelRequirementsAnswer)
+    console.log(vocabularyAnswer)
 
     console.log("\nSOURCES\n")
 
@@ -4051,6 +4412,17 @@ async function main() {
         `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
       )
     }
+
+    return
+  }
+
+  const commentRuleAnswer = buildCommentRuleAnswer(chunks, question)
+
+  if (commentRuleAnswer) {
+    console.log("\nANSWER\n")
+    console.log(commentRuleAnswer)
+
+    console.log("\nSOURCES\n")
 
     return
   }
@@ -4176,6 +4548,7 @@ async function main() {
     "- Answer from the context only.",
     "- Answer the user's exact question. If retrieved context is about a different topic, say NOT_FOUND_IN_INDEXED_CODEBASE for the requested topic instead of answering the different topic.",
     "- Domain vocabulary hints are synonyms for retrieval and disambiguation, not evidence. Do not present a hint as a fact unless it is supported by the source context.",
+    "- Inline code comments are valid evidence when they directly state business rules, behavior, or consequences. If a comment clearly answers the user's question, quote it and cite the source. Do not require seeing the full implementation if the comment itself states the outcome.",
     "- For glossary/list questions, synthesize a concise glossary-style answer from all relevant source chunks. Include aliases, code constants, tables, routes, and rules only when they are visible in sources.",
     "- If the question asks for a list, return a list and cite the source lines for each group of facts.",
     "- If the question asks for a diagram, flowchart, Mermaid, or visual flow, include a fenced ```mermaid code block that uses only confirmed entities and edges from the context. Keep node labels short and include repo/service names when known.",
@@ -4186,7 +4559,7 @@ async function main() {
     "- Do not say compared routes match exactly when their urls, aliases, or handlers differ.",
     "- Mention service/repo names, source file paths, and line ranges.",
     "- Mention branch names when they are present in source metadata.",
-    "- If context is insufficient, say NOT_FOUND_IN_INDEXED_CODEBASE and explain what is missing.",
+    "- Say NOT_FOUND_IN_INDEXED_CODEBASE only when NONE of the retrieved sources mention the user's topic. If any source, including inline comments, mentions the topic, answer from what it says even if the implementation uses variables or helper functions.",
     "- Treat the Evidence inventory as a whitelist for service, route, message, queue, exchange, and database table names.",
     "- Do not infer database table names from domain words. Only name tables that appear in metadata, SQL, or quoted source context.",
     "- Do not infer service involvement from class/client names alone. A service/repo is confirmed only when it appears in source metadata or an explicit source says it calls/handles the same route/message/function.",

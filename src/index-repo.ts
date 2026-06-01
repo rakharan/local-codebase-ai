@@ -5,12 +5,14 @@ import { ensureCollection, qdrant } from "./lib/qdrant.js"
 import { config } from "./lib/config.js"
 import { readRepoFiles } from "./lib/files.js"
 import { getGitInfo, getCommits } from "./lib/git.js"
-import { chunkFile } from "./lib/chunker.js"
+import { chunkFile, INDEX_SCHEMA_VERSION } from "./lib/chunker.js"
 import type { CodeChunk, ServiceType } from "./lib/chunker.js"
 import { createEmbedding } from "./lib/ollama.js"
 import { extractRelationshipEdges, writeRelationshipGraphForRepo } from "./lib/graph.js"
 import { createCommitChunks } from "./lib/commits.js"
 import { createCommentChunks } from "./lib/comments.js"
+import { extractVocabulary, buildGlossaryContent } from "./lib/vocabulary.js"
+import { sha256, uuidFromHash } from "./lib/hash.js"
 
 const serviceTypes = new Set<ServiceType>(["api", "worker", "cron", "library", "unknown"])
 
@@ -293,10 +295,44 @@ async function main() {
   const commentChunks = options.indexComments
     ? files.flatMap(file => createCommentChunks(file.relativePath, file.content, repoName, serviceType, gitInfo.branchName, gitInfo.commitSha))
     : []
-  const allChunks = [...chunks, ...commentChunks]
+
+  // Extract vocabulary/config objects and create glossary chunks
+  const vocabularyGroups = files.flatMap(file => extractVocabulary(file.relativePath, file.content))
+  const glossaryChunks: CodeChunk[] = []
+
+  for (const group of vocabularyGroups) {
+    const content = buildGlossaryContent(group)
+    const contentHash = sha256(
+      `${INDEX_SCHEMA_VERSION}:${repoName}:${gitInfo.branchName}:${serviceType}:vocabulary:${group.groupName}:${group.sourceFile}:${content}`,
+    )
+
+    glossaryChunks.push({
+      id: uuidFromHash(contentHash),
+      repoName,
+      serviceType,
+      branchName: gitInfo.branchName,
+      commitSha: gitInfo.commitSha,
+      filePath: `vocabulary://${group.sourceFile}#${group.groupName}`,
+      startLine: 0,
+      endLine: 0,
+      content,
+      contentHash,
+      evidenceTypes: ["documentation"],
+      relationshipHints: {
+        routes: [],
+        symbols: [group.groupName, ...group.terms.map(t => t.term)],
+        messageNames: [],
+        queueNames: [],
+        exchangeNames: [],
+        dbTables: [],
+      },
+    })
+  }
+
+  const allChunks = [...chunks, ...commentChunks, ...glossaryChunks]
   const relationshipEdges = extractRelationshipEdges(files, repoName, serviceType, gitInfo.branchName, gitInfo.commitSha)
 
-  console.log(`Found ${allChunks.length} chunks (${chunks.length} code, ${commentChunks.length} comments)`)
+  console.log(`Found ${allChunks.length} chunks (${chunks.length} code, ${commentChunks.length} comments, ${glossaryChunks.length} glossary)`)
   console.log(`Found ${relationshipEdges.length} relationship edges`)
 
   const chunksByTopFolder = new Map<string, number>()

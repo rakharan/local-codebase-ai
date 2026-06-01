@@ -23,10 +23,10 @@ export type CodeChunk = {
 
 export type ServiceType = "api" | "worker" | "cron" | "library" | "unknown"
 
-const MAX_LINES = 30
-const OVERLAP_LINES = 4
-const MAX_CHARS = 1_200
-const INDEX_SCHEMA_VERSION = "branches-v1"
+const MAX_LINES = 50
+const OVERLAP_LINES = 15
+const MAX_CHARS = 2_000
+export const INDEX_SCHEMA_VERSION = "branches-v1"
 
 export function chunkFile(
   file: SourceFile,
@@ -89,11 +89,22 @@ export function chunkFile(
       end++
     }
 
-    const selectedLines = lines.slice(start, end)
+    // Look backward for leading comment lines to include context
+    let commentStart = start
+    while (commentStart > 0) {
+      const prevLine = lines[commentStart - 1]?.trim() ?? ""
+      if (prevLine.startsWith("//") || prevLine.startsWith("/*") || prevLine.startsWith("*") || prevLine.startsWith("#")) {
+        commentStart--
+      } else {
+        break
+      }
+    }
+
+    const selectedLines = lines.slice(commentStart, end)
     const content = selectedLines.join("\n").trim()
 
     if (content.length > 0) {
-      const startLine = start + 1
+      const startLine = commentStart + 1
       const endLine = end
       const evidenceTypes = inferEvidenceTypes(file.relativePath, content)
       const relationshipHints = inferRelationshipHints(content)

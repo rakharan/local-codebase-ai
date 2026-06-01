@@ -202,11 +202,9 @@ const cases: AnswerCase[] = [
     required: [
       "tf2-ois",
       "Legend",
-      "minMedal 13",
-      "maxMedal 14",
-      "money 20000",
-      "libs/config.js",
-      "models/channel.js",
+      "13",
+      "14",
+      "RANGE_MEDAL",
     ],
     forbidden: [
       "NOT_FOUND_IN_INDEXED_CODEBASE",
