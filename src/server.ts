@@ -59,9 +59,14 @@ type IndexSummaryItem = {
   docLocale: string
   commitSha: string
   chunkCount: number
+  unassignedChunkCount: number
+  ambiguousChunkCount: number
   documentationCount: number
   vocabularyCount: number
   relationshipEdgeCount: number
+  graphProjectEdgeCount: number
+  graphUnassignedEdgeCount: number
+  graphAmbiguousEdgeCount: number
   evidenceTypes: Record<string, number>
 }
 
@@ -160,14 +165,21 @@ async function summarizeIndex(): Promise<IndexSummaryItem[]> {
         docLocale,
         commitSha: payload?.commitSha ?? "unknown",
         chunkCount: 0,
+        unassignedChunkCount: 0,
+        ambiguousChunkCount: 0,
         documentationCount: 0,
         vocabularyCount: 0,
         relationshipEdgeCount: 0,
+        graphProjectEdgeCount: 0,
+        graphUnassignedEdgeCount: 0,
+        graphAmbiguousEdgeCount: 0,
         evidenceTypes: {},
       }
 
       item.chunkCount++
       item.projectIds = [...new Set([...item.projectIds, ...projectIds])].sort()
+      if (projectIds.length === 0) item.unassignedChunkCount++
+      if ((payload?.projectTagSources ?? []).some(source => source.startsWith("repo:ambiguous:"))) item.ambiguousChunkCount++
       if (payload?.commitSha && payload.commitSha !== "docs") {
         item.commitSha = payload.commitSha
       } else if (item.commitSha === "unknown" && payload?.commitSha) {
@@ -188,15 +200,38 @@ async function summarizeIndex(): Promise<IndexSummaryItem[]> {
   } while (offset)
 
   const graph = await readRelationshipGraph()
-  const graphCounts = new Map<string, number>()
+  const graphCounts = new Map<string, {
+    total: number
+    projectTagged: number
+    unassigned: number
+    ambiguous: number
+  }>()
 
   for (const edge of graph) {
     const key = `${edge.repoName}\u0000${edge.branchName}`
-    graphCounts.set(key, (graphCounts.get(key) ?? 0) + 1)
+    const current = graphCounts.get(key) ?? {
+      total: 0,
+      projectTagged: 0,
+      unassigned: 0,
+      ambiguous: 0,
+    }
+    const edgeProjectIds = edge.projectIds ?? []
+
+    current.total++
+    if (edgeProjectIds.length > 0) current.projectTagged++
+    if (edgeProjectIds.length === 0) current.unassigned++
+    if ((edge.projectTagSources ?? []).some(source => source.startsWith("repo:ambiguous:"))) current.ambiguous++
+
+    graphCounts.set(key, current)
   }
 
   for (const item of byScope.values()) {
-    item.relationshipEdgeCount = graphCounts.get(`${item.repoName}\u0000${item.branchName}`) ?? 0
+    const graphStats = graphCounts.get(`${item.repoName}\u0000${item.branchName}`)
+
+    item.relationshipEdgeCount = graphStats?.total ?? 0
+    item.graphProjectEdgeCount = graphStats?.projectTagged ?? 0
+    item.graphUnassignedEdgeCount = graphStats?.unassigned ?? 0
+    item.graphAmbiguousEdgeCount = graphStats?.ambiguous ?? 0
   }
 
   return [...byScope.values()].sort((left, right) => {

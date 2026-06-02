@@ -821,13 +821,14 @@
                 <th>Docs</th>
                 <th>Vocab</th>
                 <th>Graph</th>
+                <th>Health</th>
                 <th>Commit</th>
                 <th>Evidence</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody id="indexSummaryRows">
-              <tr><td colspan="12" class="manager-muted">Open Index Manager and click Refresh.</td></tr>
+              <tr><td colspan="13" class="manager-muted">Open Index Manager and click Refresh.</td></tr>
             </tbody>
           </table>
         </div>
@@ -1000,9 +1001,22 @@ function formatEvidenceTypes(evidenceTypes) {
   return entries.map(([name, count]) => `<code>${escapeHtml(name)}:${count}</code>`).join(' ');
 }
 
+function formatIndexHealth(item) {
+  const parts = [];
+
+  if (item.unassignedChunkCount) parts.push(`<code>unassigned:${item.unassignedChunkCount}</code>`);
+  if (item.ambiguousChunkCount) parts.push(`<code>ambiguous:${item.ambiguousChunkCount}</code>`);
+  if (item.relationshipEdgeCount) {
+    parts.push(`<code>graphTagged:${item.graphProjectEdgeCount || 0}/${item.relationshipEdgeCount}</code>`);
+  }
+  if (item.graphAmbiguousEdgeCount) parts.push(`<code>graphAmbiguous:${item.graphAmbiguousEdgeCount}</code>`);
+
+  return parts.length > 0 ? parts.join(' ') : '<span class="manager-muted">ok</span>';
+}
+
 async function loadIndexSummary() {
   managerStatus.textContent = 'Loading index summary...';
-  indexSummaryRows.innerHTML = '<tr><td colspan="12" class="manager-muted">Loading...</td></tr>';
+  indexSummaryRows.innerHTML = '<tr><td colspan="13" class="manager-muted">Loading...</td></tr>';
 
   try {
     const res = await fetch('/api/index/summary');
@@ -1011,10 +1025,12 @@ async function loadIndexSummary() {
     if (!res.ok) throw new Error(data.error || 'Failed to load index summary');
 
     const items = data.items || [];
-    managerStatus.textContent = `${items.length} indexed scope(s) in ${data.collection || 'Qdrant'}.`;
+    const ambiguousChunks = items.reduce((sum, item) => sum + (item.ambiguousChunkCount || 0), 0);
+    const unassignedChunks = items.reduce((sum, item) => sum + (item.unassignedChunkCount || 0), 0);
+    managerStatus.textContent = `${items.length} indexed scope(s) in ${data.collection || 'Qdrant'}. Unassigned chunks: ${unassignedChunks}. Ambiguous chunks: ${ambiguousChunks}.`;
 
     if (items.length === 0) {
-      indexSummaryRows.innerHTML = '<tr><td colspan="12" class="manager-muted">No indexed data found.</td></tr>';
+      indexSummaryRows.innerHTML = '<tr><td colspan="13" class="manager-muted">No indexed data found.</td></tr>';
       return;
     }
 
@@ -1029,6 +1045,7 @@ async function loadIndexSummary() {
         <td>${item.documentationCount}</td>
         <td>${item.vocabularyCount}</td>
         <td>${item.relationshipEdgeCount}</td>
+        <td>${formatIndexHealth(item)}</td>
         <td><code>${escapeHtml(shortCommit(item.commitSha))}</code></td>
         <td>${formatEvidenceTypes(item.evidenceTypes)}</td>
         <td>
@@ -1039,7 +1056,7 @@ async function loadIndexSummary() {
     `).join('');
   } catch (err) {
     managerStatus.textContent = `Error: ${err.message}`;
-    indexSummaryRows.innerHTML = '<tr><td colspan="12" class="manager-muted">Could not load index summary.</td></tr>';
+    indexSummaryRows.innerHTML = '<tr><td colspan="13" class="manager-muted">Could not load index summary.</td></tr>';
   }
 }
 

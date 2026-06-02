@@ -2,7 +2,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { sha256 } from "./hash.js"
 import type { SourceFile } from "./files.js"
-import type { ServiceType } from "./chunker.js"
+import type { ProjectTag, ServiceType } from "./chunker.js"
 
 export type RelationshipType =
   | "CALLS_HTTP_ENDPOINT"
@@ -17,6 +17,8 @@ export type RelationshipEdge = {
   id: string
   type: RelationshipType
   repoName: string
+  projectIds?: string[] | undefined
+  projectTagSources?: string[] | undefined
   serviceType: ServiceType
   branchName: string
   commitSha: string
@@ -64,6 +66,7 @@ function edgeId(edge: Omit<RelationshipEdge, "id">): string {
   return sha256([
     edge.type,
     edge.repoName,
+    ...(edge.projectIds ?? []),
     edge.branchName,
     edge.filePath,
     edge.startLine,
@@ -200,6 +203,11 @@ export function extractRelationshipEdges(
   serviceType: ServiceType,
   branchName: string,
   commitSha: string,
+  fallbackProjectIds: string[] = [],
+  inferProjectTag: (filePath: string, content: string) => ProjectTag = () => ({
+    projectIds: fallbackProjectIds,
+    sources: fallbackProjectIds.map(projectId => `repo:${projectId}`),
+  }),
 ): RelationshipEdge[] {
   const edges: RelationshipEdge[] = []
   const phpConstantRoutes = new Map<string, ConstantRoute>()
@@ -212,8 +220,11 @@ export function extractRelationshipEdges(
   }
 
   for (const file of files) {
+    const projectTag = inferProjectTag(file.relativePath, file.content)
     const base = {
       repoName,
+      projectIds: projectTag.projectIds,
+      projectTagSources: projectTag.sources,
       serviceType,
       branchName,
       commitSha,

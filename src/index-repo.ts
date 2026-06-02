@@ -377,7 +377,20 @@ async function main() {
   }
 
   const allChunks = [...chunks, ...commentChunks, ...glossaryChunks]
-  const relationshipEdges = extractRelationshipEdges(files, repoName, serviceType, gitInfo.branchName, gitInfo.commitSha)
+  const relationshipEdges = extractRelationshipEdges(
+    files,
+    repoName,
+    serviceType,
+    gitInfo.branchName,
+    gitInfo.commitSha,
+    projectIds,
+    (filePath, content) => inferProjectTagForChunk({
+      repoName,
+      filePath,
+      content,
+      fallbackProjectIds: projectIds,
+    }),
+  )
 
   console.log(`Found ${allChunks.length} chunks (${chunks.length} code, ${commentChunks.length} comments, ${glossaryChunks.length} glossary)`)
   console.log(`Found ${relationshipEdges.length} relationship edges`)

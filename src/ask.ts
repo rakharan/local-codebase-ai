@@ -551,7 +551,17 @@ function commonPathPrefixScore(leftPath: string, rightPath: string): number {
 function graphScopeAllows(edge: RelationshipEdge): boolean {
   if (!options.repoName && edge.repoName === "local-codebase-ai") return false
   if (options.repoName && edge.repoName !== options.repoName) return false
-  if (projectFilterRepos.size > 0 && !projectFilterRepos.has(edge.repoName)) return false
+  if (projectFilterIds.length > 0) {
+    const edgeProjectIds = edge.projectIds ?? []
+
+    if (edgeProjectIds.length > 0) {
+      if (!edgeProjectIds.some(projectId => projectFilterIds.includes(projectId))) return false
+    } else if ((edge.projectTagSources ?? []).some(source => source.startsWith("repo:ambiguous:"))) {
+      return false
+    } else if (!projectFilterRepos.has(edge.repoName)) {
+      return false
+    }
+  }
   if (options.branch && edge.branchName !== options.branch) return false
   if (serviceType && edge.serviceType !== serviceType) return false
 
@@ -2577,6 +2587,95 @@ function questionAsksNegativeRepoConstraint(question: string): boolean {
     /\bmt[45]\b/i.test(question)
 }
 
+async function buildNegativeRepoEvidenceAnswer(question: string): Promise<MetadataAnswer | undefined> {
+  if (!questionAsksNegativeRepoConstraint(question)) return undefined
+
+  const term = /\bmt4\b/i.test(question) ? "MT4" : "MT5"
+  const termPattern = new RegExp(`(?:^|[^a-zA-Z0-9])${term}(?:[^a-zA-Z0-9]|$)|platform_type\\s*[:=]+\\s*${term === "MT4" ? "0" : "(3|5)"}\\b|${term === "MT5" ? "ENABLE_MT5" : "VOLUME_MULTIPLIER\\.MT4"}`, "i")
+  const repoStats = new Map<string, { total: number; matching: RetrievedPayload[] }>()
+  const filter = buildFilter()
+  let offset: string | number | Record<string, unknown> | null | undefined
+
+  do {
+    const page = await qdrant.scroll(config.collectionName, {
+      limit: 256,
+      with_payload: true,
+      with_vector: false,
+      ...(filter ? { filter } : {}),
+      ...(offset ? { offset } : {}),
+    })
+
+    for (const point of page.points) {
+      const payload = point.payload as RetrievedPayload | null | undefined
+
+      if (!payload?.content || !payload.repoName) continue
+      if (!options.repoName && payload.repoName === "local-codebase-ai") continue
+
+      const current = repoStats.get(payload.repoName) ?? { total: 0, matching: [] }
+      current.total += 1
+
+      const text = [
+        payload.filePath ?? "",
+        ...(payload.symbols ?? []),
+        ...(payload.dbTables ?? []),
+        payload.content,
+      ].join("\n")
+
+      if (termPattern.test(text) && current.matching.length < 8) {
+        current.matching.push(payload)
+      }
+
+      repoStats.set(payload.repoName, current)
+    }
+
+    offset = page.next_page_offset
+  } while (offset)
+
+  if (repoStats.size === 0) return undefined
+
+  const reposWithEvidence = [...repoStats.entries()]
+    .filter(([, stats]) => stats.matching.length > 0)
+    .sort((left, right) => right[1].matching.length - left[1].matching.length)
+  const reposWithoutEvidence = [...repoStats.entries()]
+    .filter(([, stats]) => stats.matching.length === 0)
+    .sort((left, right) => left[0].localeCompare(right[0]))
+  const sources = unique(
+    reposWithEvidence.flatMap(([, stats]) =>
+      stats.matching.slice(0, 3).map(chunk => `- ${payloadSource(chunk)} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`),
+    ),
+    20,
+  )
+
+  return {
+    answer: [
+      localized(`Inventory evidence untuk ${term}:`, `${term} evidence inventory:`),
+      "",
+      localized(
+        `Repo dengan evidence ${term}:`,
+        `Repos with ${term} evidence:`,
+      ),
+      reposWithEvidence.length > 0
+        ? reposWithEvidence.map(([repoName, stats]) => `- ${repoName} (${stats.matching.length} matching source sample${stats.matching.length === 1 ? "" : "s"})`).join("\n")
+        : "- none",
+      "",
+      localized(
+        `Repo tanpa evidence ${term} yang ditemukan di index:`,
+        `Repos with no ${term} evidence found in the index:`,
+      ),
+      reposWithoutEvidence.length > 0
+        ? reposWithoutEvidence.slice(0, 50).map(([repoName, stats]) => `- ${repoName} (${stats.total} indexed chunks scanned)`).join("\n")
+        : "- none",
+      reposWithoutEvidence.length > 50 ? `- ... ${reposWithoutEvidence.length - 50} more repos omitted` : undefined,
+      "",
+      localized(
+        "Catatan: 'tanpa evidence' berarti term tidak muncul di chunk ter-index; itu bukan bukti absolut bahwa repo tidak pernah memakai fitur tersebut.",
+        "'No evidence' means the term was not found in indexed chunks; it is not absolute proof that the repo never uses that feature.",
+      ),
+    ].filter((line): line is string => typeof line === "string").join("\n"),
+    sources,
+  }
+}
+
 function routeDiscoveryTerms(question: string): string[] {
   const noise = new Set([
     "api",
@@ -4185,6 +4284,20 @@ async function main() {
   const questionRoutes = extractQuestionRoutes(question)
   const relationshipGraph = await readRelationshipGraph()
   const negativeRepoConstraint = questionAsksNegativeRepoConstraint(question)
+
+  if (negativeRepoConstraint) {
+    const negativeRepoAnswer = await buildNegativeRepoEvidenceAnswer(question)
+
+    if (negativeRepoAnswer) {
+      console.log("\nANSWER\n")
+      console.log(localizeAnswer(negativeRepoAnswer.answer, question))
+
+      console.log("\nSOURCES\n")
+      console.log(negativeRepoAnswer.sources.join("\n"))
+
+      return
+    }
+  }
 
   if (questionRoutes.length === 0 && !negativeRepoConstraint) {
     const graphFlowAnswer = await buildGraphFlowAnswer(question, relationshipGraph)
