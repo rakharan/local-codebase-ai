@@ -4,6 +4,8 @@ import type { ServiceType } from "../lib/chunker.js"
 
 export type RetrievedPayload = {
   repoName?: string
+  projectIds?: string[]
+  projectTagSources?: string[]
   serviceType?: ServiceType
   branchName?: string
   commitSha?: string

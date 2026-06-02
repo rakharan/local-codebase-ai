@@ -3,13 +3,15 @@
     {
       "name": "mrg",
       "kind": "broker",
+      "projectId": "mrg",
       "aliases": ["mrg", "mrg broker", "mrg api"],
-      "repos": ["ims-tf", "ims-tf2", "mrg-accounts"],
+      "repos": ["ims-tf", "ims-tf2", "mrg-accounts", "mrg-cash", "mrg-metatrader"],
       "keywords": ["mrg", "MrgController", "MrgV2Controller", "MRGAccountRpc", "ReqAccountDemo", "RequestDemoAccount", "GetAccountTypes", "GetAccountTypesV2", "GetAccountTypeByUserId", "accountTypes", "MetaAccountType", "type_name", "group_creation"]
     },
     {
       "name": "askap",
       "kind": "broker",
+      "projectId": "askap",
       "aliases": ["askap", "mmb", "mmb broker", "askap/mmb"],
       "repos": ["ims-tf", "ims-tf2", "mrg-accounts"],
       "keywords": ["askap", "mmb", "AskapController", "AskapApps", "ReqAccountDemo", "RequestDemoAccount", "GetAccountTypes", "GetAccountTypesV2", "accountTypes", "accountTypesV2", "users_demoid"]
@@ -17,13 +19,44 @@
     {
       "name": "isignal",
       "kind": "domain",
-      "aliases": ["isignal", "iSignal", "signal", "copy signal"],
-      "repos": ["tf2-ois", "ims-tf2"],
-      "keywords": ["isignal", "iSignal", "signal", "subscription", "channel", "analyst", "publisher", "subscriber"]
+      "projectId": "isignal",
+      "description": "The Auto Copy system allows users to automatically replicate trading signals from master channels to their accounts. It handles signal ingestion, order execution, and protection from stale or invalid trades.",
+      "aliases": ["isignal", "iSignal", "ois", "copy signal", "auto copy", "bot copy"],
+      "repos": ["tf2-ois", "fa-trade-publisher", "ims-tf2", "tf2-microservice", "tf2-sinyo", "tf-email-sender", "mt5-wrapper", "tf2-mt5-manager", "tf2-mt4-manager", "tf2-ois-admin"],
+      "docs": ["isignal-docs", "i18n/id/docusaurus-plugin-content-docs/current/isignal-docs"],
+      "keywords": ["SignalBroadcast", "subscription", "channel", "bot", "copy trade", "isignal", "ois", "order", "signal", "auto", "copy", "dsc_signals", "dsc_signals_copy", "dsc_bot_copy", "dsc_subs", "SignalService", "nearly expired", "subscription reminder"],
+      "routes": ["/ois/api/v1/copy/auto/setting/create/", "/ois/api/v2/copy/auto/setting/create/", "/ois/api/v1/copy/auto/edit/", "/ois/api/v2/copy/auto/edit/", "/ois/api/v1/copy/auto/config/", "/ois/api/v1/subscribe/payment/price/", "/ois/api/v1/subscribe/payment/fee/", "/auto/"],
+      "functions": ["SignalService.pushSignalToAmqpPubSub"],
+      "queues": ["pubsub-tf-fx-signal-copy"],
+      "tables": ["dsc_bot_copy", "dsc_bot_copy_details", "dsc_bot_copy_details_active", "dsc_subs", "dsc_subs_active", "dsc_subs_details", "dsc_payment", "dsc_payment_transactions", "dsc_signals", "dsc_signals_copy", "dsc_signals_copy_partial", "dsc_subs_reminder"],
+      "pathRules": [
+        { "repo": "ims-tf2", "pattern": "components/mrg/**", "projectId": "mrg" },
+        { "repo": "ims-tf2", "pattern": "components/askap/**", "projectId": "askap" },
+        { "repo": "tf-documentation", "pattern": "isignal-docs/**", "projectId": "isignal" },
+        { "repo": "tf-documentation", "pattern": "docs/isignal-docs/**", "projectId": "isignal" }
+      ],
+      "notes": ["ims-tf2 is only involved when creating/updating bot copy", "tf2-ois is the main API that users interact with"]
+    },
+    {
+      "name": "fa",
+      "kind": "domain",
+      "projectId": "fa",
+      "aliases": ["fa", "financial advisor", "penasihat keuangan", "fa porto", "porto"],
+      "repos": ["tf2-porto-service", "fa-trade-publisher", "tf2-ois"],
+      "keywords": ["fa", "Financial Advisor", "portfolio", "porto", "incubation", "merchant", "business-rules", "fa-porto-docs"]
+    },
+    {
+      "name": "channel-medal",
+      "kind": "domain",
+      "projectId": "channel-medal",
+      "aliases": ["medal", "legend", "channel level", "rank", "point", "vp"],
+      "repos": ["tf2-ois", "tf2-sinyo"],
+      "keywords": ["POINT_LEVELS", "RANGE_MEDAL", "MEDALS", "CalculatePointAndMedal20260531", "dsc_channels_point_events", "current_month_vp", "minimum_vp", "average_monthly_vp"]
     },
     {
       "name": "platform_type",
       "kind": "concept",
+      "projectId": "trading-platform",
       "aliases": ["platform_type", "platform type", "platform", "tipe platform"],
       "repos": ["ims-tf", "ims-tf2", "mrg-accounts", "tf2-ois"],
       "keywords": ["platform_type", "metaserver_id", "MT4", "MT5", "mt4DemoType", "mt5DemoType", "MetaTrader"]
@@ -31,6 +64,7 @@
     {
       "name": "mt4-account-types",
       "kind": "concept",
+      "projectId": "account-types",
       "aliases": ["tipe akun mt4", "account type mt4", "mt4 account type", "akun mt4"],
       "repos": ["ims-tf", "ims-tf2", "mrg-accounts"],
       "keywords": ["MT4", "mt4DemoType", "GetDemoAccountTypes", "GetAccountTypes", "GetAccountTypesV2", "accountTypes", "accountTypesV2", "account_type", "platform_type", "platform_name", "group_creation"]
@@ -38,6 +72,7 @@
     {
       "name": "mt5-account-types",
       "kind": "concept",
+      "projectId": "account-types",
       "aliases": ["tipe akun mt5", "account type mt5", "mt5 account type", "akun mt5"],
       "repos": ["ims-tf", "ims-tf2", "mrg-accounts"],
       "keywords": ["MT5", "mt5DemoType", "GetDemoAccountTypes", "GetAccountTypes", "GetAccountTypesV2", "accountTypes", "accountTypesV2", "account_type", "platform_type", "platform_name", "group_creation", "TF_CAN_REQUEST_MMB_MT5"]

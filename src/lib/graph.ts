@@ -403,3 +403,21 @@ export async function writeRelationshipGraphForRepo(
 
   await fs.writeFile(graphPath, content.length > 0 ? `${content}\n` : "", "utf8")
 }
+
+export async function deleteRelationshipGraphForScope(repoName: string, branchName?: string): Promise<number> {
+  await fs.mkdir(path.dirname(graphPath), { recursive: true })
+
+  const existing = await readRelationshipGraph()
+  const kept = existing.filter(edge => {
+    if (edge.repoName !== repoName) return true
+    if (!branchName) return false
+
+    return edge.branchName !== branchName
+  })
+  const deleted = existing.length - kept.length
+  const content = kept.map(edge => JSON.stringify(edge)).join("\n")
+
+  await fs.writeFile(graphPath, content.length > 0 ? `${content}\n` : "", "utf8")
+
+  return deleted
+}

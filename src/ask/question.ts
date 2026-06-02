@@ -70,6 +70,7 @@ export function extractDefinitionSubjectTerms(question: string): string[] {
 export function extractQuestionHints(question: string): string[] {
   return unique([
     ...[...question.matchAll(/\/[A-Za-z0-9_./:{}-]+/g)].map(match => match[0]),
+    ...[...question.matchAll(/\b[a-z][a-z0-9]+(?:-[a-z0-9]+){1,}\b/g)].map(match => match[0]),
     ...[...question.matchAll(/\b[A-Za-z_][A-Za-z0-9_]*::[A-Za-z_][A-Za-z0-9_]*\b/g)].map(match => match[0]),
     ...[...question.matchAll(/\b[A-Z][A-Za-z0-9_]{2,}\b/g)]
       .map(match => match[0])
@@ -110,6 +111,10 @@ export function extractConceptTokens(question: string): string[] {
     "show",
     "tell",
     "from",
+    "money",
+    "web",
+    "mt4",
+    "mt5",
     "to",
     "in",
     "of",
@@ -124,9 +129,12 @@ export function extractConceptTokens(question: string): string[] {
     ["deemo", "demo"],
     ["demos", "demo"],
     ["demoaccount", "demo"],
+    ["requesst", "request"],
+    ["akkount", "account"],
     ["acct", "account"],
     ["accounts", "account"],
     ["requests", "request"],
+    ["imstf", "ims-tf"],
   ])
 
   const acronymTokens = extractQuestionAcronyms(question)
@@ -152,11 +160,11 @@ export function questionAsksAboutDatabase(question: string): boolean {
 }
 
 export function questionAsksAboutServicesOrFlow(question: string): boolean {
-  return /\b(service|services|repo|repos|flow|involved|calls?|publishes?|consumes?|rpc|amqp|rabbitmq|queue|exchange)\b/i.test(question)
+  return /\b(service|services|repo|repos|flow|involved|calls?|publishes?|consumes?|rpc|amqp|rabbitmq|queue|exchange|routes?|endpoints?)\b/i.test(question)
 }
 
 export function questionAsksAboutGlossary(question: string): boolean {
-  return /\b(apa itu|what is|maksud|meaning|how .*works?|how does .*work|cara kerja|gimana .*kerja|bagaimana .*kerja|glossary|glosarium|list|daftar|berikan|tipe akun|account type|aturan|rules?|platform_type|platform type|isignal)\b/i.test(question)
+  return /\b(apa itu|what is|maksud|meaning|explain|describe|jelasin|jelaskan|how .*works?|how does .*work|cara kerja|gimana .*kerja|bagaimana .*kerja|glossary|glosarium|list|daftar|berikan|tipe akun|account type|aturan|rules?|rule|ketentuan|business rules?|syarat|persyaratan|dibutuhkan|onboard|onboarding|panduan|guide|platform_type|platform type|isignal)\b/i.test(question)
 }
 
 export function questionAsksHowWorks(question: string): boolean {
@@ -172,8 +180,34 @@ export function questionAsksAboutAccountTypes(question: string): boolean {
 }
 
 export function questionMetaTraderTerm(question: string): "MT4" | "MT5" | undefined {
-  if (/\bmt4\b/i.test(question)) return "MT4"
-  if (/\bmt5\b/i.test(question)) return "MT5"
+  const lower = question.toLowerCase()
+
+  // If the question asks about a flow/deposit/feature that merely mentions MT4/MT5 as a destination,
+  // do NOT short-circuit to the MetaTrader definition answer.
+  const flowContextTerms = [
+    "flow",
+    "how does",
+    "how do",
+    "deposit",
+    "withdraw",
+    "transfer",
+    "from",
+    "to ",
+    "endpoint",
+    "route",
+    "handler",
+    "controller",
+    "service",
+    "consume",
+    "publish",
+    "queue",
+    "function",
+    "method",
+  ]
+  const hasFlowContext = flowContextTerms.some(term => lower.includes(term))
+
+  if (/\bmt4\b/i.test(question) && !hasFlowContext) return "MT4"
+  if (/\bmt5\b/i.test(question) && !hasFlowContext) return "MT5"
 
   return undefined
 }
@@ -184,8 +218,12 @@ export function questionAsksMedalMechanism(question: string): boolean {
 }
 
 export function questionBrokerHint(question: string): "mrg" | "askap" | undefined {
-  if (/\bmrg\b/i.test(question)) return "mrg"
-  if (/\b(mmb|askap)\b/i.test(question)) return "askap"
+  const mentionsMrg = /\bmrg\b/i.test(question)
+  const mentionsAskap = /\b(mmb|askap)\b/i.test(question)
+
+  if (mentionsMrg && mentionsAskap) return undefined
+  if (mentionsMrg) return "mrg"
+  if (mentionsAskap) return "askap"
 
   return undefined
 }

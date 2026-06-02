@@ -14,6 +14,7 @@ type OllamaChatResponse = {
 export type AnswerLanguage = "id" | "en" | "unknown"
 
 const MAX_ATTEMPTS = 4
+const MAX_EMBED_INPUT_CHARS = 3_500
 
 function wait(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms))
@@ -39,6 +40,13 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
 
 export async function createEmbedding(input: string): Promise<number[]> {
     let res
+    const embeddingInput = input.length <= MAX_EMBED_INPUT_CHARS
+        ? input
+        : [
+            input.slice(0, 2_300),
+            "\n\n[...truncated for embedding...]\n\n",
+            input.slice(-1_000),
+        ].join("")
 
     try {
         res = await fetchWithRetry(`${config.ollamaUrl}/api/embed`, {
@@ -48,7 +56,7 @@ export async function createEmbedding(input: string): Promise<number[]> {
             },
             body: JSON.stringify({
                 model: config.embeddingModel,
-                input,
+                input: embeddingInput,
             }),
         })
     } catch (error) {

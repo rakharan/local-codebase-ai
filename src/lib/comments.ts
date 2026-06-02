@@ -2,8 +2,13 @@ import path from "node:path"
 import { sha256, uuidFromHash } from "./hash.js"
 import { inferRelationshipHints } from "./relationships.js"
 import type { CodeChunk, ServiceType } from "./chunker.js"
+import type { ProjectTag } from "./chunker.js"
 
 const INDEX_SCHEMA_VERSION = "comments-v1"
+
+function projectHashKey(projectIds: string[]): string {
+  return projectIds.length > 0 ? projectIds.join(",") : "unassigned"
+}
 
 type CommentBlock = {
   startLine: number
@@ -168,18 +173,26 @@ export function createCommentChunks(
   serviceType: ServiceType,
   branchName: string,
   commitSha: string,
+  projectIds: string[] = [],
+  inferProjectTag: (filePath: string, content: string) => ProjectTag = () => ({
+    projectIds,
+    sources: projectIds.map(projectId => `repo:${projectId}`),
+  }),
 ): CodeChunk[] {
   const blocks = extractCommentBlocks(filePath, fileContent)
   const chunks: CodeChunk[] = []
 
   for (const block of blocks) {
+    const projectTag = inferProjectTag(filePath, block.content)
     const contentHash = sha256(
-      `${INDEX_SCHEMA_VERSION}:${repoName}:${branchName}:${serviceType}:${filePath}:${block.startLine}:${block.endLine}:${block.content}`,
+      `${INDEX_SCHEMA_VERSION}:${repoName}:${projectHashKey(projectTag.projectIds)}:${branchName}:${serviceType}:${filePath}:${block.startLine}:${block.endLine}:${block.content}`,
     )
 
     chunks.push({
       id: uuidFromHash(contentHash),
       repoName,
+      projectIds: projectTag.projectIds,
+      projectTagSources: projectTag.sources,
       serviceType,
       branchName,
       commitSha,

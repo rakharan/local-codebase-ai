@@ -548,7 +548,10 @@ export function buildAccountTypeGlossaryAnswer(
 
   const wantedPlatform = accountTypeQuestionPlatform(question)
   const wantedBroker = questionBrokerHint(question)
-  const brokerLabel = wantedBroker === "mrg" ? "MRG" : wantedBroker === "askap" ? "MMB/Askap" : "broker"
+  const comparesMrgAndAskap = /\bmrg\b/i.test(question) && /\b(mmb|askap)\b/i.test(question)
+  const brokerLabel = comparesMrgAndAskap
+    ? "MRG and Askap"
+    : wantedBroker === "mrg" ? "MRG" : wantedBroker === "askap" ? "MMB/Askap" : "broker"
   const visible = facts.filter(fact => fact.show !== "0")
   const hidden = facts.filter(fact => fact.show === "0")
   const primaryFacts = visible.length > 0 ? visible : facts

@@ -6,10 +6,15 @@ import type { CodeChunk, ServiceType } from "./chunker.js"
 const INDEX_SCHEMA_VERSION = "commits-v1"
 const COMMIT_BRANCH_NAME = "git-history"
 
+function projectHashKey(projectIds: string[]): string {
+  return projectIds.length > 0 ? projectIds.join(",") : "unassigned"
+}
+
 export function createCommitChunks(
   commits: CommitInfo[],
   repoName: string,
   serviceType: ServiceType,
+  projectIds: string[] = [],
 ): CodeChunk[] {
   const chunks: CodeChunk[] = []
 
@@ -24,12 +29,14 @@ export function createCommitChunks(
     ].join("\n")
 
     const contentHash = sha256(
-      `${INDEX_SCHEMA_VERSION}:${repoName}:${COMMIT_BRANCH_NAME}:${serviceType}:${commit.sha}:${content}`,
+      `${INDEX_SCHEMA_VERSION}:${repoName}:${projectHashKey(projectIds)}:${COMMIT_BRANCH_NAME}:${serviceType}:${commit.sha}:${content}`,
     )
 
     chunks.push({
       id: uuidFromHash(contentHash),
       repoName,
+      projectIds,
+      projectTagSources: projectIds.map(projectId => `repo:${projectId}`),
       serviceType,
       branchName: COMMIT_BRANCH_NAME,
       commitSha: commit.sha,

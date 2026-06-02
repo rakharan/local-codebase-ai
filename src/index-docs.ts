@@ -7,12 +7,14 @@ import { sha256, uuidFromHash } from "./lib/hash.js"
 import { inferRelationshipHints } from "./lib/relationships.js"
 import { createEmbedding } from "./lib/ollama.js"
 import type { CodeChunk } from "./lib/chunker.js"
+import { inferProjectIdsForRepo, inferProjectTagForChunk, normalizeProjectIds } from "./lib/service-registry.js"
 
 const program = new Command()
 
 program
   .argument("<docsPath>", "Path to Docusaurus docs folder (e.g. my-website/docs)")
   .option("--repo-name <repoName>", "Fallback repo name if no mapping matches", "tf-documentation")
+  .option("--project <projectId>", "Project/product/domain id. Can be repeated or comma-separated.", collectOption, [])
   .option("--service-type <serviceType>", "Service type for doc chunks", "unknown")
   .option("--branch <branchName>", "Branch name for doc chunks", "docs")
   .option("--locale <locale>", "Documentation locale, or auto to infer Docusaurus i18n locale from path", "auto")
@@ -30,6 +32,7 @@ const docsPath = path.resolve(docsPathArg)
 
 const options = program.opts<{
   repoName: string
+  project: string[]
   serviceType: string
   branch: string
   locale: string
@@ -38,6 +41,10 @@ const options = program.opts<{
 }>()
 
 const serviceType = options.serviceType as "api" | "worker" | "cron" | "library" | "unknown"
+
+function collectOption(value: string, previous: string[] = []): string[] {
+  return [...previous, value]
+}
 
 function inferDocsLocale(dir: string): string {
   const normalized = dir.replace(/\\/g, "/")
@@ -149,7 +156,11 @@ function extractReposFromFrontmatter(frontmatter: Record<string, string>): strin
 
 const MAX_DOC_CHUNK_CHARS = 1_500
 
-function chunkMarkdown(file: DocFile, repoName: string, branchName: string): CodeChunk[] {
+function projectHashKey(projectIds: string[]): string {
+  return projectIds.length > 0 ? projectIds.join(",") : "unassigned"
+}
+
+function chunkMarkdown(file: DocFile, repoName: string, branchName: string, projectIds: string[]): CodeChunk[] {
   const { frontmatter, body } = extractFrontmatter(file.content)
   const lines = body.split("\n")
   const chunks: CodeChunk[] = []
@@ -181,14 +192,22 @@ function chunkMarkdown(file: DocFile, repoName: string, branchName: string): Cod
         "",
         subContent,
       ].join("\n")
+      const projectTag = inferProjectTagForChunk({
+        repoName,
+        filePath: file.relativePath,
+        content: chunkContent,
+        fallbackProjectIds: projectIds,
+      })
 
       const contentHash = sha256(
-        `docs-v1:${repoName}:${branchName}:${file.relativePath}:${subStart}:${subEnd}:${subContent}`,
+        `docs-v1:${repoName}:${projectHashKey(projectTag.projectIds)}:${branchName}:${file.relativePath}:${subStart}:${subEnd}:${subContent}`,
       )
 
       chunks.push({
         id: uuidFromHash(contentHash),
         repoName,
+        projectIds: projectTag.projectIds,
+        projectTagSources: projectTag.sources,
         serviceType,
         branchName,
         commitSha: "docs",
@@ -311,6 +330,7 @@ async function deleteStaleChunks(staleIds: Array<string | number>): Promise<void
 async function upsertChunk(chunk: CodeChunk): Promise<void> {
   const embeddingInput = [
     `Repository: ${chunk.repoName}`,
+    `Projects: ${chunk.projectIds.join(", ") || "unassigned"}`,
     `Branch: ${chunk.branchName}`,
     `Documentation locale: ${chunk.docLocale ?? "default"}`,
     `Service type: ${chunk.serviceType}`,
@@ -334,6 +354,8 @@ async function upsertChunk(chunk: CodeChunk): Promise<void> {
         vector,
         payload: {
           repoName: chunk.repoName,
+          projectIds: chunk.projectIds,
+          projectTagSources: chunk.projectTagSources,
           serviceType: chunk.serviceType,
           branchName: chunk.branchName,
           commitSha: chunk.commitSha,
@@ -361,6 +383,7 @@ async function main() {
   console.log(`Mode: ${options.dryRun ? "dry-run" : "index"}`)
   console.log(`Locale: ${docLocale}`)
   console.log(`Docs branch: ${docsBranchName}`)
+  console.log(`Explicit projects: ${options.project.length > 0 ? normalizeProjectIds(options.project).join(", ") : "none"}`)
   console.log(`Replace repo: ${options.replaceRepo ? "yes" : "no"}`)
 
   const files = await readDocFiles(docsPath)
@@ -377,7 +400,11 @@ async function main() {
 
     for (const repoName of targetRepos) {
       repoNames.add(repoName)
-      const chunks = chunkMarkdown(file, repoName, docsBranchName)
+      const projectIds = normalizeProjectIds([
+        ...options.project,
+        ...inferProjectIdsForRepo(repoName),
+      ])
+      const chunks = chunkMarkdown(file, repoName, docsBranchName, projectIds)
 
       if (!chunksByRepo.has(repoName)) {
         chunksByRepo.set(repoName, [])

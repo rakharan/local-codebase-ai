@@ -5,9 +5,16 @@ import type { EvidenceType } from "./evidence.js"
 import type { RelationshipHints } from "./relationships.js"
 import type { SourceFile } from "./files.js"
 
+export type ProjectTag = {
+  projectIds: string[]
+  sources: string[]
+}
+
 export type CodeChunk = {
   id: string
   repoName: string
+  projectIds: string[]
+  projectTagSources: string[]
   serviceType: ServiceType
   branchName: string
   commitSha: string
@@ -28,12 +35,21 @@ const OVERLAP_LINES = 15
 const MAX_CHARS = 2_000
 export const INDEX_SCHEMA_VERSION = "branches-v1"
 
+function projectHashKey(projectIds: string[]): string {
+  return projectIds.length > 0 ? projectIds.join(",") : "unassigned"
+}
+
 export function chunkFile(
   file: SourceFile,
   repoName: string,
   serviceType: ServiceType,
   branchName: string,
   commitSha: string,
+  projectIds: string[] = [],
+  inferProjectTag: (filePath: string, content: string) => ProjectTag = () => ({
+    projectIds,
+    sources: projectIds.map(projectId => `repo:${projectId}`),
+  }),
 ): CodeChunk[] {
   const lines = file.content.split("\n")
   const chunks: CodeChunk[] = []
@@ -52,13 +68,16 @@ export function chunkFile(
         const lineNumber = start + 1
         const evidenceTypes = inferEvidenceTypes(file.relativePath, content)
         const relationshipHints = inferRelationshipHints(content)
+        const projectTag = inferProjectTag(file.relativePath, content)
         const contentHash = sha256(
-          `${INDEX_SCHEMA_VERSION}:${repoName}:${branchName}:${serviceType}:${file.relativePath}:${lineNumber}:${lineNumber}:${offset}:${content}`,
+          `${INDEX_SCHEMA_VERSION}:${repoName}:${projectHashKey(projectTag.projectIds)}:${branchName}:${serviceType}:${file.relativePath}:${lineNumber}:${lineNumber}:${offset}:${content}`,
         )
 
         chunks.push({
           id: uuidFromHash(contentHash),
           repoName,
+          projectIds: projectTag.projectIds,
+          projectTagSources: projectTag.sources,
           serviceType,
           branchName,
           commitSha,
@@ -108,13 +127,16 @@ export function chunkFile(
       const endLine = end
       const evidenceTypes = inferEvidenceTypes(file.relativePath, content)
       const relationshipHints = inferRelationshipHints(content)
+      const projectTag = inferProjectTag(file.relativePath, content)
       const contentHash = sha256(
-        `${INDEX_SCHEMA_VERSION}:${repoName}:${branchName}:${serviceType}:${file.relativePath}:${startLine}:${endLine}:${content}`,
+        `${INDEX_SCHEMA_VERSION}:${repoName}:${projectHashKey(projectTag.projectIds)}:${branchName}:${serviceType}:${file.relativePath}:${startLine}:${endLine}:${content}`,
       )
 
       chunks.push({
         id: uuidFromHash(contentHash),
         repoName,
+        projectIds: projectTag.projectIds,
+        projectTagSources: projectTag.sources,
         serviceType,
         branchName,
         commitSha,

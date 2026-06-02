@@ -13,6 +13,7 @@ import { createCommitChunks } from "./lib/commits.js"
 import { createCommentChunks } from "./lib/comments.js"
 import { extractVocabulary, buildGlossaryContent } from "./lib/vocabulary.js"
 import { sha256, uuidFromHash } from "./lib/hash.js"
+import { inferProjectIdsForRepo, inferProjectTagForChunk, normalizeProjectIds } from "./lib/service-registry.js"
 
 const serviceTypes = new Set<ServiceType>(["api", "worker", "cron", "library", "unknown"])
 
@@ -25,6 +26,7 @@ function collectOption(value: string, previous: string[] = []): string[] {
 program
   .argument("<repoPath>", "Path to local repository")
   .option("--repo-name <repoName>", "Repository name")
+  .option("--project <projectId>", "Project/product/domain id. Can be repeated or comma-separated.", collectOption, [])
   .option("--service-type <serviceType>", "Service type: api, worker, cron, library, unknown", "unknown")
   .option("--include <glob>", "Include glob relative to repo root. Can be repeated.", collectOption, [])
   .option("--exclude <glob>", "Exclude glob relative to repo root. Can be repeated.", collectOption, [])
@@ -46,6 +48,7 @@ if (!repoPathArg) {
 const repoPath = path.resolve(repoPathArg)
 const options = program.opts<{
   repoName?: string
+  project: string[]
   serviceType: string
   include: string[]
   exclude: string[]
@@ -58,10 +61,15 @@ const options = program.opts<{
   commitUntil?: string
 }>()
 const repoName = options.repoName ?? path.basename(repoPath)
+const projectIds = normalizeProjectIds(options.project.length > 0 ? options.project : inferProjectIdsForRepo(repoName))
 const serviceType = serviceTypes.has(options.serviceType as ServiceType)
   ? (options.serviceType as ServiceType)
   : "unknown"
 const maxChunks = options.maxChunks ? Number(options.maxChunks) : undefined
+
+function projectHashKey(projectIds: string[]): string {
+  return projectIds.length > 0 ? projectIds.join(",") : "unassigned"
+}
 
 if (maxChunks !== undefined && (!Number.isInteger(maxChunks) || maxChunks < 1)) {
   throw new Error("--max-chunks must be a positive integer")
@@ -216,6 +224,7 @@ async function deleteRepoChunks(repoName: string): Promise<void> {
 async function upsertChunk(chunk: CodeChunk): Promise<void> {
   const embeddingInput = [
     `Repository: ${chunk.repoName}`,
+    `Projects: ${chunk.projectIds.join(", ") || "unassigned"}`,
     `Branch: ${chunk.branchName}`,
     `Commit: ${chunk.commitSha}`,
     `Service type: ${chunk.serviceType}`,
@@ -242,6 +251,8 @@ async function upsertChunk(chunk: CodeChunk): Promise<void> {
           vector,
           payload: {
             repoName: chunk.repoName,
+            projectIds: chunk.projectIds,
+            projectTagSources: chunk.projectTagSources,
             serviceType: chunk.serviceType,
             branchName: chunk.branchName,
             commitSha: chunk.commitSha,
@@ -271,6 +282,7 @@ async function main() {
 
   console.log(`Reading repo: ${repoPath}`)
   console.log(`Repo name: ${repoName}`)
+  console.log(`Projects: ${projectIds.length > 0 ? projectIds.join(", ") : "unassigned"}`)
   console.log(`Service type: ${serviceType}`)
   console.log(`Mode: ${options.dryRun ? "dry-run" : "index"}`)
   console.log(`Replace repo: ${options.replaceRepo ? "yes" : "no"}`)
@@ -291,9 +303,36 @@ async function main() {
 
   console.log(`Found ${files.length} files`)
 
-  const chunks = files.flatMap(file => chunkFile(file, repoName, serviceType, gitInfo.branchName, gitInfo.commitSha))
+  const chunks = files.flatMap(file => chunkFile(
+    file,
+    repoName,
+    serviceType,
+    gitInfo.branchName,
+    gitInfo.commitSha,
+    projectIds,
+    (filePath, content) => inferProjectTagForChunk({
+      repoName,
+      filePath,
+      content,
+      fallbackProjectIds: projectIds,
+    }),
+  ))
   const commentChunks = options.indexComments
-    ? files.flatMap(file => createCommentChunks(file.relativePath, file.content, repoName, serviceType, gitInfo.branchName, gitInfo.commitSha))
+    ? files.flatMap(file => createCommentChunks(
+        file.relativePath,
+        file.content,
+        repoName,
+        serviceType,
+        gitInfo.branchName,
+        gitInfo.commitSha,
+        projectIds,
+        (filePath, content) => inferProjectTagForChunk({
+          repoName,
+          filePath,
+          content,
+          fallbackProjectIds: projectIds,
+        }),
+      ))
     : []
 
   // Extract vocabulary/config objects and create glossary chunks
@@ -302,13 +341,21 @@ async function main() {
 
   for (const group of vocabularyGroups) {
     const content = buildGlossaryContent(group)
+    const projectTag = inferProjectTagForChunk({
+      repoName,
+      filePath: group.sourceFile,
+      content,
+      fallbackProjectIds: projectIds,
+    })
     const contentHash = sha256(
-      `${INDEX_SCHEMA_VERSION}:${repoName}:${gitInfo.branchName}:${serviceType}:vocabulary:${group.groupName}:${group.sourceFile}:${content}`,
+      `${INDEX_SCHEMA_VERSION}:${repoName}:${projectHashKey(projectTag.projectIds)}:${gitInfo.branchName}:${serviceType}:vocabulary:${group.groupName}:${group.sourceFile}:${content}`,
     )
 
     glossaryChunks.push({
       id: uuidFromHash(contentHash),
       repoName,
+      projectIds: projectTag.projectIds,
+      projectTagSources: projectTag.sources,
       serviceType,
       branchName: gitInfo.branchName,
       commitSha: gitInfo.commitSha,
@@ -374,7 +421,7 @@ async function main() {
     console.log("Fetching commit history...")
 
     const commits = await getCommits(repoPath, options.commitSince, options.commitUntil)
-    commitChunks = createCommitChunks(commits, repoName, serviceType)
+    commitChunks = createCommitChunks(commits, repoName, serviceType, projectIds)
 
     console.log(`Found ${commitChunks.length} commits to index`)
 

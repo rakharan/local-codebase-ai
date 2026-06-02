@@ -4,13 +4,15 @@ import { qdrant } from "./lib/qdrant.js"
 import { config } from "./lib/config.js"
 import { createEmbedding, chat } from "./lib/ollama.js"
 import { readRelationshipGraph } from "./lib/graph.js"
-import { buildRegistryPromptContext, expandQuestionWithRegistry } from "./lib/service-registry.js"
+import { buildRegistryPromptContext, expandQuestionWithRegistry, type RegistryExpansion } from "./lib/service-registry.js"
+import { normalizeProjectIds, reposForProjectIds } from "./lib/service-registry.js"
 import {
   accountTypeRelevantSourceChunks,
   buildAccountTypeGlossaryAnswer,
   buildAccountTypeNotFoundAnswer,
   buildPlatformTypeGlossaryAnswer,
 } from "./ask/account-types.js"
+import { compactPayloadSources, compactRetrievedChunks } from "./ask/compaction.js"
 import {
   answerLanguageLabel as answerLanguageLabelFor,
   detectAnswerLanguage,
@@ -63,13 +65,14 @@ program
   .argument("<question...>", "Question to ask")
   .option("--limit <limit>", "Number of chunks to retrieve", "8")
   .option("--repo-name <repoName>", "Only search one indexed repository")
+  .option("--project <projectId>", "Only search one project/product/domain")
   .option("--branch <branchName>", "Only search one indexed branch")
   .option("--service-type <serviceType>", "Only search one service type")
   .option("--history <json>", "JSON string of previous conversation messages")
   .parse()
 
 const question = program.args.join(" ")
-const options = program.opts<{ limit: string; repoName?: string; branch?: string; serviceType?: string; history?: string }>()
+const options = program.opts<{ limit: string; repoName?: string; project?: string; branch?: string; serviceType?: string; history?: string }>()
 const limit = Number(options.limit)
 const serviceType = options.serviceType && serviceTypes.has(options.serviceType as ServiceType)
   ? (options.serviceType as ServiceType)
@@ -92,10 +95,13 @@ function parseHistory(json?: string): Array<{ role: string; content: string }> {
 const history = parseHistory(options.history)
 const registryExpansion = expandQuestionWithRegistry(question)
 const retrievalQuestion = registryExpansion.expandedQuestion
+const projectFilterIds = normalizeProjectIds(options.project ? [options.project] : [])
+const projectFilterRepos = new Set(reposForProjectIds(projectFilterIds))
 let answerLanguage: AnswerLanguage = "unknown"
 
 function buildFilter() {
   const must = []
+  const should = []
 
   if (options.repoName) {
     must.push({
@@ -104,6 +110,24 @@ function buildFilter() {
         value: options.repoName,
       },
     })
+  }
+
+  if (projectFilterIds.length === 1) {
+    must.push({
+      key: "projectIds",
+      match: {
+        value: projectFilterIds[0],
+      },
+    })
+  } else if (projectFilterIds.length > 1) {
+    should.push(
+      ...projectFilterIds.map(projectId => ({
+        key: "projectIds",
+        match: {
+          value: projectId,
+        },
+      })),
+    )
   }
 
   if (options.branch) {
@@ -124,7 +148,12 @@ function buildFilter() {
     })
   }
 
-  return must.length > 0 ? { must } : undefined
+  if (must.length === 0 && should.length === 0) return undefined
+
+  return {
+    ...(must.length > 0 ? { must } : {}),
+    ...(should.length > 0 ? { should } : {}),
+  }
 }
 
 async function retrieve(queryText: string, resultLimit: number): Promise<RetrievedChunk[]> {
@@ -334,7 +363,7 @@ async function retrieveExactVocabularyMatches(terms: string[], resultLimit: numb
 
 async function retrieveMetaTraderTermMatches(term: "MT4" | "MT5", resultLimit: number): Promise<RetrievedChunk[]> {
   const matches: Array<RetrievedChunk & { score: number }> = []
-  const termPattern = new RegExp(`\\b${term}\\b`, "i")
+  const termPattern = new RegExp(`(?:^|[^a-zA-Z0-9])${term}(?:[^a-zA-Z0-9]|$)`, "i")
   let offset: string | number | Record<string, unknown> | null | undefined
 
   do {
@@ -367,6 +396,9 @@ async function retrieveMetaTraderTermMatches(term: "MT4" | "MT5", resultLimit: n
       if (filePath.includes("libs/config")) score += 35
       if (filePath.includes("models/user") || filePath.includes("models/demo") || filePath.includes("models/real")) score += 18
       if (payload.evidenceTypes?.includes("documentation")) score -= 12
+      if (term === "MT4" && (/platform_type\s*==\s*0\b/.test(text) || /["']?platform_type["']?\s*:\s*0\b/.test(text))) score += 60
+      if (term === "MT5" && (/platform_type\s*==\s*3\b/.test(text) || /["']?platform_type["']?\s*:\s*3\b/.test(text))) score += 60
+      if (term === "MT5" && (/platform_type\s*==\s*5\b/.test(text) || /["']?platform_type["']?\s*:\s*5\b/.test(text))) score += 60
 
       matches.push({
         id: String(point.id),
@@ -485,7 +517,11 @@ function mentionedGraphRepos(question: string, graph: RelationshipEdge[]): strin
   const repos = unique(graph.map(edge => edge.repoName), 100)
   const mentioned = repos.filter(repo => lower.includes(repo.toLowerCase()))
 
-  return options.repoName ? unique([options.repoName, ...mentioned], 100) : mentioned
+  return unique([
+    ...(options.repoName ? [options.repoName] : []),
+    ...projectFilterRepos,
+    ...mentioned,
+  ], 100)
 }
 
 function handlerMethodName(handler: string | undefined): string | undefined {
@@ -513,6 +549,9 @@ function commonPathPrefixScore(leftPath: string, rightPath: string): number {
 }
 
 function graphScopeAllows(edge: RelationshipEdge): boolean {
+  if (!options.repoName && edge.repoName === "local-codebase-ai") return false
+  if (options.repoName && edge.repoName !== options.repoName) return false
+  if (projectFilterRepos.size > 0 && !projectFilterRepos.has(edge.repoName)) return false
   if (options.branch && edge.branchName !== options.branch) return false
   if (serviceType && edge.serviceType !== serviceType) return false
 
@@ -938,6 +977,7 @@ async function retrieveExactRouteMatches(routes: string[]): Promise<RetrievedChu
       const payload = point.payload as RetrievedPayload | null | undefined
 
       if (!payload?.content) continue
+      if (!options.repoName && payload.repoName === "local-codebase-ai") continue
 
       const storedRoutes = payload.routes ?? []
       const hasMatch = routes.some(route => {
@@ -1325,7 +1365,7 @@ async function retrieveAccountTypeFileChunks(chunks: RetrievedChunk[]): Promise<
       .filter(chunk => /accountTypes|accountTypesV2|type_name|platform_type|group_creation|MetaAccountType\.getPublicAccountTypes/i.test(chunk.payload.content ?? ""))
       .filter(chunk => chunk.payload.repoName && chunk.payload.branchName && chunk.payload.filePath)
       .map(chunk => `${chunk.payload.repoName}|${chunk.payload.branchName}|${chunk.payload.filePath}`),
-    8,
+    20,
   )
   const expanded: RetrievedChunk[] = []
 
@@ -2240,7 +2280,7 @@ async function retrieveExactRouteDetails(
 
     return !originRepos.has(chunk.payload.repoName) && rpcFuncNames.some(funcName => content.includes(funcName))
   })
-  const downstreamNeighborChunks = await retrieveNeighborChunks(downstreamFuncChunks, 70)
+  const downstreamNeighborChunks = await retrieveNeighborChunks(downstreamFuncChunks, 170)
   const downstreamRpcChunks = rpcChunks.filter(chunk => !originRepos.has(chunk.payload.repoName))
   const localRpcChunks = rpcChunks.filter(chunk => originRepos.has(chunk.payload.repoName))
 
@@ -2248,8 +2288,8 @@ async function retrieveExactRouteDetails(
     ...handlerChunks,
     ...phpConstantChunks.slice(0, 12),
     ...phpConstantNeighborChunks.slice(0, 12),
-    ...downstreamFuncChunks.slice(0, 12),
-    ...downstreamNeighborChunks.slice(0, 12),
+    ...downstreamFuncChunks.slice(0, 20),
+    ...downstreamNeighborChunks.slice(0, 32),
     ...downstreamRpcChunks.slice(0, 6),
     ...localRpcChunks.slice(0, 6),
   ]
@@ -2339,17 +2379,7 @@ function buildExpansionQueries(question: string, hints: RelationshipHints): stri
 }
 
 function mergeChunks(chunks: RetrievedChunk[], maxResults = Math.max(limit, 12)): RetrievedChunk[] {
-  const byKey = new Map<string, RetrievedChunk>()
-
-  for (const chunk of chunks) {
-    const key = chunk.payload.contentHash ?? chunk.id
-
-    if (!byKey.has(key)) {
-      byKey.set(key, chunk)
-    }
-  }
-
-  return [...byKey.values()].slice(0, maxResults)
+  return compactRetrievedChunks(chunks, maxResults)
 }
 
 function filterEndpointSourceChunks(
@@ -2532,12 +2562,449 @@ function buildStructuralEvidenceAnswer(chunks: RetrievedPayload[], question: str
     .join("\n")
 }
 
-function buildVocabularyAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
+type MetadataAnswer = {
+  answer: string
+  sources: string[]
+}
+
+function questionAsksForRouteListing(question: string): boolean {
+  return /\b(api\s+)?routes?|endpoints?|paths?\b/i.test(question)
+}
+
+function questionAsksNegativeRepoConstraint(question: string): boolean {
+  return /\b(repos?|services?)\b/i.test(question) &&
+    /\b(do\s+not|does\s+not|don't|not|without)\b/i.test(question) &&
+    /\bmt[45]\b/i.test(question)
+}
+
+function routeDiscoveryTerms(question: string): string[] {
+  const noise = new Set([
+    "api",
+    "route",
+    "routes",
+    "endpoint",
+    "endpoints",
+    "exist",
+    "exists",
+    "managing",
+    "manage",
+    "list",
+    "show",
+    "which",
+  ])
+  const aliases = new Map([
+    ["subscriptions", "subscribe"],
+    ["subscription", "subscribe"],
+    ["subscribes", "subscribe"],
+    ["subscribed", "subscribe"],
+  ])
+
+  return unique(
+    extractConceptTokens(question)
+      .map(term => aliases.get(term) ?? term)
+      .filter(term => term.length >= 3)
+      .filter(term => !noise.has(term)),
+    12,
+  )
+}
+
+function buildRouteDiscoveryAnswer(question: string, graph: RelationshipEdge[]): MetadataAnswer | undefined {
+  if (!questionAsksForRouteListing(question)) return undefined
+
+  const terms = routeDiscoveryTerms(question)
+
+  if (terms.length === 0) return undefined
+
+  const candidates = graph
+    .filter(edge => edge.type === "HANDLES_HTTP_ENDPOINT" && graphScopeAllows(edge) && edge.toRoute)
+    .map(edge => {
+      const text = edgeTextForConceptSearch(edge)
+      const route = edge.toRoute?.toLowerCase() ?? ""
+      const matchedTerms = terms.filter(term => {
+        return route.includes(term) || text.includes(term)
+      })
+      let score = matchedTerms.length * 20
+
+      if (matchedTerms.length === 0) return undefined
+      if (edge.filePath.toLowerCase().includes("route")) score += 12
+      if (route.includes("/ois/")) score += terms.includes("subscribe") ? 12 : 0
+      if (terms.every(term => route.includes(term) || text.includes(term))) score += 35
+
+      return { edge, score }
+    })
+    .filter((candidate): candidate is { edge: RelationshipEdge; score: number } => Boolean(candidate))
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 24)
+
+  if (candidates.length === 0) return undefined
+
+  const routeLines = unique(
+    candidates.map(({ edge }) => {
+      return `- ${edge.toRoute}${edge.httpMethod ? ` (${edge.httpMethod})` : ""}${edge.alias ? `; alias: ${edge.alias}` : ""}${edge.handler ? `; handler: ${edge.handler}` : ""}; ${edge.repoName}@${edge.branchName || "unknown"}`
+    }),
+    24,
+  )
+  const sources = unique(candidates.map(({ edge }) => `- ${edgeSource(edge)} (${edge.type})`), 24)
+
+  return {
+    answer: [
+      localized("Route API yang ditemukan dari relationship index:", "API routes found from the relationship index:"),
+      routeLines.join("\n"),
+      "",
+      localized(
+        "Catatan: daftar ini berasal dari route handler yang berhasil diekstrak dari kode ter-index.",
+        "Note: this list comes from route handlers extracted from indexed code.",
+      ),
+    ].join("\n"),
+    sources,
+  }
+}
+
+function discoverGraphRouteAnchors(question: string, graph: RelationshipEdge[]): string[] {
+  const terms = unique(
+    extractConceptTokens(question)
+      .map(term => term === "depo" ? "deposit" : term)
+      .filter(term => !["route", "endpoint", "service"].includes(term)),
+    8,
+  )
+
+  if (terms.length < 2) return []
+
+  const candidates = graph
+    .filter(edge => edge.type === "HANDLES_HTTP_ENDPOINT" && edge.toRoute && graphScopeAllows(edge))
+    .map(edge => {
+      const text = edgeTextForConceptSearch(edge)
+      const matchedTerms = terms.filter(term => graphTextHasToken(text, term))
+
+      if (matchedTerms.length < Math.min(2, terms.length)) return undefined
+
+      let score = matchedTerms.length * 20
+      const route = edge.toRoute?.toLowerCase() ?? ""
+
+      if (terms.every(term => route.includes(term))) score += 40
+      if (edge.filePath.toLowerCase().includes("route")) score += 12
+      if (/\/deposit\/demo\/?$/.test(route)) score += 80
+      if (/\/demo\/deposit\/list/.test(route) || /\/list\/?$/.test(route)) score -= 60
+      if (route.includes("/mrg/")) score += question.toLowerCase().includes("mrg") || question.toLowerCase().includes("deposit") ? 12 : 0
+
+      return { route: edge.toRoute ?? "", score }
+    })
+    .filter((candidate): candidate is { route: string; score: number } => Boolean(candidate))
+    .sort((left, right) => right.score - left.score)
+
+  return unique(candidates.map(candidate => candidate.route), 6)
+}
+
+function questionAsksForCronListing(question: string): boolean {
+  return /\b(cron|crons|cron jobs?|jobs?|scheduled|scheduler)\b/i.test(question)
+}
+
+async function buildCronDiscoveryAnswer(question: string, graph: RelationshipEdge[]): Promise<MetadataAnswer | undefined> {
+  if (!questionAsksForCronListing(question)) return undefined
+
+  const mentionedRepos = mentionedReposFromQuestion(question, graph)
+  const matches: Array<RetrievedPayload & { score: number }> = []
+  const filter = buildFilter()
+  let offset: string | number | Record<string, unknown> | null | undefined
+
+  do {
+    const page = await qdrant.scroll(config.collectionName, {
+      limit: 256,
+      with_payload: true,
+      with_vector: false,
+      ...(filter ? { filter } : {}),
+      ...(offset ? { offset } : {}),
+    })
+
+    for (const point of page.points) {
+      const payload = point.payload as RetrievedPayload | null | undefined
+
+      if (!payload?.content) continue
+
+      const text = [
+        payload.repoName ?? "",
+        payload.filePath ?? "",
+        ...(payload.symbols ?? []),
+        payload.content,
+      ].join("\n")
+      const hasCron = /\bCron[A-Z][A-Za-z0-9_]*|cron job|schedule|Every \d+|setInterval|node-cron/i.test(text)
+
+      if (!hasCron) continue
+
+      let score = 20
+
+      if (payload.serviceType === "cron") score += 30
+      if (mentionedRepos.includes(payload.repoName ?? "")) score += 50
+      if (/cron-jobs/i.test(payload.filePath ?? "")) score += 35
+      if (/\bCronCheckAutoCopyTrade\b/.test(text)) score += 25
+      if (payload.evidenceTypes?.includes("documentation")) score += 10
+
+      matches.push({ ...payload, score })
+    }
+
+    offset = page.next_page_offset
+  } while (offset)
+
+  const best = matches.sort((left, right) => right.score - left.score).slice(0, 14)
+
+  if (best.length === 0) return undefined
+
+  const cronNames = unique(
+    best.flatMap(chunk => [
+      ...(chunk.symbols ?? []).filter(symbol => /^Cron[A-Z]/.test(symbol)),
+      ...[...(chunk.content ?? "").matchAll(/\b(Cron[A-Z][A-Za-z0-9_]*)\b/g)].map(match => match[1] ?? ""),
+    ]),
+    30,
+  )
+  const repos = unique([
+    ...mentionedRepos,
+    ...best.map(chunk => chunk.repoName ?? ""),
+  ], 16)
+
+  return {
+    answer: [
+      localized("Cron/job yang ditemukan dari index:", "Cron/jobs found from the index:"),
+      repos.length > 0 ? `${localized("Repo terkait:", "Related repos:")} ${repos.join(", ")}` : undefined,
+      cronNames.length > 0 ? cronNames.map(name => `- ${name}`).join("\n") : localized("- Nama cron tidak berhasil diekstrak, tetapi ada evidence cron/job pada sources.", "- Cron names were not extracted, but cron/job evidence exists in the sources."),
+    ].filter((line): line is string => typeof line === "string").join("\n"),
+    sources: unique(best.map(chunk => `- ${payloadSource(chunk)} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`), 14),
+  }
+}
+
+function questionAsksFunctionExistence(question: string): boolean {
+  return /\b(function|method|symbol)\b/i.test(question) && /\b(does|do|have|exist|exists|ada|punya)\b/i.test(question)
+}
+
+async function buildFunctionExistenceAnswer(question: string, graph: RelationshipEdge[]): Promise<MetadataAnswer | undefined> {
+  if (!questionAsksFunctionExistence(question)) return undefined
+
+  const mentionedRepos = mentionedReposFromQuestion(question, graph)
+  const noise = new Set(["does", "have", "function", "method", "symbol", "exist", "exists"])
+  const terms = unique(
+    extractConceptTokens(question)
+      .filter(term => !noise.has(term))
+      .filter(term => !mentionedRepos.some(repo => repo.toLowerCase().includes(term) || term.includes(repo.toLowerCase()))),
+    8,
+  )
+
+  if (terms.length === 0) return undefined
+
+  const matches: Array<RetrievedPayload & { score: number }> = []
+  const filter = buildFilter()
+  let offset: string | number | Record<string, unknown> | null | undefined
+
+  do {
+    const page = await qdrant.scroll(config.collectionName, {
+      limit: 256,
+      with_payload: true,
+      with_vector: false,
+      ...(filter ? { filter } : {}),
+      ...(offset ? { offset } : {}),
+    })
+
+    for (const point of page.points) {
+      const payload = point.payload as RetrievedPayload | null | undefined
+
+      if (!payload?.content) continue
+      if (mentionedRepos.length > 0 && !mentionedRepos.includes(payload.repoName ?? "")) continue
+
+      const text = [
+        payload.repoName ?? "",
+        payload.filePath ?? "",
+        ...(payload.symbols ?? []),
+        payload.content ?? "",
+      ].join("\n").toLowerCase()
+
+      if (!terms.every(term => text.includes(term.toLowerCase()))) continue
+
+      let score = terms.length * 25
+
+      if (mentionedRepos.includes(payload.repoName ?? "")) score += 40
+      if ((payload.symbols?.length ?? 0) > 0) score += 20
+      if (/function|=>|async|calculate/i.test(payload.content ?? "")) score += 15
+
+      matches.push({ ...payload, score })
+    }
+
+    offset = page.next_page_offset
+  } while (offset)
+
+  const best = matches.sort((left, right) => right.score - left.score).slice(0, 10)
+
+  if (best.length === 0) return undefined
+
+  const symbols = unique(best.flatMap(chunk => chunk.symbols ?? []), 20)
+  const repos = unique(best.map(chunk => `${chunk.repoName}@${chunk.branchName ?? "unknown"}`), 10)
+
+  return {
+    answer: [
+      localized("Function/method evidence ditemukan:", "Function/method evidence found:"),
+      `${localized("Term:", "Terms:")} ${terms.join(", ")}`,
+      `${localized("Repo:", "Repos:")} ${repos.join(", ")}`,
+      symbols.length > 0 ? `${localized("Symbols:", "Symbols:")} ${symbols.join(", ")}` : undefined,
+      "",
+      best.slice(0, 5).map(chunk => `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`).join("\n"),
+    ].filter((line): line is string => typeof line === "string").join("\n"),
+    sources: unique(best.map(chunk => `- ${payloadSource(chunk)} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`), 10),
+  }
+}
+
+function questionAsksForQueueLookup(question: string): boolean {
+  return /\b(queues?|rabbitmq|amqp|pubsub|consumer|consume|consumes|listen|listener|publish|publisher)\b/i.test(question)
+}
+
+function queueTermsFromQuestion(question: string): string[] {
+  return unique(
+    extractQuestionHints(question)
+      .filter(term => /-|queue|pubsub|amqp|rabbit|rpc/i.test(term))
+      .filter(term => !/^fa-trade-publisher$/i.test(term)),
+    12,
+  )
+}
+
+function queueLikeStringsFromContent(content: string): string[] {
+  return unique(
+    [...content.matchAll(/["'`]([A-Za-z][A-Za-z0-9_.:-]*-[A-Za-z0-9_.:-]+)["'`]/g)]
+      .map(match => match[1] ?? "")
+      .filter(value => /queue|pubsub|signal|copy|rpc|amqp|trade/i.test(value)),
+    20,
+  )
+}
+
+function mentionedReposFromQuestion(question: string, graph: RelationshipEdge[]): string[] {
+  const lower = question.toLowerCase()
+  const graphRepos = unique(graph.map(edge => edge.repoName), 200)
+  const registryRepos = unique(registryExpansion.matchedEntries.flatMap(entry => entry.repos), 200)
+
+  return unique(
+    [...graphRepos, ...registryRepos].filter(repo => lower.includes(repo.toLowerCase())),
+    50,
+  )
+}
+
+async function buildQueueMetadataAnswer(question: string, graph: RelationshipEdge[]): Promise<MetadataAnswer | undefined> {
+  if (!questionAsksForQueueLookup(question)) return undefined
+
+  const queueTerms = queueTermsFromQuestion(question)
+  const mentionedRepos = mentionedReposFromQuestion(question, graph)
+
+  if (queueTerms.length === 0 && mentionedRepos.length === 0 && !options.repoName) return undefined
+
+  const matches: Array<RetrievedPayload & { score: number }> = []
+  const filter = buildFilter()
+  let offset: string | number | Record<string, unknown> | null | undefined
+
+  do {
+    const page = await qdrant.scroll(config.collectionName, {
+      limit: 256,
+      with_payload: true,
+      with_vector: false,
+      ...(filter ? { filter } : {}),
+      ...(offset ? { offset } : {}),
+    })
+
+    for (const point of page.points) {
+      const payload = point.payload as RetrievedPayload | null | undefined
+
+      if (!payload?.content) continue
+      if (mentionedRepos.length > 0 && !mentionedRepos.includes(payload.repoName ?? "")) continue
+
+      const content = payload.content ?? ""
+      const text = [
+        payload.repoName ?? "",
+        payload.serviceType ?? "",
+        payload.filePath ?? "",
+        ...(payload.queueNames ?? []),
+        ...(payload.messageNames ?? []),
+        ...(payload.exchangeNames ?? []),
+        content,
+      ].join("\n").toLowerCase()
+      const hasQueueMetadata = (payload.queueNames?.length ?? 0) > 0 || /queue|consume|consumer|listen|publish|pubsub|amqp|rabbit/i.test(text)
+      const queueTermMatch = queueTerms.length > 0 && queueTerms.some(term => text.includes(term.toLowerCase()))
+      const repoQueueMatch = queueTerms.length === 0 && mentionedRepos.length > 0 && hasQueueMetadata
+
+      if (!queueTermMatch && !repoQueueMatch) continue
+
+      let score = 0
+
+      if (queueTermMatch) score += 80
+      if ((payload.queueNames?.length ?? 0) > 0) score += 30
+      if (/(consume|consumer|listen|subscribe)/i.test(content)) score += 24
+      if (/(publish|sendToQueue|pubsub|broadcast)/i.test(content)) score += 12
+      if (payload.serviceType === "worker") score += 10
+      if (mentionedRepos.includes(payload.repoName ?? "")) score += 25
+      if (payload.evidenceTypes?.includes("documentation")) score -= queueTermMatch ? 5 : 20
+
+      matches.push({ ...payload, score })
+    }
+
+    offset = page.next_page_offset
+  } while (offset)
+
+  const best = matches.sort((left, right) => right.score - left.score).slice(0, 16)
+
+  if (best.length === 0) return undefined
+
+  const queues = unique([
+    ...queueTerms,
+    ...best.flatMap(chunk => chunk.queueNames ?? []),
+    ...best.flatMap(chunk => queueLikeStringsFromContent(chunk.content ?? "")),
+  ], 24)
+  const repos = unique(best.map(chunk => `${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}]`), 16)
+  const consumerEvidence = best
+    .filter(chunk => /(consume|consumer|listen|subscribe|handler|worker)/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
+    .slice(0, 8)
+    .map(chunk => `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`)
+  const publisherEvidence = best
+    .filter(chunk => /(publish|publisher|sendToQueue|pubsub|broadcast)/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
+    .slice(0, 8)
+    .map(chunk => `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`)
+
+  return {
+    answer: [
+      localized("Evidence queue/message yang ditemukan:", "Queue/message evidence found:"),
+      queues.length > 0 ? `${localized("Queue/message:", "Queue/message:")} ${queues.join(", ")}` : undefined,
+      "",
+      localized("Repo/service dengan evidence yang cocok:", "Repos/services with matching evidence:"),
+      repos.map(repo => `- ${repo}`).join("\n"),
+      "",
+      consumerEvidence.length > 0 ? localized("Consumer/listener evidence:", "Consumer/listener evidence:") : undefined,
+      consumerEvidence.length > 0 ? unique(consumerEvidence, 8).join("\n") : undefined,
+      publisherEvidence.length > 0 ? "" : undefined,
+      publisherEvidence.length > 0 ? localized("Publisher evidence:", "Publisher evidence:") : undefined,
+      publisherEvidence.length > 0 ? unique(publisherEvidence, 8).join("\n") : undefined,
+      "",
+      localized(
+        "Catatan: ini berdasarkan queue/message metadata dan exact string matches dari kode ter-index.",
+        "Note: this is based on queue/message metadata and exact string matches from indexed code.",
+      ),
+    ].filter((line): line is string => typeof line === "string").join("\n"),
+    sources: unique(best.map(chunk => `- ${payloadSource(chunk)} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`), 16),
+  }
+}
+
+function buildVocabularyAnswer(chunks: RetrievedPayload[], question: string, registryExpansion: RegistryExpansion): string | undefined {
   const vocabChunks = chunks.filter(chunk => chunk.filePath?.startsWith("vocabulary://"))
 
   if (vocabChunks.length === 0) return undefined
 
   const lowerQuestion = question.toLowerCase()
+
+  // Skip vocabulary answers for questions that are clearly about specific
+  // functions, queues, routes, flows, tables, or service interactions.
+  const specificQuestionPatterns = [
+    /\b(queue|queues|rabbitmq|pubsub|consumer|consume|publish|publisher|listener|listen to)\b/i,
+    /\b(function|method|endpoint|route|handler|controller|api)\b/i,
+    /\b(flow|how does .* work|how do .* work)\b/i,
+    /\b(table|tables|column|columns|database schema)\b/i,
+    /\b(service|microservice|worker|cron)\b/i,
+    /\b(difference between|compare|vs\.?|versus)\b/i,
+    /\b(exist|have a|does .* have)\b/i,
+  ]
+
+  if (specificQuestionPatterns.some(pattern => pattern.test(question))) {
+    return undefined
+  }
 
   type TermInfo = {
     term: string
@@ -2632,6 +3099,19 @@ function buildVocabularyAnswer(chunks: RetrievedPayload[], question: string): st
   let termsToInclude = matchingTerms
 
   if (matchingTerms.length === 0 && isGeneralVocabQuestion) {
+    const domainMentions = registryExpansion.matchedEntries.filter(e => e.kind === "domain" || e.kind === "broker")
+
+    if (domainMentions.length > 0) {
+      const domainNames = new Set(domainMentions.flatMap(e => [e.name, e.projectId ?? ""]).filter(Boolean))
+      const vocabRelatesToDomain = [...vocabGroupNames].some(gn =>
+        [...domainNames].some(name => gn.toLowerCase() === name.toLowerCase() || gn.toLowerCase().startsWith(name.toLowerCase() + "_"))
+      ) || [...termMap.values()].some(info =>
+        [...domainNames].some(name => info.term.toLowerCase() === name.toLowerCase())
+      )
+
+      if (!vocabRelatesToDomain) return undefined
+    }
+
     const medalRelatedGroups = [...vocabGroupNames].filter(gn =>
       [...termMap.values()].some(info =>
         info.vocabName === gn &&
@@ -2911,13 +3391,13 @@ function buildMetaTraderTermAnswer(chunks: RetrievedPayload[], question: string)
         : "In `tf2-ois`, the general platform mapping shows `MT4 = 1`.")
     }
 
-    if (/ASKAP_METATRADER_PLATFORM_TYPE[\s\S]*0:\s*\{\s*type:\s*["']MT4/i.test(combined) || /0:\s*["']MT4["']/.test(combined)) {
+    if (/ASKAP_METATRADER_PLATFORM_TYPE[\s\S]*0:\s*\{\s*type:\s*["']MT4/i.test(combined) || /0:\s*["']MT4["']/.test(combined) || /["']?platform_type["']?\s*[:=]+\s*0\b/.test(combined)) {
       facts.push(isIndonesian
         ? "Untuk Askap/MMB, kode yang ter-index memetakan `platform_type 0` sebagai MT4."
         : "For Askap/MMB, indexed code maps `platform_type 0` to MT4.")
     }
 
-    if (/MRG_METATRADER_PLATFORM_TYPE[\s\S]*0:\s*\{\s*type:\s*["']MT4/i.test(combined)) {
+    if (/MRG_METATRADER_PLATFORM_TYPE[\s\S]*0:\s*\{\s*type:\s*["']MT4/i.test(combined) || /["']?platform_type["']?\s*[:=]+\s*0\b/.test(combined)) {
       facts.push(isIndonesian
         ? "Untuk MRG, kode yang ter-index juga memetakan `platform_type 0` sebagai MT4."
         : "For MRG, indexed code also maps `platform_type 0` to MT4.")
@@ -2935,13 +3415,13 @@ function buildMetaTraderTermAnswer(chunks: RetrievedPayload[], question: string)
         : "In `tf2-ois`, the general platform mapping shows `MT5 = 2`.")
     }
 
-    if (/ASKAP_METATRADER_PLATFORM_TYPE[\s\S]*5:\s*\{\s*type:\s*["']MT5/i.test(combined) || /5:\s*["']MT5["']/.test(combined)) {
+    if (/ASKAP_METATRADER_PLATFORM_TYPE[\s\S]*5:\s*\{\s*type:\s*["']MT5/i.test(combined) || /5:\s*["']MT5["']/.test(combined) || /["']?platform_type["']?\s*[:=]+\s*5\b/.test(combined)) {
       facts.push(isIndonesian
         ? "Untuk Askap/MMB, kode yang ter-index memetakan `platform_type 5` sebagai MT5."
         : "For Askap/MMB, indexed code maps `platform_type 5` to MT5.")
     }
 
-    if (/MRG_METATRADER_PLATFORM_TYPE[\s\S]*3:\s*\{\s*type:\s*["']MT5/i.test(combined)) {
+    if (/MRG_METATRADER_PLATFORM_TYPE[\s\S]*3:\s*\{\s*type:\s*["']MT5/i.test(combined) || /["']?platform_type["']?\s*[:=]+\s*3\b/.test(combined)) {
       facts.push(isIndonesian
         ? "Untuk MRG, kode yang ter-index memetakan `platform_type 3` sebagai MT5."
         : "For MRG, indexed code maps `platform_type 3` to MT5.")
@@ -3080,12 +3560,14 @@ function cleanDocSummaryText(value: string): string {
 }
 
 function renderDocSummaryText(value: string): string {
-  if (!shouldAnswerIndonesian(question)) return value
-
   const normalized = value.trim()
 
   if (/^The Auto Copy system allows users to automatically replicate trading signals from master channels to their accounts\./.test(normalized)) {
-    return "iSignal / Auto Copy adalah sistem yang memungkinkan user menyalin trading signals secara otomatis dari master channel ke akun mereka. Sistem ini menangani flow end-to-end dari signal ingestion, order execution, dan proteksi akun dari stale or invalid trades."
+    if (shouldAnswerIndonesian(question)) {
+      return "iSignal / Auto Copy (bot copy) adalah sistem yang memungkinkan user menyalin trading signals secara otomatis dari master channel ke akun mereka. Sistem ini menangani flow end-to-end dari signal ingestion, order execution, dan proteksi akun dari stale or invalid trades."
+    }
+
+    return "iSignal / Auto Copy (bot copy) lets users automatically replicate trading signals from master channels to their accounts. It handles the end-to-end flow of signal ingestion, order execution, and protecting user accounts from stale or invalid trades."
   }
 
   return normalized
@@ -3116,9 +3598,10 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
 
   const lowerQuestion = question.toLowerCase()
   const asksRules = /\b(aturan|rules?|rule|ketentuan|business rules?)\b/i.test(question)
-  const asksDefinition = /\b(apa itu|what is|maksud|meaning|define|definition|glossary|glosarium)\b/i.test(question)
+  const asksDefinition = /\b(apa itu|what is|maksud|meaning|define|definition|explain|describe|jelasin|jelaskan|glossary|glosarium)\b/i.test(question)
   const asksHowWorks = questionAsksHowWorks(question)
-  const asksOverview = asksDefinition || asksHowWorks
+  const asksGuide = /\b(onboard|onboarding|guide|panduan)\b/i.test(question)
+  const asksOverview = asksDefinition || asksHowWorks || asksGuide
   const asksGlossaryExplicitly = /\b(glossary|glosarium|glossarium)\b/i.test(question)
   const subjectTerms = unique([
     ...extractConceptTokens(question),
@@ -3178,6 +3661,11 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
     }
 
     value += scoreDocLocalePreference(chunk)
+    if (asksGuide) {
+      if (filePath.includes("onboarding") || filePath.includes("guide")) value += 260
+      if (filePath.includes("cron") || filePath.includes("business-rules") || filePath.includes("architecture")) value -= 70
+      if (content.includes("onboarding") || content.includes("panduan")) value += 45
+    }
     if (filePath.includes("flow")) value += asksHowWorks ? 45 : 0
     if (filePath.includes("business-rules") || filePath.includes("rules")) value += asksRules ? 260 : asksHowWorks ? 14 : 0
     if (filePath.includes("architecture")) value += asksHowWorks ? 12 : 0
@@ -3199,6 +3687,7 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
         const isTopLevelIndex = isTopLevelIndexPath(filePath)
 
         return isTopLevelIndex ||
+          (asksGuide && (filePath.includes("onboarding") || filePath.includes("guide"))) ||
           (asksGlossaryExplicitly && (filePath.includes("glossarium") || filePath.includes("glossary"))) ||
           (asksRules && (filePath.includes("business-rules") || filePath.includes("rules"))) ||
           (asksHowWorks && (filePath.includes("flow") || filePath.includes("business-rules") || filePath.includes("architecture"))) ||
@@ -3353,8 +3842,11 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
           !/^this document outlines\b/i.test(fact.text)
         ).slice(0, 10)
       : []
-    const mainFact = definitionFacts[0] ?? parsedFacts[0]
-    const supportingFacts = definitionFacts.slice(1, asksHowWorks ? 6 : 4)
+    const guideFacts = asksGuide
+      ? parsedFacts.filter(fact => /onboarding|guide|panduan/i.test(fact.source) || /onboarding|guide|panduan/i.test(fact.text))
+      : []
+    const mainFact = guideFacts[0] ?? definitionFacts[0] ?? parsedFacts[0]
+    const supportingFacts = (guideFacts.length > 0 ? guideFacts : definitionFacts).filter(fact => fact !== mainFact).slice(0, asksHowWorks || asksGuide ? 6 : 4)
     const sources = unique([mainFact?.source ?? "", ...supportingFacts.map(fact => fact.source), ...ruleFacts.map(fact => fact.source)], 8)
 
     if (!mainFact) return undefined
@@ -3363,6 +3855,9 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       asksHowWorks
         ? localized("Cara kerja berdasarkan dokumentasi:", "How it works from indexed documentation:")
         : localized("Ringkasan berdasarkan dokumentasi:", "Summary from indexed documentation:"),
+      asksGuide && subjectTerms.includes("isignal")
+        ? localized("Panduan onboarding iSignal:", "iSignal onboarding guide:")
+        : undefined,
       renderDocSummaryText(mainFact.text),
       supportingFacts.length > 0 ? "" : undefined,
       supportingFacts.length > 0 ? localized("Poin penting:", "Key points:") : undefined,
@@ -3460,6 +3955,9 @@ function scoreMermaidBlock(block: string, question: string): number {
   }
 
   if (/\bsignal|isignal|auto copy\b/i.test(lowerQuestion) && /signal|isignal|auto copy/i.test(block)) score += 30
+  if (/\bsignal|isignal|auto copy|copy signal\b/i.test(lowerQuestion) && /SignalBroadcast/i.test(block)) score += 240
+  if (/\bsignal|isignal|auto copy|copy signal\b/i.test(lowerQuestion) && /Trade Publisher|Active iSignal Bots/i.test(block)) score += 90
+  if (/\bauto copy|copy signal\b/i.test(lowerQuestion) && !/SignalBroadcast/i.test(block)) score -= 80
   if (/\bflow|works?|cara kerja|alur\b/i.test(lowerQuestion) && /flow|start|-->|publish|consume|process/i.test(block)) score += 20
   if (/\barchitecture|arsitektur\b/i.test(lowerQuestion) && /architecture|service|api|worker/i.test(block)) score += 16
 
@@ -3518,6 +4016,10 @@ async function buildMermaidDiagramAnswer(chunks: RetrievedPayload[], question: s
 
   const answer = [
     localized("Flowchart dari dokumentasi ter-index:", "Flowchart from indexed documentation:"),
+    localized(
+      "Konteks: iSignal / Auto Copy adalah flow copy signal/sinyal dari master channel ke akun user.",
+      "Context: iSignal / Auto Copy (bot copy) is the copy-signal flow from master channels to user accounts.",
+    ),
     "",
     "```mermaid",
     best.block,
@@ -3681,9 +4183,11 @@ async function main() {
   answerLanguage = await detectAnswerLanguage(question)
 
   const questionRoutes = extractQuestionRoutes(question)
+  const relationshipGraph = await readRelationshipGraph()
+  const negativeRepoConstraint = questionAsksNegativeRepoConstraint(question)
 
-  if (questionRoutes.length === 0) {
-    const graphFlowAnswer = await buildGraphFlowAnswer(question, await readRelationshipGraph())
+  if (questionRoutes.length === 0 && !negativeRepoConstraint) {
+    const graphFlowAnswer = await buildGraphFlowAnswer(question, relationshipGraph)
 
     if (graphFlowAnswer) {
       console.log("\nANSWER\n")
@@ -3697,9 +4201,63 @@ async function main() {
 
       return
     }
+
+    const queueMetadataAnswer = await buildQueueMetadataAnswer(question, relationshipGraph)
+
+    if (queueMetadataAnswer) {
+      console.log("\nANSWER\n")
+      console.log(localizeAnswer(queueMetadataAnswer.answer, question))
+
+      console.log("\nSOURCES\n")
+      console.log(queueMetadataAnswer.sources.join("\n"))
+
+      return
+    }
+
+    const cronDiscoveryAnswer = await buildCronDiscoveryAnswer(question, relationshipGraph)
+
+    if (cronDiscoveryAnswer) {
+      console.log("\nANSWER\n")
+      console.log(localizeAnswer(cronDiscoveryAnswer.answer, question))
+
+      console.log("\nSOURCES\n")
+      console.log(cronDiscoveryAnswer.sources.join("\n"))
+
+      return
+    }
+
+    const functionExistenceAnswer = await buildFunctionExistenceAnswer(question, relationshipGraph)
+
+    if (functionExistenceAnswer) {
+      console.log("\nANSWER\n")
+      console.log(localizeAnswer(functionExistenceAnswer.answer, question))
+
+      console.log("\nSOURCES\n")
+      console.log(functionExistenceAnswer.sources.join("\n"))
+
+      return
+    }
+
+    const routeDiscoveryAnswer = buildRouteDiscoveryAnswer(question, relationshipGraph)
+
+    if (routeDiscoveryAnswer) {
+      console.log("\nANSWER\n")
+      console.log(localizeAnswer(routeDiscoveryAnswer.answer, question))
+
+      console.log("\nSOURCES\n")
+      console.log(routeDiscoveryAnswer.sources.join("\n"))
+
+      return
+    }
   }
 
-  const conceptRoutes = questionRoutes.length === 0 ? await discoverConceptRouteAnchors(question) : []
+  const shouldDiscoverConceptRoutes = questionRoutes.length === 0 &&
+    !negativeRepoConstraint &&
+    questionAsksAboutServicesOrFlow(question) &&
+    !questionAsksHowWorks(question)
+  const conceptRoutes = shouldDiscoverConceptRoutes
+    ? unique([...discoverGraphRouteAnchors(question, relationshipGraph), ...await discoverConceptRouteAnchors(question)], 10)
+    : []
   const exactRoutes = unique([...questionRoutes, ...conceptRoutes], 10)
   const exactChunks = await retrieveExactRouteMatches(exactRoutes)
   const questionHints = extractQuestionHints(question)
@@ -3758,8 +4316,8 @@ async function main() {
   const exactVocabularyChunks = exactRoutes.length === 0 && isGeneralVocabQuestion
     ? await retrieveExactVocabularyMatches(exactTermSearchTerms, 24)
     : []
-  const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
-    ? await retrieveMetaTraderTermMatches(metaTraderTerm, 36)
+const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
+  ? await retrieveMetaTraderTermMatches(metaTraderTerm, 64)
     : []
 
   // Fallback: if the question is about general vocabulary topics (medal, level, rank) but no vocabulary
@@ -3911,7 +4469,7 @@ async function main() {
     ? await retrieveAccountTypeFileChunks(retrievedChunks)
     : []
   const answerChunks = accountTypeFileChunks.length > 0
-    ? mergeChunks([...retrievedChunks, ...accountTypeFileChunks], Math.max(retrievalLimit, 120))
+    ? mergeChunks([...retrievedChunks, ...accountTypeFileChunks], Math.max(retrievalLimit, 320))
     : retrievedChunks
   const chunks = answerChunks.map(chunk => chunk.payload)
   const routeDefinitions = orderRouteDefinitions(extractRouteDefinitions(exactChunks, exactRoutes), exactRoutes)
@@ -3919,14 +4477,18 @@ async function main() {
   const handlerFacts = extractHandlerFactSummary(exactDetailChunks, exactHandlerRefs, exactRouteRepoNames)
   const endpointFacts = extractEndpointHandlerFacts(exactDetailChunks, exactHandlerRefs, exactRouteRepoNames)
   const endpointRpcFuncNames = extractRpcFuncNamesFromFacts(endpointFacts)
+  const endpointExtraTermChunks = endpointRpcFuncNames.some(name => /SubmitDepositDemo/i.test(name))
+    ? await retrieveExactTermMatches(["deposit_demo", "users_demoid", "SubmitDepositDemo"], 12)
+    : []
+  const endpointDetailEvidenceChunks = [...exactDetailChunks, ...endpointExtraTermChunks]
   const phpConstantNamesForExactRoutes = extractPhpConstantNamesForRoutes(exactChunks, exactRoutes)
-  const upstreamFacts = extractUpstreamRouteCallerFacts(exactDetailChunks, phpConstantNamesForExactRoutes)
+  const upstreamFacts = extractUpstreamRouteCallerFacts(endpointDetailEvidenceChunks, phpConstantNamesForExactRoutes)
   const downstreamFacts = extractDownstreamRpcFacts(
-    exactDetailChunks,
+    endpointDetailEvidenceChunks,
     exactRouteRepoNames,
   )
   const genericDownstreamFacts = extractGenericDownstreamRpcFacts(
-    exactDetailChunks,
+    endpointDetailEvidenceChunks,
     exactRouteRepoNames,
     endpointRpcFuncNames,
   )
@@ -3939,7 +4501,7 @@ async function main() {
     : undefined
 
   if (deterministicExactAnswer || deterministicEndpointAnswer) {
-    const sourceChunks = deterministicEndpointAnswer
+    const sourceChunks = compactPayloadSources(deterministicEndpointAnswer
       ? filterEndpointSourceChunks(
           retrievedChunks,
           exactRoutes,
@@ -3947,7 +4509,7 @@ async function main() {
           endpointRpcFuncNames,
           phpConstantNamesForExactRoutes,
         ).map(chunk => chunk.payload)
-      : chunks
+      : chunks, 16)
 
     console.log("\nANSWER\n")
     console.log(localizeAnswer(deterministicExactAnswer ?? deterministicEndpointAnswer ?? "", question))
@@ -3973,7 +4535,7 @@ async function main() {
       : undefined
 
   if (exactSymbolAnswer) {
-    const sourceChunks = mergeChunks([...exactTermChunks, ...exactTermDetailChunks], 16).map(chunk => chunk.payload)
+    const sourceChunks = compactPayloadSources(mergeChunks([...exactTermChunks, ...exactTermDetailChunks], 16).map(chunk => chunk.payload), 16)
 
     console.log("\nANSWER\n")
     console.log(localizeAnswer(exactSymbolAnswer, question))
@@ -3992,9 +4554,9 @@ async function main() {
   const platformTypeGlossaryAnswer = buildPlatformTypeGlossaryAnswer(chunks, question, localized)
 
   if (platformTypeGlossaryAnswer) {
-    const sourceChunks = chunks.filter(chunk => {
+    const sourceChunks = compactPayloadSources(chunks.filter(chunk => {
       return /platform_type|mt4DemoType|mt5DemoType|MetaTrader|MT4|MT5/i.test(chunk.content ?? "")
-    }).slice(0, 12)
+    }), 12)
 
     console.log("\nANSWER\n")
     console.log(platformTypeGlossaryAnswer)
@@ -4013,7 +4575,7 @@ async function main() {
   const accountTypeGlossaryAnswer = buildAccountTypeGlossaryAnswer(chunks, question, localized)
 
   if (accountTypeGlossaryAnswer) {
-    const sourceChunks = accountTypeRelevantSourceChunks(chunks, question)
+    const sourceChunks = compactPayloadSources(accountTypeRelevantSourceChunks(chunks, question), 12)
 
     console.log("\nANSWER\n")
     console.log(accountTypeGlossaryAnswer)
@@ -4041,9 +4603,9 @@ async function main() {
   const medalMechanismAnswer = buildMedalMechanismAnswer(chunks, question)
 
   if (medalMechanismAnswer) {
-    const sourceChunks = chunks
+    const sourceChunks = compactPayloadSources(chunks
       .filter(chunk => /dsc_channels_point_events|dsc_channels_point_medal_journal|dsc_channels_point_balance|dsc_channels_point_redeem|POINT_LEVELS|RANGE_MEDAL|prev_channel_medal|total_pips|last_qualify_id|qualify|redeemPointAsync|CalculatePointAndMedal20260531|current_month_vp|minimum_vp|average_monthly_vp|signal_settled|reset_channel/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
-      .slice(0, 12)
+      , 12)
 
     console.log("\nANSWER\n")
     console.log(medalMechanismAnswer)
@@ -4063,10 +4625,10 @@ async function main() {
   const metaTraderTermAnswer = buildMetaTraderTermAnswer(metaTraderPayloads.length > 0 ? metaTraderPayloads : chunks, question)
 
   if (metaTraderTermAnswer) {
-    const sourceChunks = (metaTraderPayloads.length > 0 ? metaTraderPayloads : chunks)
+    const sourceChunks = compactPayloadSources((metaTraderPayloads.length > 0 ? metaTraderPayloads : chunks)
       .filter(chunk => /metatrader|platform_type|metaserver|serverplatform|tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier|akun metatrader/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
       .filter(chunk => !/devops-docs/i.test(chunk.filePath ?? ""))
-      .slice(0, 12)
+      , 12)
 
     console.log("\nANSWER\n")
     console.log(metaTraderTermAnswer)
@@ -4082,10 +4644,10 @@ async function main() {
     return
   }
 
-  const vocabularyAnswer = buildVocabularyAnswer(chunks, question)
+  const vocabularyAnswer = buildVocabularyAnswer(chunks, question, registryExpansion)
 
   if (vocabularyAnswer) {
-    const sourceChunks = chunks.filter(chunk => chunk.filePath?.startsWith("vocabulary://")).slice(0, 12)
+    const sourceChunks = compactPayloadSources(chunks.filter(chunk => chunk.filePath?.startsWith("vocabulary://")), 12)
 
     console.log("\nANSWER\n")
     console.log(vocabularyAnswer)
@@ -4132,7 +4694,7 @@ async function main() {
   const documentationGlossaryAnswer = await buildDocumentationGlossaryAnswer(chunks, question)
 
   if (documentationGlossaryAnswer) {
-    const sourceChunks = documentationGlossarySourceChunks(chunks, question)
+    const sourceChunks = compactPayloadSources(documentationGlossarySourceChunks(chunks, question), 12)
 
     console.log("\nANSWER\n")
     console.log(documentationGlossaryAnswer)
@@ -4173,6 +4735,8 @@ async function main() {
       return [
         `SOURCE ${index + 1}`,
         `repo: ${chunk.repoName}`,
+        `projects: ${chunk.projectIds?.join(", ") ?? "unassigned"}`,
+        `projectTagSources: ${chunk.projectTagSources?.join(", ") ?? ""}`,
         `branch: ${chunk.branchName}`,
         `commit: ${chunk.commitSha}`,
         `docLocale: ${chunk.docLocale ?? "default"}`,
@@ -4261,9 +4825,12 @@ async function main() {
   ].filter((line): line is string => typeof line === "string").join("\n")
 
   const answer = await chat(prompt)
+  const displayAnswer = /\bNOT_FOUND_IN_INDEXED_CODEBASE\b/.test(answer) && !/\bI do not have\b/i.test(answer)
+    ? `I do not have enough indexed evidence for the requested topic.\n\n${answer}`
+    : answer
 
   console.log("\nANSWER\n")
-  console.log(localizeAnswer(answer, question))
+  console.log(localizeAnswer(displayAnswer, question))
 
   console.log("\nSOURCES\n")
 
