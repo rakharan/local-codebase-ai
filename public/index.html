@@ -929,10 +929,12 @@
                 <div class="manager-field">
                   <label for="registryProjectId">Project ID</label>
                   <input id="registryProjectId" placeholder="wallet" />
+                  <div class="manager-field-hint">Lowercase tag used for filtering. Use letters, numbers, dash, or underscore.</div>
                 </div>
                 <div class="manager-field">
                   <label for="registryName">Name</label>
                   <input id="registryName" placeholder="Wallet" />
+                  <div class="manager-field-hint">Human-readable unique entry name. This is used when editing/deleting.</div>
                 </div>
                 <div class="manager-field">
                   <label for="registryKind">Kind</label>
@@ -942,56 +944,67 @@
                     <option value="broker">broker</option>
                     <option value="concept">concept</option>
                   </select>
+                  <div class="manager-field-hint">domain = product area, service = repo/app, broker = MRG/MMB, concept = shared term.</div>
                 </div>
               </div>
               <div class="manager-field wide">
                 <label for="registryDescription">Description</label>
                 <input id="registryDescription" placeholder="Short product/domain description" />
+                <div class="manager-field-hint">One sentence that explains what this project/concept owns.</div>
               </div>
 
               <div class="manager-section-label">Matching Signals</div>
               <div class="manager-field">
                 <label for="registryAliases">Aliases</label>
-                <textarea class="compact-area" id="registryAliases" placeholder="wallet&#10;balance"></textarea>
+                <textarea class="compact-area" id="registryAliases" placeholder="wallet&#10;balance&#10;funds"></textarea>
+                <div class="manager-field-hint">One per line or comma separated. User wording that should match this project.</div>
               </div>
               <div class="manager-field">
                 <label for="registryRepos">Repos</label>
-                <textarea class="compact-area" id="registryRepos" placeholder="tf2-ois"></textarea>
+                <textarea class="compact-area" id="registryRepos" placeholder="tf2-ois&#10;tf2-wallet-worker"></textarea>
+                <div class="manager-field-hint">Repo names as indexed, without paths. Shared repos are allowed.</div>
               </div>
               <div class="manager-field wide">
                 <label for="registryKeywords">Keywords</label>
-                <textarea class="compact-area" id="registryKeywords" placeholder="transaction&#10;withdraw&#10;deposit"></textarea>
+                <textarea class="compact-area" id="registryKeywords" placeholder="transaction&#10;withdraw&#10;deposit&#10;wallet_balance"></textarea>
+                <div class="manager-field-hint">Code/domain words that should boost retrieval and project tagging.</div>
               </div>
 
               <div class="manager-section-label">Code Evidence</div>
               <div class="manager-field">
                 <label for="registryRoutes">Routes</label>
-                <textarea class="compact-area" id="registryRoutes" placeholder="/ois/api/v1/wallet/"></textarea>
+                <textarea class="compact-area" id="registryRoutes" placeholder="/ois/api/v1/wallet/&#10;/ois/api/v1/wallet/history/"></textarea>
+                <div class="manager-field-hint">HTTP path prefixes or exact endpoints, one per line.</div>
               </div>
               <div class="manager-field">
                 <label for="registryFunctions">Functions</label>
-                <textarea class="compact-area" id="registryFunctions" placeholder="WalletService.create"></textarea>
+                <textarea class="compact-area" id="registryFunctions" placeholder="WalletService.create&#10;WalletController.GetBalance"></textarea>
+                <div class="manager-field-hint">Function/class/symbol names that identify this project.</div>
               </div>
               <div class="manager-field">
                 <label for="registryQueues">Queues</label>
-                <textarea class="compact-area" id="registryQueues" placeholder="queue-name"></textarea>
+                <textarea class="compact-area" id="registryQueues" placeholder="wallet.deposit.request&#10;pubsub-wallet-event"></textarea>
+                <div class="manager-field-hint">RabbitMQ/AMQP queue, routing key, or message names.</div>
               </div>
               <div class="manager-field">
                 <label for="registryTables">Tables</label>
-                <textarea class="compact-area" id="registryTables" placeholder="wallet_transactions"></textarea>
+                <textarea class="compact-area" id="registryTables" placeholder="wallet_transactions&#10;wallet_balances"></textarea>
+                <div class="manager-field-hint">Database table names used by this project.</div>
               </div>
               <div class="manager-field">
                 <label for="registryDocs">Docs</label>
-                <textarea class="compact-area" id="registryDocs" placeholder="wallet-docs"></textarea>
+                <textarea class="compact-area" id="registryDocs" placeholder="wallet-docs&#10;i18n/id/.../wallet-docs"></textarea>
+                <div class="manager-field-hint">Documentation folder names or paths from indexed docs.</div>
               </div>
               <div class="manager-field">
                 <label for="registryPathRules">Path Rules</label>
-                <textarea class="compact-area" id="registryPathRules" placeholder="tf2-ois | components/wallet/** | wallet"></textarea>
-                <div class="manager-field-hint">Format: repo | pattern | projectId</div>
+                <textarea class="compact-area" id="registryPathRules" placeholder="tf2-ois | components/wallet/** | wallet&#10;ims-tf2 | components/askap/** | askap"></textarea>
+                <div class="manager-field-hint">Format: repo | glob/path prefix | projectId. Use only when a folder clearly belongs to a project.</div>
               </div>
               <div class="manager-field wide">
                 <label for="registryNotes">Notes</label>
-                <textarea class="compact-area" id="registryNotes" placeholder="Repo is shared; only tag confident wallet chunks."></textarea>
+                <textarea class="compact-area" id="registryNotes" placeholder="Repo is shared; only tag confident wallet chunks.&#10;Reindex tf2-ois after changing path rules."></textarea>
+                <div class="manager-field-hint">Operational hints for future maintainers. One note per line.</div>
               </div>
               <button class="manager-btn primary" onclick="saveRegistryEntry()">Save Project</button>
               <button class="manager-btn" onclick="resetRegistryForm()">Cancel Edit</button>
@@ -1007,15 +1020,35 @@
           <div class="manager-panel wide-panel">
             <h2>Knowledge Notes</h2>
             <div class="manager-form">
-              <input class="wide" id="noteTitle" placeholder="Title, e.g. iSignal flow change from BOD meeting" />
-              <input id="noteProjects" placeholder="projects, comma separated, e.g. isignal" />
-              <input id="noteAuthor" placeholder="author / owner" />
-              <select id="noteStatus">
-                <option value="confirmed">confirmed</option>
-                <option value="proposal">proposal</option>
-                <option value="deprecated">deprecated</option>
-              </select>
-              <textarea class="wide" id="noteBody" placeholder="Meeting notes, decisions, business rules, or documentation updates"></textarea>
+              <div class="manager-field wide">
+                <label for="noteTitle">Title</label>
+                <input id="noteTitle" placeholder="iSignal subscription grace period proposal" />
+                <div class="manager-field-hint">Short searchable title for the meeting note or documentation update.</div>
+              </div>
+              <div class="manager-field">
+                <label for="noteProjects">Projects</label>
+                <input id="noteProjects" placeholder="isignal, wallet" />
+                <div class="manager-field-hint">Comma-separated project IDs from the registry.</div>
+              </div>
+              <div class="manager-field">
+                <label for="noteAuthor">Author</label>
+                <input id="noteAuthor" placeholder="Randy / Product / BOD" />
+                <div class="manager-field-hint">Who captured or owns this update.</div>
+              </div>
+              <div class="manager-field">
+                <label for="noteStatus">Status</label>
+                <select id="noteStatus">
+                  <option value="confirmed">confirmed</option>
+                  <option value="proposal">proposal</option>
+                  <option value="deprecated">deprecated</option>
+                </select>
+                <div class="manager-field-hint">Use proposal for unapproved meeting ideas, confirmed for accepted rules.</div>
+              </div>
+              <div class="manager-field wide">
+                <label for="noteBody">Body</label>
+                <textarea id="noteBody" placeholder="Meeting date: 2026-06-03&#10;&#10;Current behavior:&#10;- ...&#10;&#10;Proposed/confirmed change:&#10;- ...&#10;&#10;Affected services/routes/tables:&#10;- ..."></textarea>
+                <div class="manager-field-hint">Plain text or Markdown. Include current behavior, decision status, and affected services when possible.</div>
+              </div>
               <button class="manager-btn primary" onclick="saveKnowledgeNote()">Save Note</button>
               <button class="manager-btn" onclick="resetKnowledgeNoteForm()">Cancel Edit</button>
             </div>
