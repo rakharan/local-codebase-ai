@@ -179,6 +179,45 @@ const cases: AnswerCase[] = [
     ],
   },
   {
+    name: "iSignal development date uses changelog and does not invent exact start",
+    question: "Kapan isignal mulai didevelop",
+    required: [
+      "Tanggal mulai development iSignal tidak bisa dipastikan",
+      "1 Agustus, 2024",
+      "docs:isignal-docs\\CHANGELOG.md",
+    ],
+    forbidden: [
+      "CronCheckAutoCopyTrade",
+      "docs:fa-porto-docs",
+    ],
+  },
+  {
+    name: "iSignal account eligibility avoids cron fallback",
+    question: "akun jenis apa yang boleh ikut isignal",
+    required: [
+      "Berdasarkan evidence yang ter-index",
+      "Saya tidak menemukan daftar jenis akun yang eksplisit",
+      "docs:isignal-docs\\features\\business-rules.md",
+    ],
+    forbidden: [
+      "CronCheckAutoCopyTrade",
+      "docs:product-knowledge\\glossary.mdx",
+    ],
+  },
+  {
+    name: "iSignal minimum equity does not invent a number",
+    question: "berapa minimal equity untuk bisa ikut isignal",
+    required: [
+      "Saya tidak menemukan angka minimal equity yang eksplisit",
+      "bukan cron-job summary",
+    ],
+    forbidden: [
+      "CronCheckAutoCopyTrade",
+      "By Tier Balance",
+      "Margin Level",
+    ],
+  },
+  {
     name: "short acronym definition prefers FA product docs",
     question: "apa itu FA",
     required: [

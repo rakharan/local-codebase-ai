@@ -3810,6 +3810,188 @@ function scoreDocLocalePreference(chunk: RetrievedPayload): number {
   return 0
 }
 
+function questionAsksProjectTimeline(question: string): boolean {
+  return /\b(kapan|when|mulai|started|start|awal|pertama|didevelop|developed|development|dibuat|created|rilis|release|launch|changelog)\b/i.test(question) &&
+    /\b(isignal|auto copy|copy signal|bot copy|ois)\b/i.test(question)
+}
+
+function questionAsksEligibilityRequirement(question: string): boolean {
+  return /\b(boleh|eligible|eligibility|ikut|join|participate|account|akun|jenis akun|tipe akun|minimal|minimum|equity|balance|saldo|syarat|persyaratan|requirement|requirements)\b/i.test(question) &&
+    /\b(isignal|auto copy|copy signal|bot copy|ois)\b/i.test(question)
+}
+
+function isCronDocChunk(chunk: RetrievedPayload): boolean {
+  return /cron-jobs|cron jobs|cronjob/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`)
+}
+
+function buildDocumentationTimelineAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
+  if (!questionAsksProjectTimeline(question)) return undefined
+
+  const candidates = chunks
+    .filter(chunk => chunk.evidenceTypes?.includes("documentation"))
+    .filter(chunk => /changelog|release|timeline|roadmap|history|perubahan/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
+    .filter(chunk => /isignal|auto copy|copy signal|bot copy|ois/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
+    .sort((left, right) => {
+      const leftPath = left.filePath?.toLowerCase() ?? ""
+      const rightPath = right.filePath?.toLowerCase() ?? ""
+      const leftScore = (leftPath.includes("changelog") ? 100 : 0) + scoreDocLocalePreference(left)
+      const rightScore = (rightPath.includes("changelog") ? 100 : 0) + scoreDocLocalePreference(right)
+
+      return rightScore - leftScore
+    })
+
+  if (candidates.length === 0) return undefined
+
+  const timelineFacts: string[] = []
+
+  for (const chunk of candidates) {
+    const lines = (chunk.content ?? "")
+      .split(/\r?\n/)
+      .map(line => cleanDocSummaryText(line))
+      .filter(Boolean)
+      .filter(line => !/^(Documentation|Source|Locale|title|description|file):/i.test(line))
+      .filter(line => /(\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b|\b20\d{2}\b|v\d+|\brelease\b|\brilis\b|\bchangelog\b|\binitial\b|\bmulai\b|\bstart)/i.test(line))
+
+    for (const line of lines) {
+      timelineFacts.push(`${line} (${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine})`)
+      if (timelineFacts.length >= 8) break
+    }
+
+    if (timelineFacts.length >= 8) break
+  }
+
+  if (timelineFacts.length === 0) return undefined
+
+  function timelineSortKey(fact: string): number {
+    const monthMap: Record<string, number> = {
+      januari: 1,
+      january: 1,
+      februari: 2,
+      february: 2,
+      maret: 3,
+      march: 3,
+      april: 4,
+      mei: 5,
+      may: 5,
+      juni: 6,
+      june: 6,
+      juli: 7,
+      july: 7,
+      agustus: 8,
+      august: 8,
+      september: 9,
+      oktober: 10,
+      october: 10,
+      november: 11,
+      desember: 12,
+      december: 12,
+    }
+    const isoMatch = fact.match(/\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b/)
+    if (isoMatch) return Number(`${isoMatch[1]}${isoMatch[2]?.padStart(2, "0")}${isoMatch[3]?.padStart(2, "0")}`)
+
+    const textDateMatch = fact.toLowerCase().match(/\b(\d{1,2})\s+([a-z]+),?\s+(20\d{2})\b/)
+    if (textDateMatch) {
+      const day = textDateMatch[1]?.padStart(2, "0") ?? "99"
+      const month = String(monthMap[textDateMatch[2] ?? ""] ?? 99).padStart(2, "0")
+      const year = textDateMatch[3] ?? "9999"
+
+      return Number(`${year}${month}${day}`)
+    }
+
+    const yearMatch = fact.match(/\b(20\d{2})\b/)
+    if (yearMatch) return Number(`${yearMatch[1]}9999`)
+
+    return Number.MAX_SAFE_INTEGER
+  }
+
+  const sortedFacts = unique(timelineFacts, 12)
+    .sort((left, right) => timelineSortKey(left) - timelineSortKey(right))
+    .slice(0, 8)
+
+  return [
+    localized("Tanggal mulai development iSignal tidak bisa dipastikan hanya dari evidence yang ter-retrieve.", "The exact iSignal development start date is not confirmed by the retrieved evidence."),
+    localized("Evidence terdekat yang ditemukan adalah changelog/timeline berikut:", "Closest changelog/timeline evidence found:"),
+    ...sortedFacts.map(fact => `- ${fact}`),
+    "",
+    localized("Kesimpulan: gunakan tanggal tertua di changelog sebagai petunjuk awal aktivitas terdokumentasi, bukan bukti pasti tanggal development pertama dimulai.", "Conclusion: treat the oldest changelog date as the earliest documented activity, not definitive proof of when development first began."),
+  ].join("\n")
+}
+
+function buildDocumentationEligibilityAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
+  if (!questionAsksEligibilityRequirement(question)) return undefined
+
+  const asksEquity = /\b(equity|balance|saldo|minimal|minimum)\b/i.test(question)
+  const asksAccountKind = !asksEquity && /\b(akun|account|jenis akun|tipe akun|boleh|eligible|ikut|join|participate)\b/i.test(question)
+  const facts: string[] = []
+  const candidates = chunks
+    .filter(chunk => {
+      const text = `${chunk.filePath ?? ""}\n${chunk.content ?? ""}`
+
+      if (isCronDocChunk(chunk)) return false
+      if (!/isignal-docs|isignal|auto copy|copy signal|bot copy|dsc_bot|dsc_subs|subscription/i.test(text)) return false
+      return /isignal|auto copy|copy signal|bot copy|ois|subscription|bot|account|akun|equity|balance|mt4|mt5/i.test(text)
+    })
+    .sort((left, right) => {
+      function score(chunk: RetrievedPayload): number {
+        const text = `${chunk.filePath ?? ""}\n${chunk.content ?? ""}`.toLowerCase()
+        let value = scoreDocLocalePreference(chunk)
+
+        if (/business-rules|pricing|onboarding|guide|edit|edge-cases/i.test(chunk.filePath ?? "")) value += 80
+        if (asksEquity && /equity|balance|saldo|minimal|minimum/i.test(text)) value += 120
+        if (asksAccountKind && /account|akun|mt4|mt5|metatrader|real|demo|eligible|boleh/i.test(text)) value += 90
+        if (/subscription|bot|auto copy|isignal/i.test(text)) value += 30
+        if (isCronDocChunk(chunk)) value -= 200
+
+        return value
+      }
+
+      return score(right) - score(left)
+    })
+
+  for (const chunk of candidates) {
+    const lines = (chunk.content ?? "")
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean)
+      .filter(line => !/^(Documentation|Source|Locale|title|description|file):/i.test(line))
+      .filter(line => !/^\|?\s*Cron[A-Z]/.test(line))
+      .filter(line => {
+        const text = line.toLowerCase()
+
+        if (asksEquity && /\b(equity|saldo|deposit)\b/i.test(text)) return true
+        if (asksAccountKind && /\b(account|akun|mt4|mt5|metatrader|real|demo|bot|subscription|eligible|boleh|follower|pengikut)\b/i.test(text)) return true
+
+        return false
+      })
+
+    for (const line of lines) {
+      facts.push(`${cleanDocSummaryText(line)} (${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine})`)
+      if (facts.length >= 10) break
+    }
+
+    if (facts.length >= 10) break
+  }
+
+  const uniqueFacts = unique(facts, 10)
+  const missingSpecific = asksEquity
+    ? localized("Saya tidak menemukan angka minimal equity yang eksplisit di evidence yang ter-retrieve.", "I did not find an explicit minimum equity number in the retrieved evidence.")
+    : localized("Saya tidak menemukan daftar jenis akun yang eksplisit di evidence yang ter-retrieve.", "I did not find an explicit account-type eligibility list in the retrieved evidence.")
+
+  if (uniqueFacts.length === 0) {
+    return [
+      missingSpecific,
+      localized("Yang bisa dikonfirmasi: pertanyaan ini perlu evidence dari business rules/config/handler iSignal, bukan cron-job summary.", "What can be confirmed: this question needs evidence from iSignal business rules/config/handlers, not cron-job summaries."),
+    ].join("\n")
+  }
+
+  return [
+    localized("Berdasarkan evidence yang ter-index:", "Based on indexed evidence:"),
+    ...uniqueFacts.map(fact => `- ${fact}`),
+    asksEquity || asksAccountKind ? "" : undefined,
+    asksEquity || asksAccountKind ? missingSpecific : undefined,
+  ].filter((line): line is string => typeof line === "string").join("\n")
+}
+
 async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: string): Promise<string | undefined> {
   if (!questionAsksAboutGlossary(question)) return undefined
   if (questionAsksAboutAccountTypes(question)) return undefined
@@ -3820,6 +4002,7 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
   const asksDefinition = /\b(apa itu|what is|maksud|meaning|define|definition|explain|describe|jelasin|jelaskan|glossary|glosarium)\b/i.test(question)
   const asksHowWorks = questionAsksHowWorks(question)
   const asksGuide = /\b(onboard|onboarding|guide|panduan)\b/i.test(question)
+  const asksCron = questionAsksForCronListing(question)
   const asksOverview = asksDefinition || asksHowWorks || asksGuide
   const asksGlossaryExplicitly = /\b(glossary|glosarium|glossarium)\b/i.test(question)
   const subjectTerms = unique([
@@ -3891,7 +4074,8 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
     if (filePath.includes("glossarium") || filePath.includes("glossary")) value += asksOverview ? asksGlossaryExplicitly ? 18 : -60 : 4
     if (filePath.endsWith("index.mdx") || filePath.endsWith("index.md")) value += asksRules ? 0 : 18
     if (asksOverview && /\ballows users to automatically|memungkinkan pengguna|pengenalan|overview|tujuan utama|core purpose|internal documentation for|dokumentasi internal|end-to-end|signal ingestion|pengolahan sinyal/i.test(content)) value += 35
-    if (asksOverview && (filePath.includes("cron") || filePath.includes("diagram"))) value -= asksHowWorks ? 8 : 25
+    if (!asksCron && (filePath.includes("cron") || content.includes("croncheck"))) value -= asksHowWorks ? 60 : 160
+    if (asksOverview && filePath.includes("diagram")) value -= asksHowWorks ? 8 : 25
     if (!asksRules && filePath.includes("business-rules")) value -= asksDefinition ? 8 : 0
 
     return value
@@ -4009,6 +4193,7 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       const mentionsSubject = subjectTerms.some(term => lowerLine.includes(term))
 
       if (isDiagramOrCode || isDocusaurusComponent || isMetadataLine) continue
+      if (!asksCron && (/^\|?\s*Cron[A-Z]/.test(line) || lowerLine.includes("croncheck"))) continue
       if (asksOverview && isListOrTable && !asksRules) continue
 
       if (mentionsSubject || (asksRules && isListOrTable) || (!asksRules && !isListOrTable && !isHeader)) {
@@ -4903,6 +5088,51 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     console.log(commentRuleAnswer)
 
     console.log("\nSOURCES\n")
+
+    return
+  }
+
+  const documentationTimelineAnswer = buildDocumentationTimelineAnswer(chunks, question)
+
+  if (documentationTimelineAnswer) {
+    const sourceChunks = compactPayloadSources(chunks
+      .filter(chunk => chunk.evidenceTypes?.includes("documentation"))
+      .filter(chunk => /changelog|timeline|roadmap|history/i.test(chunk.filePath ?? ""))
+      .filter(chunk => /isignal-docs/i.test(chunk.filePath ?? ""))
+      , 12)
+
+    console.log("\nANSWER\n")
+    console.log(documentationTimelineAnswer)
+
+    console.log("\nSOURCES\n")
+
+    for (const chunk of sourceChunks) {
+      console.log(
+        `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+      )
+    }
+
+    return
+  }
+
+  const documentationEligibilityAnswer = buildDocumentationEligibilityAnswer(chunks, question)
+
+  if (documentationEligibilityAnswer) {
+    const sourceChunks = compactPayloadSources(chunks
+      .filter(chunk => /isignal|auto copy|copy signal|bot copy|ois|subscription|bot|account|akun|equity|balance|mt4|mt5/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
+      .filter(chunk => !isCronDocChunk(chunk))
+      , 12)
+
+    console.log("\nANSWER\n")
+    console.log(documentationEligibilityAnswer)
+
+    console.log("\nSOURCES\n")
+
+    for (const chunk of sourceChunks) {
+      console.log(
+        `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+      )
+    }
 
     return
   }
