@@ -6,6 +6,13 @@ import express from "express"
 import { config } from "./lib/config.js"
 import { ensureCollection, qdrant } from "./lib/qdrant.js"
 import { deleteRelationshipGraphForScope, readRelationshipGraph } from "./lib/graph.js"
+import {
+  createKnowledgeNote,
+  deleteKnowledgeNote,
+  readKnowledgeNotes,
+  updateKnowledgeNote,
+  type KnowledgeNoteInput,
+} from "./lib/knowledge-notes.js"
 import type { ServiceType } from "./lib/chunker.js"
 
 const execFileAsync = promisify(execFile)
@@ -96,6 +103,10 @@ type IndexDocsBody = {
 type DeleteIndexBody = {
   repoName: string
   branchName?: string
+}
+
+type EvalBody = {
+  suite?: "baseline" | "edge"
 }
 
 function parseAskOutput(stdout: string): AskResult {
@@ -246,6 +257,20 @@ async function runIndexer(script: "src/index-repo.ts" | "src/index-docs.ts", arg
   const { stdout, stderr } = await execFileAsync(process.execPath, ["--import", "./register-ts-node.mjs", script, ...args], {
     cwd: rootDir,
     timeout: 30 * 60_000,
+    maxBuffer: 30 * 1024 * 1024,
+    windowsHide: true,
+  })
+
+  return {
+    raw: [stdout, stderr].filter(Boolean).join("\n"),
+  }
+}
+
+async function runEvaluationSuite(suite: "baseline" | "edge"): Promise<{ raw: string }> {
+  const script = suite === "edge" ? "src/edge-case-regression.ts" : "src/answer-regression.ts"
+  const { stdout, stderr } = await execFileAsync(process.execPath, ["--import", "./register-ts-node.mjs", script], {
+    cwd: rootDir,
+    timeout: 15 * 60_000,
     maxBuffer: 30 * 1024 * 1024,
     windowsHide: true,
   })
@@ -434,6 +459,86 @@ app.post("/api/index/docs", async (request, response) => {
     const stderr = (error as { stderr?: string }).stderr ?? ""
 
     response.status(500).json({
+      error: message,
+      raw: [stdout, stderr].filter(Boolean).join("\n"),
+    })
+  }
+})
+
+app.get("/api/knowledge/notes", async (_request, response) => {
+  try {
+    response.json({
+      notes: await readKnowledgeNotes(),
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(500).json({ error: message })
+  }
+})
+
+app.post("/api/knowledge/notes", async (request, response) => {
+  try {
+    const note = await createKnowledgeNote(request.body as KnowledgeNoteInput)
+
+    response.status(201).json({ note })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(400).json({ error: message })
+  }
+})
+
+app.put("/api/knowledge/notes/:id", async (request, response) => {
+  try {
+    const note = await updateKnowledgeNote(request.params.id, request.body as KnowledgeNoteInput)
+
+    response.json({ note })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const status = message.startsWith("Knowledge note not found:") ? 404 : 400
+
+    response.status(status).json({ error: message })
+  }
+})
+
+app.delete("/api/knowledge/notes/:id", async (request, response) => {
+  try {
+    const deleted = await deleteKnowledgeNote(request.params.id)
+
+    if (!deleted) {
+      response.status(404).json({ error: `Knowledge note not found: ${request.params.id}` })
+      return
+    }
+
+    response.json({ ok: true })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(500).json({ error: message })
+  }
+})
+
+app.post("/api/eval/run", async (request, response) => {
+  const body = request.body as EvalBody
+  const suite = body.suite === "edge" ? "edge" : "baseline"
+
+  try {
+    const result = await runEvaluationSuite(suite)
+
+    response.json({
+      ok: true,
+      suite,
+      ...result,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const stdout = (error as { stdout?: string }).stdout ?? ""
+    const stderr = (error as { stderr?: string }).stderr ?? ""
+
+    response.status(500).json({
+      ok: false,
+      suite,
       error: message,
       raw: [stdout, stderr].filter(Boolean).join("\n"),
     })

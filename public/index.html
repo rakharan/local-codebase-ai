@@ -290,7 +290,8 @@
     gap: 8px;
   }
   .manager-form input,
-  .manager-form select {
+  .manager-form select,
+  .manager-form textarea {
     width: 100%;
     padding: 8px 10px;
     border: 1px solid #30363d;
@@ -301,8 +302,16 @@
     outline: none;
   }
   .manager-form input:focus,
-  .manager-form select:focus { border-color: #58a6ff; }
+  .manager-form select:focus,
+  .manager-form textarea:focus { border-color: #58a6ff; }
+  .manager-form textarea {
+    min-height: 128px;
+    resize: vertical;
+    font-family: inherit;
+    line-height: 1.45;
+  }
   .manager-form .wide { grid-column: 1 / -1; }
+  .manager-panel.wide-panel { grid-column: 1 / -1; }
   .manager-checks {
     display: flex;
     gap: 12px;
@@ -363,6 +372,47 @@
   .manager-muted {
     color: #8b949e;
     font-size: 0.75rem;
+  }
+  .manager-list {
+    display: grid;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .manager-list-item {
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 10px;
+    background: #0d1117;
+  }
+  .manager-list-title {
+    color: #f0f6fc;
+    font-weight: 600;
+    font-size: 0.84rem;
+    margin-bottom: 4px;
+  }
+  .manager-list-meta {
+    color: #8b949e;
+    font-size: 0.74rem;
+    margin-bottom: 8px;
+  }
+  .manager-list-body {
+    color: #c9d1d9;
+    font-size: 0.78rem;
+    white-space: pre-wrap;
+    margin-bottom: 8px;
+  }
+  .manager-output {
+    min-height: 144px;
+    max-height: 320px;
+    overflow: auto;
+    white-space: pre-wrap;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    background: #0d1117;
+    padding: 10px;
+    color: #c9d1d9;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.74rem;
   }
 
   /* Chat Messages */
@@ -805,6 +855,35 @@
               <button class="manager-btn primary wide" onclick="indexDocsFromUi()">Run Docs Index</button>
             </div>
           </div>
+
+          <div class="manager-panel wide-panel">
+            <h2>Knowledge Notes</h2>
+            <div class="manager-form">
+              <input class="wide" id="noteTitle" placeholder="Title, e.g. iSignal flow change from BOD meeting" />
+              <input id="noteProjects" placeholder="projects, comma separated, e.g. isignal" />
+              <input id="noteAuthor" placeholder="author / owner" />
+              <select id="noteStatus">
+                <option value="confirmed">confirmed</option>
+                <option value="proposal">proposal</option>
+                <option value="deprecated">deprecated</option>
+              </select>
+              <textarea class="wide" id="noteBody" placeholder="Meeting notes, decisions, business rules, or documentation updates"></textarea>
+              <button class="manager-btn primary" onclick="saveKnowledgeNote()">Save Note</button>
+              <button class="manager-btn" onclick="resetKnowledgeNoteForm()">Cancel Edit</button>
+            </div>
+            <div class="manager-status" id="notesStatus"></div>
+            <div class="manager-list" id="knowledgeNotesList"></div>
+          </div>
+
+          <div class="manager-panel wide-panel">
+            <h2>Answer Evaluation</h2>
+            <div class="manager-actions">
+              <button class="manager-btn primary" onclick="runEvaluationSuite('baseline')">Run Baseline</button>
+              <button class="manager-btn" onclick="runEvaluationSuite('edge')">Run Edge Cases</button>
+            </div>
+            <div class="manager-status" id="evalStatus"></div>
+            <div class="manager-output" id="evalOutput">No evaluation run yet.</div>
+          </div>
         </div>
 
         <div class="manager-status" id="managerStatus"></div>
@@ -883,10 +962,16 @@ const settingsPanel = document.getElementById('settingsPanel');
 const mainEl = document.querySelector('.main');
 const managerStatus = document.getElementById('managerStatus');
 const indexSummaryRows = document.getElementById('indexSummaryRows');
+const notesStatus = document.getElementById('notesStatus');
+const knowledgeNotesList = document.getElementById('knowledgeNotesList');
+const evalStatus = document.getElementById('evalStatus');
+const evalOutput = document.getElementById('evalOutput');
 
 const STORAGE_KEY = 'lca_recent_searches';
 const MAX_RECENT = 10;
 let mermaidRenderCounter = 0;
+let knowledgeNotes = [];
+let editingKnowledgeNoteId = null;
 
 // In-memory conversation history
 let messages = [];
@@ -935,6 +1020,7 @@ function toggleSettings() {
 function showManager() {
   mainEl.classList.add('manager-active');
   loadIndexSummary();
+  loadKnowledgeNotes();
 }
 
 function showChat() {
@@ -1012,6 +1098,20 @@ function formatIndexHealth(item) {
   if (item.graphAmbiguousEdgeCount) parts.push(`<code>graphAmbiguous:${item.graphAmbiguousEdgeCount}</code>`);
 
   return parts.length > 0 ? parts.join(' ') : '<span class="manager-muted">ok</span>';
+}
+
+function formatDateTime(value) {
+  if (!value) return 'unknown';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+
+  return date.toLocaleString();
+}
+
+function truncateText(value, maxLength = 420) {
+  if (!value || value.length <= maxLength) return value || '';
+
+  return `${value.slice(0, maxLength)}...`;
 }
 
 async function loadIndexSummary() {
@@ -1150,6 +1250,155 @@ async function runIndexRequest(url, body, label) {
     await loadIndexSummary();
   } catch (err) {
     managerStatus.textContent = `${label} failed: ${err.message}`;
+  }
+}
+
+async function loadKnowledgeNotes() {
+  notesStatus.textContent = 'Loading notes...';
+  knowledgeNotesList.innerHTML = '<div class="manager-muted">Loading notes...</div>';
+
+  try {
+    const res = await fetch('/api/knowledge/notes');
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Failed to load notes');
+
+    knowledgeNotes = data.notes || [];
+    notesStatus.textContent = `${knowledgeNotes.length} mutable knowledge note(s).`;
+    renderKnowledgeNotes();
+  } catch (err) {
+    notesStatus.textContent = `Could not load notes: ${err.message}`;
+    knowledgeNotesList.innerHTML = '<div class="manager-muted">Knowledge notes API is not available.</div>';
+  }
+}
+
+function renderKnowledgeNotes() {
+  if (knowledgeNotes.length === 0) {
+    knowledgeNotesList.innerHTML = '<div class="manager-muted">No knowledge notes yet.</div>';
+    return;
+  }
+
+  knowledgeNotesList.innerHTML = knowledgeNotes.map(note => `
+    <div class="manager-list-item">
+      <div class="manager-list-title">${escapeHtml(note.title)}</div>
+      <div class="manager-list-meta">
+        <code>${escapeHtml(note.status)}</code>
+        ${(note.projectIds || []).map(project => `<code>${escapeHtml(project)}</code>`).join(' ') || '<span class="manager-muted">unassigned</span>'}
+        · ${escapeHtml(note.author || 'unknown')}
+        · updated ${escapeHtml(formatDateTime(note.updatedAt))}
+      </div>
+      <div class="manager-list-body">${escapeHtml(truncateText(note.body))}</div>
+      <div class="manager-actions">
+        <button class="manager-btn" onclick="editKnowledgeNote('${note.id}')">Edit</button>
+        <button class="manager-btn danger" onclick="deleteKnowledgeNote('${note.id}')">Delete</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function resetKnowledgeNoteForm() {
+  editingKnowledgeNoteId = null;
+  document.getElementById('noteTitle').value = '';
+  document.getElementById('noteProjects').value = '';
+  document.getElementById('noteAuthor').value = '';
+  document.getElementById('noteStatus').value = 'confirmed';
+  document.getElementById('noteBody').value = '';
+}
+
+function editKnowledgeNote(noteId) {
+  const note = knowledgeNotes.find(item => item.id === noteId);
+  if (!note) return;
+
+  editingKnowledgeNoteId = note.id;
+  document.getElementById('noteTitle').value = note.title || '';
+  document.getElementById('noteProjects').value = (note.projectIds || []).join(', ');
+  document.getElementById('noteAuthor').value = note.author || '';
+  document.getElementById('noteStatus').value = note.status || 'confirmed';
+  document.getElementById('noteBody').value = note.body || '';
+  notesStatus.textContent = `Editing note: ${note.title}`;
+}
+
+async function saveKnowledgeNote() {
+  const title = document.getElementById('noteTitle').value.trim();
+  const body = document.getElementById('noteBody').value.trim();
+
+  if (!title || !body) {
+    notesStatus.textContent = 'Title and body are required.';
+    return;
+  }
+
+  const payload = {
+    title,
+    body,
+    projectIds: splitCsv(document.getElementById('noteProjects').value),
+    author: document.getElementById('noteAuthor').value.trim() || undefined,
+    status: document.getElementById('noteStatus').value,
+  };
+  const url = editingKnowledgeNoteId ? `/api/knowledge/notes/${editingKnowledgeNoteId}` : '/api/knowledge/notes';
+  const method = editingKnowledgeNoteId ? 'PUT' : 'POST';
+
+  notesStatus.textContent = editingKnowledgeNoteId ? 'Updating note and Qdrant point...' : 'Saving note and indexing it...';
+
+  try {
+    const res = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Save failed');
+
+    notesStatus.textContent = `Saved note: ${data.note.title}`;
+    resetKnowledgeNoteForm();
+    await loadKnowledgeNotes();
+    await loadIndexSummary();
+  } catch (err) {
+    notesStatus.textContent = `Save failed: ${err.message}`;
+  }
+}
+
+async function deleteKnowledgeNote(noteId) {
+  const note = knowledgeNotes.find(item => item.id === noteId);
+  const title = note?.title || noteId;
+
+  if (!confirm(`Delete knowledge note "${title}"?`)) return;
+
+  notesStatus.textContent = `Deleting note: ${title}`;
+
+  try {
+    const res = await fetch(`/api/knowledge/notes/${noteId}`, { method: 'DELETE' });
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Delete failed');
+
+    if (editingKnowledgeNoteId === noteId) resetKnowledgeNoteForm();
+    notesStatus.textContent = `Deleted note: ${title}`;
+    await loadKnowledgeNotes();
+    await loadIndexSummary();
+  } catch (err) {
+    notesStatus.textContent = `Delete failed: ${err.message}`;
+  }
+}
+
+async function runEvaluationSuite(suite) {
+  evalStatus.textContent = `Running ${suite} evaluation...`;
+  evalOutput.textContent = 'Evaluation is running. This can take several minutes.';
+
+  try {
+    const res = await fetch('/api/eval/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ suite }),
+    });
+    const data = await res.json();
+
+    evalOutput.textContent = data.raw || data.error || 'No output.';
+    if (!res.ok) throw new Error(data.error || `${suite} evaluation failed`);
+
+    evalStatus.textContent = `${suite} evaluation passed.`;
+  } catch (err) {
+    evalStatus.textContent = `${suite} evaluation failed: ${err.message}`;
   }
 }
 
