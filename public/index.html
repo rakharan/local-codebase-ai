@@ -310,8 +310,72 @@
     font-family: inherit;
     line-height: 1.45;
   }
+  .manager-form textarea.compact-area {
+    min-height: 74px;
+  }
   .manager-form .wide { grid-column: 1 / -1; }
   .manager-panel.wide-panel { grid-column: 1 / -1; }
+  .manager-field {
+    display: grid;
+    gap: 4px;
+  }
+  .manager-field.wide { grid-column: 1 / -1; }
+  .manager-field label {
+    color: #8b949e;
+    font-size: 0.72rem;
+    font-weight: 600;
+  }
+  .manager-field-hint {
+    color: #6e7681;
+    font-size: 0.7rem;
+  }
+  .manager-subgrid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    grid-column: 1 / -1;
+  }
+  .manager-section-label {
+    grid-column: 1 / -1;
+    color: #f0f6fc;
+    font-size: 0.78rem;
+    font-weight: 700;
+    margin-top: 6px;
+  }
+  .manager-search-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 12px;
+  }
+  .manager-search-row input {
+    flex: 1;
+    min-width: 180px;
+    padding: 8px 10px;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    background: #0d1117;
+    color: #c9d1d9;
+    font-size: 0.8rem;
+    outline: none;
+  }
+  .manager-search-row input:focus { border-color: #58a6ff; }
+  .manager-chip-row {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+  .manager-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    border: 1px solid #30363d;
+    border-radius: 999px;
+    background: #161b22;
+    color: #c9d1d9;
+    font-size: 0.7rem;
+  }
   .manager-checks {
     display: flex;
     gap: 12px;
@@ -736,6 +800,8 @@
     .sidebar { display: none; }
     .manager-grid { grid-template-columns: 1fr; }
     .manager-form { grid-template-columns: 1fr; }
+    .manager-subgrid { grid-template-columns: 1fr; }
+    .manager-search-row { align-items: stretch; flex-direction: column; }
   }
 </style>
 </head>
@@ -859,29 +925,82 @@
           <div class="manager-panel wide-panel">
             <h2>Project Registry</h2>
             <div class="manager-form">
-              <input id="registryProjectId" placeholder="projectId, e.g. wallet" />
-              <input id="registryName" placeholder="name, e.g. Wallet" />
-              <select id="registryKind">
-                <option value="domain">domain</option>
-                <option value="service">service</option>
-                <option value="broker">broker</option>
-                <option value="concept">concept</option>
-              </select>
-              <input id="registryDescription" placeholder="description" />
-              <textarea class="wide" id="registryAliases" placeholder="aliases, comma or newline separated"></textarea>
-              <textarea class="wide" id="registryRepos" placeholder="repos, comma or newline separated"></textarea>
-              <textarea class="wide" id="registryDocs" placeholder="docs folders, comma or newline separated"></textarea>
-              <textarea class="wide" id="registryKeywords" placeholder="keywords, comma or newline separated"></textarea>
-              <textarea class="wide" id="registryRoutes" placeholder="routes, comma or newline separated"></textarea>
-              <textarea class="wide" id="registryFunctions" placeholder="functions, comma or newline separated"></textarea>
-              <textarea class="wide" id="registryQueues" placeholder="queues, comma or newline separated"></textarea>
-              <textarea class="wide" id="registryTables" placeholder="tables, comma or newline separated"></textarea>
-              <textarea class="wide" id="registryPathRules" placeholder="path rules, one per line: repo | pattern | projectId"></textarea>
-              <textarea class="wide" id="registryNotes" placeholder="notes, one per line"></textarea>
+              <div class="manager-subgrid">
+                <div class="manager-field">
+                  <label for="registryProjectId">Project ID</label>
+                  <input id="registryProjectId" placeholder="wallet" />
+                </div>
+                <div class="manager-field">
+                  <label for="registryName">Name</label>
+                  <input id="registryName" placeholder="Wallet" />
+                </div>
+                <div class="manager-field">
+                  <label for="registryKind">Kind</label>
+                  <select id="registryKind">
+                    <option value="domain">domain</option>
+                    <option value="service">service</option>
+                    <option value="broker">broker</option>
+                    <option value="concept">concept</option>
+                  </select>
+                </div>
+              </div>
+              <div class="manager-field wide">
+                <label for="registryDescription">Description</label>
+                <input id="registryDescription" placeholder="Short product/domain description" />
+              </div>
+
+              <div class="manager-section-label">Matching Signals</div>
+              <div class="manager-field">
+                <label for="registryAliases">Aliases</label>
+                <textarea class="compact-area" id="registryAliases" placeholder="wallet&#10;balance"></textarea>
+              </div>
+              <div class="manager-field">
+                <label for="registryRepos">Repos</label>
+                <textarea class="compact-area" id="registryRepos" placeholder="tf2-ois"></textarea>
+              </div>
+              <div class="manager-field wide">
+                <label for="registryKeywords">Keywords</label>
+                <textarea class="compact-area" id="registryKeywords" placeholder="transaction&#10;withdraw&#10;deposit"></textarea>
+              </div>
+
+              <div class="manager-section-label">Code Evidence</div>
+              <div class="manager-field">
+                <label for="registryRoutes">Routes</label>
+                <textarea class="compact-area" id="registryRoutes" placeholder="/ois/api/v1/wallet/"></textarea>
+              </div>
+              <div class="manager-field">
+                <label for="registryFunctions">Functions</label>
+                <textarea class="compact-area" id="registryFunctions" placeholder="WalletService.create"></textarea>
+              </div>
+              <div class="manager-field">
+                <label for="registryQueues">Queues</label>
+                <textarea class="compact-area" id="registryQueues" placeholder="queue-name"></textarea>
+              </div>
+              <div class="manager-field">
+                <label for="registryTables">Tables</label>
+                <textarea class="compact-area" id="registryTables" placeholder="wallet_transactions"></textarea>
+              </div>
+              <div class="manager-field">
+                <label for="registryDocs">Docs</label>
+                <textarea class="compact-area" id="registryDocs" placeholder="wallet-docs"></textarea>
+              </div>
+              <div class="manager-field">
+                <label for="registryPathRules">Path Rules</label>
+                <textarea class="compact-area" id="registryPathRules" placeholder="tf2-ois | components/wallet/** | wallet"></textarea>
+                <div class="manager-field-hint">Format: repo | pattern | projectId</div>
+              </div>
+              <div class="manager-field wide">
+                <label for="registryNotes">Notes</label>
+                <textarea class="compact-area" id="registryNotes" placeholder="Repo is shared; only tag confident wallet chunks."></textarea>
+              </div>
               <button class="manager-btn primary" onclick="saveRegistryEntry()">Save Project</button>
               <button class="manager-btn" onclick="resetRegistryForm()">Cancel Edit</button>
             </div>
             <div class="manager-status" id="registryStatus"></div>
+            <div class="manager-search-row">
+              <input id="registrySearch" placeholder="Search projects, repos, routes, tables..." oninput="renderRegistryEntries()" />
+              <button class="manager-btn" onclick="resetRegistryForm()">New Project</button>
+            </div>
             <div class="manager-list" id="registryList"></div>
           </div>
 
@@ -993,6 +1112,7 @@ const managerStatus = document.getElementById('managerStatus');
 const indexSummaryRows = document.getElementById('indexSummaryRows');
 const registryStatus = document.getElementById('registryStatus');
 const registryList = document.getElementById('registryList');
+const registrySearch = document.getElementById('registrySearch');
 const notesStatus = document.getElementById('notesStatus');
 const knowledgeNotesList = document.getElementById('knowledgeNotesList');
 const evalStatus = document.getElementById('evalStatus');
@@ -1323,6 +1443,38 @@ function affectedReposForEntry(entry) {
   ].filter(Boolean))].sort();
 }
 
+function searchableRegistryText(entry) {
+  return [
+    entry.name,
+    entry.projectId,
+    entry.kind,
+    entry.description,
+    ...(entry.aliases || []),
+    ...(entry.repos || []),
+    ...(entry.docs || []),
+    ...(entry.keywords || []),
+    ...(entry.routes || []),
+    ...(entry.functions || []),
+    ...(entry.queues || []),
+    ...(entry.tables || []),
+    ...(entry.notes || []),
+    ...(entry.pathRules || []).flatMap(rule => [rule.repo, rule.pattern, rule.projectId]),
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function formatEntryCounts(entry) {
+  return [
+    ['aliases', entry.aliases],
+    ['keywords', entry.keywords],
+    ['routes', entry.routes],
+    ['tables', entry.tables],
+    ['rules', entry.pathRules],
+  ]
+    .filter(([, values]) => (values || []).length > 0)
+    .map(([label, values]) => `<span class="manager-chip">${label}:${values.length}</span>`)
+    .join('');
+}
+
 async function loadRegistry() {
   registryStatus.textContent = 'Loading project registry...';
   registryList.innerHTML = '<div class="manager-muted">Loading registry...</div>';
@@ -1343,12 +1495,26 @@ async function loadRegistry() {
 }
 
 function renderRegistryEntries() {
+  const query = (registrySearch?.value || '').trim().toLowerCase();
+  const entries = query
+    ? registryEntries.filter(entry => searchableRegistryText(entry).includes(query))
+    : registryEntries;
+
   if (registryEntries.length === 0) {
     registryList.innerHTML = '<div class="manager-muted">No project registry entries yet.</div>';
     return;
   }
 
-  registryList.innerHTML = registryEntries.map(entry => {
+  if (entries.length === 0) {
+    registryList.innerHTML = '<div class="manager-muted">No registry entries match this search.</div>';
+    return;
+  }
+
+  registryStatus.textContent = query
+    ? `${entries.length}/${registryEntries.length} registry entries shown.`
+    : `${registryEntries.length} project registry entr${registryEntries.length === 1 ? 'y' : 'ies'}.`;
+
+  registryList.innerHTML = entries.map(entry => {
     const projectId = entry.projectId || entry.name;
     const entryName = entry.name;
     const affectedRepos = affectedReposForEntry(entry);
@@ -1361,7 +1527,10 @@ function renderRegistryEntries() {
           · repos: ${affectedRepos.length > 0 ? affectedRepos.map(repo => `<code>${escapeHtml(repo)}</code>`).join(' ') : '<span class="manager-muted">none</span>'}
         </div>
         <div class="manager-list-body">${escapeHtml(entry.description || 'No description.')}</div>
-        <div class="manager-muted">
+        <div class="manager-chip-row">
+          ${formatEntryCounts(entry)}
+        </div>
+        <div class="manager-muted" style="margin-top:8px;">
           aliases: ${(entry.aliases || []).slice(0, 8).map(value => `<code>${escapeHtml(value)}</code>`).join(' ') || 'none'}
         </div>
         <div class="manager-actions" style="margin-top:8px;">
