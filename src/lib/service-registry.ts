@@ -21,6 +21,11 @@ export type ServiceRegistryEntry = {
     pattern: string
     projectId: string
   }>
+  repoPaths?: Array<{
+    repo: string
+    path: string
+    serviceType?: "api" | "worker" | "cron" | "library" | "unknown"
+  }>
   notes?: string[]
 }
 
@@ -45,6 +50,7 @@ export type RegistryExpansion = {
 
 const registryPath = path.join(process.cwd(), "config", "services.json")
 const registryKinds = ["service", "broker", "domain", "concept"] as const
+const registryServiceTypes = ["api", "worker", "cron", "library", "unknown"] as const
 
 function unique(values: string[], max = 80): string[] {
   return [...new Set(values.map(value => value.trim()).filter(Boolean))].slice(0, max)
@@ -105,6 +111,35 @@ function normalizePathRules(value: unknown): NonNullable<ServiceRegistryEntry["p
     .filter((rule): rule is { repo: string; pattern: string; projectId: string } => Boolean(rule))
 }
 
+function normalizeServiceType(value: unknown): NonNullable<NonNullable<ServiceRegistryEntry["repoPaths"]>[number]["serviceType"]> {
+  return registryServiceTypes.includes(value as NonNullable<NonNullable<ServiceRegistryEntry["repoPaths"]>[number]["serviceType"]>)
+    ? value as NonNullable<NonNullable<ServiceRegistryEntry["repoPaths"]>[number]["serviceType"]>
+    : "unknown"
+}
+
+function normalizeRepoPaths(value: unknown): NonNullable<ServiceRegistryEntry["repoPaths"]> {
+  if (!Array.isArray(value)) return []
+
+  return value
+    .map(repoPath => {
+      if (!repoPath || typeof repoPath !== "object") return undefined
+
+      const record = repoPath as Record<string, unknown>
+      const repo = asString(record.repo)
+      const localPath = asString(record.path)
+      const serviceType = normalizeServiceType(record.serviceType)
+
+      if (!repo || !localPath) return undefined
+
+      return {
+        repo,
+        path: localPath,
+        serviceType,
+      }
+    })
+    .filter((repoPath): repoPath is { repo: string; path: string; serviceType: "api" | "worker" | "cron" | "library" | "unknown" } => Boolean(repoPath))
+}
+
 export function normalizeServiceRegistryEntry(input: unknown): ServiceRegistryEntry {
   if (!input || typeof input !== "object") {
     throw new Error("Registry entry must be an object")
@@ -135,6 +170,7 @@ export function normalizeServiceRegistryEntry(input: unknown): ServiceRegistryEn
     queues: asStringArray(record.queues),
     tables: asStringArray(record.tables),
     pathRules: normalizePathRules(record.pathRules),
+    repoPaths: normalizeRepoPaths(record.repoPaths),
     notes: asStringArray(record.notes),
   }
 
@@ -150,7 +186,42 @@ export function affectedReposForRegistryEntry(entry: ServiceRegistryEntry): stri
   return unique([
     ...entry.repos,
     ...(entry.pathRules ?? []).map(rule => rule.repo),
+    ...(entry.repoPaths ?? []).map(repoPath => repoPath.repo),
   ], 100)
+}
+
+export function findServiceRegistryEntry(entryName: string, entries = loadServiceRegistry()): ServiceRegistryEntry | undefined {
+  const lookupName = entryName.trim().toLowerCase()
+
+  return entries.find(entry => entry.name.toLowerCase() === lookupName)
+}
+
+export function repoPathConfigsForEntry(entry: ServiceRegistryEntry, entries = loadServiceRegistry()): Array<{
+  repo: string
+  path: string
+  serviceType: "api" | "worker" | "cron" | "library" | "unknown"
+}> {
+  const affectedRepos = new Set(affectedReposForRegistryEntry(entry).map(repo => repo.toLowerCase()))
+  const byRepo = new Map<string, {
+    repo: string
+    path: string
+    serviceType: "api" | "worker" | "cron" | "library" | "unknown"
+  }>()
+
+  for (const candidate of entries) {
+    for (const repoPath of candidate.repoPaths ?? []) {
+      if (!affectedRepos.has(repoPath.repo.toLowerCase())) continue
+      if (byRepo.has(repoPath.repo.toLowerCase())) continue
+
+      byRepo.set(repoPath.repo.toLowerCase(), {
+        repo: repoPath.repo,
+        path: repoPath.path,
+        serviceType: repoPath.serviceType ?? "unknown",
+      })
+    }
+  }
+
+  return [...byRepo.values()].sort((left, right) => left.repo.localeCompare(right.repo))
 }
 
 export function normalizeServiceRegistryFile(input: ServiceRegistryInput): ServiceRegistryFile {

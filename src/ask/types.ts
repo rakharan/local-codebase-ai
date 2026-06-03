@@ -22,6 +22,9 @@ export type RetrievedPayload = {
   exchangeNames?: string[]
   dbTables?: string[]
   contentHash?: string
+  noteStatus?: "confirmed" | "proposal" | "deprecated"
+  noteAuthor?: string
+  noteUpdatedAt?: string
 }
 
 export type RetrievedChunk = {

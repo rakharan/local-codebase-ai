@@ -965,6 +965,11 @@
                 <div class="manager-field-hint">Repo names as indexed, without paths. Shared repos are allowed.</div>
               </div>
               <div class="manager-field wide">
+                <label for="registryRepoPaths">Saved Local Repo Paths</label>
+                <textarea class="compact-area" id="registryRepoPaths" placeholder="tf2-ois | C:/GIT/work/tf2-ois | api&#10;fa-trade-publisher | C:/GIT/work/fa-trade-publisher | worker"></textarea>
+                <div class="manager-field-hint">Optional. Format: repo | local path | serviceType. Enables one-click reindex for affected repos.</div>
+              </div>
+              <div class="manager-field wide">
                 <label for="registryKeywords">Keywords</label>
                 <textarea class="compact-area" id="registryKeywords" placeholder="transaction&#10;withdraw&#10;deposit&#10;wallet_balance"></textarea>
                 <div class="manager-field-hint">Code/domain words that should boost retrieval and project tagging.</div>
@@ -1463,6 +1468,31 @@ function parsePathRules(value) {
     });
 }
 
+function parseRepoPaths(value) {
+  return (value || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      const parts = line.split('|').map(part => part.trim());
+      if (parts.length < 2) {
+        throw new Error(`Invalid repo path: ${line}. Use: repo | local path | serviceType`);
+      }
+
+      return {
+        repo: parts[0],
+        path: parts[1],
+        serviceType: parts[2] || 'unknown',
+      };
+    });
+}
+
+function formatRepoPaths(repoPaths) {
+  return (repoPaths || [])
+    .map(repoPath => `${repoPath.repo} | ${repoPath.path} | ${repoPath.serviceType || 'unknown'}`)
+    .join('\n');
+}
+
 function formatPathRules(rules) {
   return (rules || [])
     .map(rule => `${rule.repo} | ${rule.pattern} | ${rule.projectId}`)
@@ -1474,6 +1504,10 @@ function affectedReposForEntry(entry) {
     ...(entry.repos || []),
     ...(entry.pathRules || []).map(rule => rule.repo),
   ].filter(Boolean))].sort();
+}
+
+function savedPathReposForEntry(entry) {
+  return new Set((entry.repoPaths || []).map(repoPath => (repoPath.repo || '').toLowerCase()).filter(Boolean));
 }
 
 function searchableRegistryText(entry) {
@@ -1492,6 +1526,7 @@ function searchableRegistryText(entry) {
     ...(entry.tables || []),
     ...(entry.notes || []),
     ...(entry.pathRules || []).flatMap(rule => [rule.repo, rule.pattern, rule.projectId]),
+    ...(entry.repoPaths || []).flatMap(repoPath => [repoPath.repo, repoPath.path, repoPath.serviceType]),
   ].filter(Boolean).join(' ').toLowerCase();
 }
 
@@ -1502,6 +1537,7 @@ function formatEntryCounts(entry) {
     ['routes', entry.routes],
     ['tables', entry.tables],
     ['rules', entry.pathRules],
+    ['paths', entry.repoPaths],
   ]
     .filter(([, values]) => (values || []).length > 0)
     .map(([label, values]) => `<span class="manager-chip">${label}:${values.length}</span>`)
@@ -1551,6 +1587,8 @@ function renderRegistryEntries() {
     const projectId = entry.projectId || entry.name;
     const entryName = entry.name;
     const affectedRepos = affectedReposForEntry(entry);
+    const savedPathRepos = savedPathReposForEntry(entry);
+    const missingPathRepos = affectedRepos.filter(repo => !savedPathRepos.has(repo.toLowerCase()));
 
     return `
       <div class="manager-list-item">
@@ -1566,8 +1604,13 @@ function renderRegistryEntries() {
         <div class="manager-muted" style="margin-top:8px;">
           aliases: ${(entry.aliases || []).slice(0, 8).map(value => `<code>${escapeHtml(value)}</code>`).join(' ') || 'none'}
         </div>
+        <div class="manager-muted" style="margin-top:6px;">
+          reindex paths: ${(entry.repoPaths || []).length > 0 ? (entry.repoPaths || []).map(repoPath => `<code>${escapeHtml(repoPath.repo)}</code>`).join(' ') : 'none'}
+          ${missingPathRepos.length > 0 ? `<br>missing paths: ${missingPathRepos.map(repo => `<code>${escapeHtml(repo)}</code>`).join(' ')}` : ''}
+        </div>
         <div class="manager-actions" style="margin-top:8px;">
           <button class="manager-btn" onclick="editRegistryEntry('${escapeHtml(entryName).replace(/'/g, "\\'")}')">Edit</button>
+          <button class="manager-btn" onclick="reindexRegistryEntry('${escapeHtml(entryName).replace(/'/g, "\\'")}')">Reindex Affected</button>
           <button class="manager-btn danger" onclick="deleteRegistryEntry('${escapeHtml(entryName).replace(/'/g, "\\'")}')">Delete</button>
         </div>
       </div>
@@ -1583,6 +1626,7 @@ function resetRegistryForm() {
   document.getElementById('registryDescription').value = '';
   document.getElementById('registryAliases').value = '';
   document.getElementById('registryRepos').value = '';
+  document.getElementById('registryRepoPaths').value = '';
   document.getElementById('registryDocs').value = '';
   document.getElementById('registryKeywords').value = '';
   document.getElementById('registryRoutes').value = '';
@@ -1604,6 +1648,7 @@ function editRegistryEntry(entryName) {
   document.getElementById('registryDescription').value = entry.description || '';
   document.getElementById('registryAliases').value = formatListForTextarea(entry.aliases);
   document.getElementById('registryRepos').value = formatListForTextarea(entry.repos);
+  document.getElementById('registryRepoPaths').value = formatRepoPaths(entry.repoPaths);
   document.getElementById('registryDocs').value = formatListForTextarea(entry.docs);
   document.getElementById('registryKeywords').value = formatListForTextarea(entry.keywords);
   document.getElementById('registryRoutes').value = formatListForTextarea(entry.routes);
@@ -1625,8 +1670,10 @@ async function saveRegistryEntry() {
   }
 
   let pathRules;
+  let repoPaths;
   try {
     pathRules = parsePathRules(document.getElementById('registryPathRules').value);
+    repoPaths = parseRepoPaths(document.getElementById('registryRepoPaths').value);
   } catch (err) {
     registryStatus.textContent = err.message;
     return;
@@ -1640,6 +1687,7 @@ async function saveRegistryEntry() {
     description: document.getElementById('registryDescription').value.trim() || undefined,
     aliases: splitCsv(document.getElementById('registryAliases').value),
     repos: splitCsv(document.getElementById('registryRepos').value),
+    repoPaths,
     docs: splitCsv(document.getElementById('registryDocs').value),
     keywords: splitCsv(document.getElementById('registryKeywords').value),
     routes: splitCsv(document.getElementById('registryRoutes').value),
@@ -1668,6 +1716,52 @@ async function saveRegistryEntry() {
     registryStatus.textContent = `Saved ${data.entry.name}. Reindex affected repos for chunk tags: ${(data.affectedRepos || []).join(', ') || 'none'}.`;
   } catch (err) {
     registryStatus.textContent = `Save failed: ${err.message}`;
+  }
+}
+
+async function reindexRegistryEntry(entryName) {
+  const entry = registryEntries.find(item => item.name === entryName);
+  const name = entry?.name || entryName;
+  const affectedRepos = entry ? affectedReposForEntry(entry) : [];
+  const savedPathRepos = entry ? savedPathReposForEntry(entry) : new Set();
+  const missingPathRepos = affectedRepos.filter(repo => !savedPathRepos.has(repo.toLowerCase()));
+
+  if (!entry || (entry.repoPaths || []).length === 0) {
+    registryStatus.textContent = `No saved local repo paths for ${name}. Add Saved Local Repo Paths first.`;
+    return;
+  }
+
+  if (!confirm(`Reindex affected repos for "${name}" with --replace-repo?\n\nKnown paths: ${(entry.repoPaths || []).map(repoPath => repoPath.repo).join(', ')}\nMissing paths: ${missingPathRepos.join(', ') || 'none'}\n\nThis can take a while.`)) {
+    return;
+  }
+
+  registryStatus.textContent = `Reindexing affected repos for ${name}. Keep this tab open.`;
+
+  try {
+    const res = await fetch(`/api/registry/entries/${encodeURIComponent(entryName)}/reindex`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(`${data.error || 'Reindex failed'}\n${data.raw || ''}`.trim());
+    }
+
+    const summaries = (data.results || []).map(result => {
+      const lastLines = (result.raw || '').split('\n').slice(-5).join('\n');
+      return `${result.repo} (${result.serviceType})\n${lastLines}`;
+    }).join('\n\n');
+
+    registryStatus.textContent = [
+      `Reindexed ${data.results?.length || 0} repo(s) for ${name}.`,
+      data.missingRepos?.length ? `Missing saved paths: ${data.missingRepos.join(', ')}` : undefined,
+      summaries,
+    ].filter(Boolean).join('\n\n');
+    await loadIndexSummary();
+  } catch (err) {
+    registryStatus.textContent = `Reindex failed: ${err.message}`;
   }
 }
 

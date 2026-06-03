@@ -16,7 +16,9 @@ import {
 import {
   affectedReposForRegistryEntry,
   deleteServiceRegistryEntry,
+  findServiceRegistryEntry,
   readServiceRegistryFile,
+  repoPathConfigsForEntry,
   upsertServiceRegistryEntry,
   writeServiceRegistryFile,
   type ServiceRegistryInput,
@@ -115,6 +117,12 @@ type DeleteIndexBody = {
 
 type EvalBody = {
   suite?: "baseline" | "edge"
+}
+
+type RegistryReindexBody = {
+  maxChunks?: number
+  indexComments?: boolean
+  indexCommits?: boolean
 }
 
 function parseAskOutput(stdout: string): AskResult {
@@ -525,6 +533,67 @@ app.delete("/api/registry/entries/:entryName", async (request, response) => {
     const status = message.startsWith("Registry entry not found:") ? 404 : 400
 
     response.status(status).json({ error: message })
+  }
+})
+
+app.post("/api/registry/entries/:entryName/reindex", async (request, response) => {
+  const body = request.body as RegistryReindexBody
+
+  try {
+    const registry = await readServiceRegistryFile()
+    const entry = findServiceRegistryEntry(request.params.entryName, registry.entries)
+
+    if (!entry) {
+      response.status(404).json({ error: `Registry entry not found: ${request.params.entryName}` })
+      return
+    }
+
+    const affectedRepos = affectedReposForRegistryEntry(entry)
+    const repoPathConfigs = repoPathConfigsForEntry(entry, registry.entries)
+    const knownRepoNames = new Set(repoPathConfigs.map(repoPath => repoPath.repo.toLowerCase()))
+    const missingRepos = affectedRepos.filter(repoName => !knownRepoNames.has(repoName.toLowerCase()))
+    const results: Array<{ repo: string; path: string; serviceType: string; raw: string }> = []
+
+    for (const repoPathConfig of repoPathConfigs) {
+      const args = [
+        repoPathConfig.path,
+        "--repo-name",
+        repoPathConfig.repo,
+        "--service-type",
+        repoPathConfig.serviceType,
+        "--replace-repo",
+      ]
+
+      if (body.maxChunks) args.push("--max-chunks", String(body.maxChunks))
+      if (body.indexComments) args.push("--index-comments")
+      if (body.indexCommits) args.push("--index-commits")
+
+      const result = await runIndexer("src/index-repo.ts", args)
+
+      results.push({
+        repo: repoPathConfig.repo,
+        path: repoPathConfig.path,
+        serviceType: repoPathConfig.serviceType,
+        raw: result.raw,
+      })
+    }
+
+    response.json({
+      ok: true,
+      entryName: entry.name,
+      affectedRepos,
+      missingRepos,
+      results,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const stdout = (error as { stdout?: string }).stdout ?? ""
+    const stderr = (error as { stderr?: string }).stderr ?? ""
+
+    response.status(500).json({
+      error: message,
+      raw: [stdout, stderr].filter(Boolean).join("\n"),
+    })
   }
 })
 

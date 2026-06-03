@@ -2463,6 +2463,7 @@ function buildEvidenceInventory(chunks: RetrievedPayload[], question: string): s
     16,
   )
   const evidenceTypes = unique(chunks.flatMap(chunk => chunk.evidenceTypes ?? []), 16)
+  const confidenceLabels = unique(chunks.map(evidenceConfidenceLabel), 16)
   const routes = unique(chunks.flatMap(chunk => chunk.routes ?? []), 16)
   const symbols = unique(chunks.flatMap(chunk => chunk.symbols ?? []), 24)
   const messageNames = unique(chunks.flatMap(chunk => chunk.messageNames ?? []), 16)
@@ -2477,6 +2478,7 @@ function buildEvidenceInventory(chunks: RetrievedPayload[], question: string): s
   )
   const asksDb = questionAsksAboutDatabase(question)
   const asksFlow = questionAsksAboutServicesOrFlow(question)
+  const derivedFacts = extractCodeDerivedFacts(chunks, 14)
   const dbEvidencePresent = dbTables.length > 0 || evidenceTypes.some(type => type === "raw_sql" || type === "db_model")
   const flowEvidencePresent =
     routes.length > 0 ||
@@ -2489,6 +2491,7 @@ function buildEvidenceInventory(chunks: RetrievedPayload[], question: string): s
   return [
     `Confirmed repos/services: ${repos.join(", ") || "none"}`,
     `Confirmed evidence types: ${evidenceTypes.join(", ") || "none"}`,
+    `Evidence confidence labels: ${confidenceLabels.join(", ") || "none"}`,
     `Confirmed routes: ${routes.join(", ") || "none"}`,
     `Confirmed symbols/functions: ${symbols.join(", ") || "none"}`,
     `Confirmed message/RPC names: ${messageNames.join(", ") || "none"}`,
@@ -2499,7 +2502,34 @@ function buildEvidenceInventory(chunks: RetrievedPayload[], question: string): s
     `Database/table evidence present: ${dbEvidencePresent ? "yes" : "no"}`,
     `Service/flow evidence requested: ${asksFlow ? "yes" : "no"}`,
     `Service/flow evidence present: ${flowEvidencePresent ? "yes" : "no"}`,
+    `Code-derived facts from retrieved lines: ${derivedFacts.length > 0 ? derivedFacts.join(" | ") : "none"}`,
   ].join("\n")
+}
+
+function extractCodeDerivedFacts(chunks: RetrievedPayload[], maxFacts: number): string[] {
+  const facts: string[] = []
+  const factLinePattern = /validationError|request\.body|request\.query|request\.params|req\.body|req\.query|Joi\.|check\(|throw new|return\s+|module\.exports|exports\.\w+|const\s+[A-Z0-9_]{3,}|let\s+[A-Z0-9_]{3,}|var\s+[A-Z0-9_]{3,}|>=|<=|===|!==|\*\s*[a-zA-Z_][\w.]*/i
+
+  for (const chunk of chunks) {
+    const content = chunk.content ?? ""
+    const lines = content.split(/\r?\n/)
+
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index]?.trim().replace(/\s+/g, " ") ?? ""
+      if (line.length < 12 || line.length > 180) continue
+      if (!factLinePattern.test(line)) continue
+      if (/console\.log|describe\(|it\(|expect\(/i.test(line)) continue
+
+      const lineNumber = (chunk.startLine ?? 1) + index
+      facts.push(`${line} (${chunk.repoName ?? "unknown"}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${lineNumber})`)
+
+      if (facts.length >= maxFacts * 3) break
+    }
+
+    if (facts.length >= maxFacts * 3) break
+  }
+
+  return unique(facts, maxFacts)
 }
 
 function buildStructuralEvidenceAnswer(chunks: RetrievedPayload[], question: string): string {
@@ -3346,7 +3376,31 @@ function buildVocabularyAnswer(chunks: RetrievedPayload[], question: string, reg
 }
 
 function payloadSource(chunk: RetrievedPayload): string {
-  return `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`
+  return `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} [${evidenceConfidenceLabel(chunk)}]`
+}
+
+function evidenceConfidenceLabel(chunk: RetrievedPayload): string {
+  const evidenceTypes = new Set(chunk.evidenceTypes ?? [])
+  const filePath = chunk.filePath ?? ""
+
+  if (filePath.startsWith("knowledge-notes://")) {
+    if (chunk.noteStatus === "proposal") return "proposal note"
+    if (chunk.noteStatus === "deprecated") return "deprecated note"
+    return "confirmed note"
+  }
+
+  if ((chunk.routes?.length ?? 0) > 0 || evidenceTypes.has("api_route")) return "confirmed route"
+  if (evidenceTypes.has("controller")) return "confirmed handler code"
+  if (evidenceTypes.has("raw_sql")) return "confirmed SQL"
+  if (evidenceTypes.has("db_model")) return "confirmed DB model"
+  if (evidenceTypes.has("rabbitmq_consumer")) return "confirmed queue consumer"
+  if (evidenceTypes.has("rabbitmq_publisher")) return "confirmed queue publisher"
+  if (evidenceTypes.has("env_config")) return "confirmed config"
+  if (filePath.startsWith("vocabulary://")) return "derived config vocabulary"
+  if (evidenceTypes.has("documentation")) return "indexed documentation"
+  if (evidenceTypes.has("test")) return "test evidence"
+
+  return "retrieved code"
 }
 
 function buildMedalMechanismAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
