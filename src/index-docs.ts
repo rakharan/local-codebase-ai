@@ -5,6 +5,7 @@ import { ensureCollection, qdrant } from "./lib/qdrant.js"
 import { config } from "./lib/config.js"
 import { sha256, uuidFromHash } from "./lib/hash.js"
 import { inferRelationshipHints } from "./lib/relationships.js"
+import { extractStructuredFacts } from "./lib/facts.js"
 import { createEmbedding } from "./lib/ollama.js"
 import type { CodeChunk } from "./lib/chunker.js"
 import { inferProjectIdsForRepo, inferProjectTagForChunk, normalizeProjectIds } from "./lib/service-registry.js"
@@ -219,6 +220,7 @@ function chunkMarkdown(file: DocFile, repoName: string, branchName: string, proj
         contentHash,
         evidenceTypes: ["documentation"],
         relationshipHints: inferRelationshipHints(chunkContent),
+        structuredFacts: extractStructuredFacts(chunkContent, subStart),
       })
     }
 
@@ -339,6 +341,7 @@ async function upsertChunk(chunk: CodeChunk): Promise<void> {
     `Symbols: ${chunk.relationshipHints.symbols.join(", ")}`,
     `Message names: ${chunk.relationshipHints.messageNames.join(", ")}`,
     `Database tables: ${chunk.relationshipHints.dbTables.join(", ")}`,
+    `Structured facts: ${chunk.structuredFacts.map(fact => `${fact.category}:${fact.text}`).join(" | ")}`,
     `File: ${chunk.filePath}`,
     `Lines: ${chunk.startLine}-${chunk.endLine}`,
     "",
@@ -367,6 +370,7 @@ async function upsertChunk(chunk: CodeChunk): Promise<void> {
           queueNames: chunk.relationshipHints.queueNames,
           exchangeNames: chunk.relationshipHints.exchangeNames,
           dbTables: chunk.relationshipHints.dbTables,
+          structuredFacts: chunk.structuredFacts,
           filePath: chunk.filePath,
           startLine: chunk.startLine,
           endLine: chunk.endLine,

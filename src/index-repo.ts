@@ -13,6 +13,7 @@ import { createCommitChunks } from "./lib/commits.js"
 import { createCommentChunks } from "./lib/comments.js"
 import { extractVocabulary, buildGlossaryContent } from "./lib/vocabulary.js"
 import { sha256, uuidFromHash } from "./lib/hash.js"
+import { extractStructuredFacts } from "./lib/facts.js"
 import { inferProjectIdsForRepo, inferProjectTagForChunk, normalizeProjectIds } from "./lib/service-registry.js"
 
 const serviceTypes = new Set<ServiceType>(["api", "worker", "cron", "library", "unknown"])
@@ -235,6 +236,7 @@ async function upsertChunk(chunk: CodeChunk): Promise<void> {
     `Queues: ${chunk.relationshipHints.queueNames.join(", ")}`,
     `Exchanges: ${chunk.relationshipHints.exchangeNames.join(", ")}`,
     `Database tables: ${chunk.relationshipHints.dbTables.join(", ")}`,
+    `Structured facts: ${chunk.structuredFacts.map(fact => `${fact.category}:${fact.text}`).join(" | ")}`,
     `File: ${chunk.filePath}`,
     `Lines: ${chunk.startLine}-${chunk.endLine}`,
     "",
@@ -263,6 +265,7 @@ async function upsertChunk(chunk: CodeChunk): Promise<void> {
             queueNames: chunk.relationshipHints.queueNames,
             exchangeNames: chunk.relationshipHints.exchangeNames,
             dbTables: chunk.relationshipHints.dbTables,
+            structuredFacts: chunk.structuredFacts,
             filePath: chunk.filePath,
             startLine: chunk.startLine,
             endLine: chunk.endLine,
@@ -373,6 +376,7 @@ async function main() {
         exchangeNames: [],
         dbTables: [],
       },
+      structuredFacts: extractStructuredFacts(content),
     })
   }
 

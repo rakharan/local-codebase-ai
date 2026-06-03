@@ -1,5 +1,6 @@
 import { sha256, uuidFromHash } from "./hash.js"
 import { inferRelationshipHints } from "./relationships.js"
+import { extractStructuredFacts } from "./facts.js"
 import type { CommitInfo } from "./git.js"
 import type { CodeChunk, ServiceType } from "./chunker.js"
 
@@ -47,6 +48,7 @@ export function createCommitChunks(
       contentHash,
       evidenceTypes: ["git_commit"],
       relationshipHints: inferRelationshipHints(content),
+      structuredFacts: extractStructuredFacts(content),
     })
   }
 

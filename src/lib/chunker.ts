@@ -1,6 +1,7 @@
 import { sha256, uuidFromHash } from "./hash.js"
 import { inferEvidenceTypes } from "./evidence.js"
 import { inferRelationshipHints } from "./relationships.js"
+import { extractStructuredFacts, type StructuredFact } from "./facts.js"
 import type { EvidenceType } from "./evidence.js"
 import type { RelationshipHints } from "./relationships.js"
 import type { SourceFile } from "./files.js"
@@ -26,6 +27,7 @@ export type CodeChunk = {
   contentHash: string
   evidenceTypes: EvidenceType[]
   relationshipHints: RelationshipHints
+  structuredFacts: StructuredFact[]
 }
 
 export type ServiceType = "api" | "worker" | "cron" | "library" | "unknown"
@@ -68,6 +70,7 @@ export function chunkFile(
         const lineNumber = start + 1
         const evidenceTypes = inferEvidenceTypes(file.relativePath, content)
         const relationshipHints = inferRelationshipHints(content)
+        const structuredFacts = extractStructuredFacts(content, lineNumber)
         const projectTag = inferProjectTag(file.relativePath, content)
         const contentHash = sha256(
           `${INDEX_SCHEMA_VERSION}:${repoName}:${projectHashKey(projectTag.projectIds)}:${branchName}:${serviceType}:${file.relativePath}:${lineNumber}:${lineNumber}:${offset}:${content}`,
@@ -88,6 +91,7 @@ export function chunkFile(
           contentHash,
           evidenceTypes,
           relationshipHints,
+          structuredFacts,
         })
       }
 
@@ -127,6 +131,7 @@ export function chunkFile(
       const endLine = end
       const evidenceTypes = inferEvidenceTypes(file.relativePath, content)
       const relationshipHints = inferRelationshipHints(content)
+      const structuredFacts = extractStructuredFacts(content, startLine)
       const projectTag = inferProjectTag(file.relativePath, content)
       const contentHash = sha256(
         `${INDEX_SCHEMA_VERSION}:${repoName}:${projectHashKey(projectTag.projectIds)}:${branchName}:${serviceType}:${file.relativePath}:${startLine}:${endLine}:${content}`,
@@ -147,6 +152,7 @@ export function chunkFile(
         contentHash,
         evidenceTypes,
         relationshipHints,
+        structuredFacts,
       })
     }
 

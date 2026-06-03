@@ -14,6 +14,11 @@ import {
   type KnowledgeNoteInput,
 } from "./lib/knowledge-notes.js"
 import {
+  createAnswerFeedback,
+  readAnswerFeedback,
+  type AnswerFeedbackInput,
+} from "./lib/answer-feedback.js"
+import {
   affectedReposForRegistryEntry,
   deleteServiceRegistryEntry,
   findServiceRegistryEntry,
@@ -674,6 +679,30 @@ app.post("/api/eval/run", async (request, response) => {
       error: message,
       raw: [stdout, stderr].filter(Boolean).join("\n"),
     })
+  }
+})
+
+app.get("/api/feedback", async (_request, response) => {
+  try {
+    response.json({
+      items: await readAnswerFeedback(),
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(500).json({ error: message })
+  }
+})
+
+app.post("/api/feedback", async (request, response) => {
+  try {
+    const item = await createAnswerFeedback(request.body as AnswerFeedbackInput)
+
+    response.status(201).json({ item })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(400).json({ error: message })
   }
 })
 

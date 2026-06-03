@@ -1,6 +1,7 @@
 import type { EvidenceType } from "../lib/evidence.js"
 import type { RelationshipEdge } from "../lib/graph.js"
 import type { ServiceType } from "../lib/chunker.js"
+import type { StructuredFact } from "../lib/facts.js"
 
 export type RetrievedPayload = {
   repoName?: string
@@ -21,6 +22,7 @@ export type RetrievedPayload = {
   queueNames?: string[]
   exchangeNames?: string[]
   dbTables?: string[]
+  structuredFacts?: StructuredFact[]
   contentHash?: string
   noteStatus?: "confirmed" | "proposal" | "deprecated"
   noteAuthor?: string

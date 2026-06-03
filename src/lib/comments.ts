@@ -1,6 +1,7 @@
 import path from "node:path"
 import { sha256, uuidFromHash } from "./hash.js"
 import { inferRelationshipHints } from "./relationships.js"
+import { extractStructuredFacts } from "./facts.js"
 import type { CodeChunk, ServiceType } from "./chunker.js"
 import type { ProjectTag } from "./chunker.js"
 
@@ -203,6 +204,7 @@ export function createCommentChunks(
       contentHash,
       evidenceTypes: ["comment"],
       relationshipHints: inferRelationshipHints(block.content),
+      structuredFacts: extractStructuredFacts(block.content, block.startLine),
     })
   }
 

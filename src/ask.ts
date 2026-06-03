@@ -161,19 +161,21 @@ async function retrieve(queryText: string, resultLimit: number): Promise<Retriev
   const filter = buildFilter()
   const query = {
     query: questionVector,
-    limit: resultLimit,
+    limit: Math.max(resultLimit * 3, resultLimit),
     with_payload: true,
     ...(filter ? { filter } : {}),
   }
 
   const results = await qdrant.query(config.collectionName, query)
 
-  return results.points
+  const chunks = results.points
     .map(point => ({
       id: String(point.id),
       payload: point.payload as RetrievedPayload,
     }))
     .filter(chunk => chunk.payload.content)
+
+  return rerankRetrievedChunks(question, chunks).slice(0, resultLimit)
 }
 
 async function retrievePreferredLocaleDocChunks(queryText: string, resultLimit: number): Promise<RetrievedChunk[]> {
@@ -440,6 +442,57 @@ function collectHints(chunks: RetrievedChunk[]): RelationshipHints {
     exchangeNames: unique(chunks.flatMap(chunk => chunk.payload.exchangeNames ?? []), 8),
     dbTables: unique(chunks.flatMap(chunk => chunk.payload.dbTables ?? []), 8),
   }
+}
+
+function rerankRetrievedChunks(questionText: string, chunks: RetrievedChunk[]): RetrievedChunk[] {
+  const exactTerms = unique([
+    ...extractQuestionHints(questionText),
+    ...extractQuestionRoutes(questionText),
+    ...extractQuestionTerms(questionText),
+    ...registryExactSearchTerms(),
+  ], 80)
+  const asksDb = questionAsksAboutDatabase(questionText)
+  const asksFlow = questionAsksAboutServicesOrFlow(questionText)
+  const asksGlossary = questionAsksAboutGlossary(questionText)
+  const asksDiagram = questionAsksForDiagram(questionText)
+
+  return chunks
+    .map((chunk, index) => {
+      const payload = chunk.payload
+      const content = payload.content ?? ""
+      const text = textForExactSearch(payload).toLowerCase()
+      let score = Math.max(0, chunks.length - index)
+
+      for (const term of exactTerms) {
+        const normalizedTerm = term.toLowerCase()
+        if (!normalizedTerm) continue
+        if (text.includes(normalizedTerm)) score += normalizedTerm.includes("/") ? 75 : 18
+        if ((payload.routes ?? []).some(route => route.toLowerCase() === normalizedTerm)) score += 100
+        if ((payload.symbols ?? []).some(symbol => symbol.toLowerCase() === normalizedTerm)) score += 45
+        if ((payload.queueNames ?? []).some(queue => queue.toLowerCase() === normalizedTerm)) score += 55
+        if ((payload.dbTables ?? []).some(table => table.toLowerCase() === normalizedTerm)) score += 55
+      }
+
+      if (asksDb && ((payload.dbTables?.length ?? 0) > 0 || payload.structuredFacts?.some(fact => fact.category === "database"))) score += 35
+      if (asksFlow && ((payload.routes?.length ?? 0) > 0 || (payload.messageNames?.length ?? 0) > 0 || (payload.queueNames?.length ?? 0) > 0)) score += 30
+      if (asksGlossary && (payload.evidenceTypes?.includes("documentation") || payload.filePath?.startsWith("vocabulary://"))) score += 22
+      if (asksDiagram && /```mermaid|graph\s+(?:TD|TB|LR|RL)|flowchart/i.test(content)) score += 85
+
+      for (const fact of payload.structuredFacts ?? []) {
+        if (asksDb && fact.category === "database") score += 16
+        if (asksFlow && (fact.category === "message" || fact.category === "control_flow" || fact.category === "input" || fact.category === "return")) score += 8
+        if (/validasi|validation|request body|return|response|formula|rule|aturan|syarat/i.test(questionText)) {
+          if (["validation", "input", "return", "formula", "constant"].includes(fact.category)) score += 12
+        }
+      }
+
+      if (payload.filePath?.startsWith("knowledge-notes://")) score += 20
+      if (payload.noteStatus === "proposal") score += /proposal|meeting|change|recent|terbaru|perubahan/i.test(questionText) ? 35 : -5
+
+      return { chunk, score }
+    })
+    .sort((left, right) => right.score - left.score)
+    .map(item => item.chunk)
 }
 
 function registryExactSearchTerms(): string[] {
@@ -1018,6 +1071,7 @@ function metadataTextForConceptSearch(payload: RetrievedPayload): string {
     ...(payload.symbols ?? []),
     ...(payload.messageNames ?? []),
     ...(payload.dbTables ?? []),
+    ...(payload.structuredFacts ?? []).map(fact => `${fact.category} ${fact.text}`),
     payload.content ?? "",
   ].join("\n")
 }
@@ -1100,6 +1154,7 @@ function textForExactSearch(payload: RetrievedPayload): string {
     ...(payload.queueNames ?? []),
     ...(payload.exchangeNames ?? []),
     ...(payload.dbTables ?? []),
+    ...(payload.structuredFacts ?? []).map(fact => `${fact.category} ${fact.text}`),
   ].join("\n")
 }
 
@@ -2507,6 +2562,17 @@ function buildEvidenceInventory(chunks: RetrievedPayload[], question: string): s
 }
 
 function extractCodeDerivedFacts(chunks: RetrievedPayload[], maxFacts: number): string[] {
+  const storedFacts = unique(
+    chunks.flatMap(chunk => {
+      return (chunk.structuredFacts ?? []).map(fact => {
+        return `${fact.category}/${fact.confidence}: ${fact.text} (${chunk.repoName ?? "unknown"}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${fact.line})`
+      })
+    }),
+    maxFacts,
+  )
+
+  if (storedFacts.length > 0) return storedFacts
+
   const facts: string[] = []
   const factLinePattern = /validationError|request\.body|request\.query|request\.params|req\.body|req\.query|Joi\.|check\(|throw new|return\s+|module\.exports|exports\.\w+|const\s+[A-Z0-9_]{3,}|let\s+[A-Z0-9_]{3,}|var\s+[A-Z0-9_]{3,}|>=|<=|===|!==|\*\s*[a-zA-Z_][\w.]*/i
 

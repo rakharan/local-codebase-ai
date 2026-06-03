@@ -795,6 +795,28 @@
     flex: 1;
     word-break: break-word;
   }
+  .feedback-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-top: 12px;
+    color: #8b949e;
+    font-size: 0.75rem;
+  }
+  .feedback-btn {
+    padding: 4px 8px;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    background: #161b22;
+    color: #c9d1d9;
+    cursor: pointer;
+    font-size: 0.75rem;
+  }
+  .feedback-btn:hover { border-color: #58a6ff; }
+  .feedback-btn.saved {
+    color: #7ee787;
+    border-color: #238636;
+  }
 
   @media (max-width: 768px) {
     .sidebar { display: none; }
@@ -2072,7 +2094,7 @@ function renderMessages() {
     return;
   }
 
-  chatMessages.innerHTML = messages.map((msg) => {
+  chatMessages.innerHTML = messages.map((msg, messageIndex) => {
     if (msg.role === 'user') {
       return `
         <div class="chat-message user">
@@ -2098,12 +2120,20 @@ function renderMessages() {
           </div>
         `;
       }
+      const feedbackHtml = msg.question ? `
+        <div class="feedback-row">
+          <span>${msg.feedbackSaved ? 'Feedback saved' : 'Was this useful?'}</span>
+          <button class="feedback-btn ${msg.feedbackSaved === 'good' ? 'saved' : ''}" onclick="sendFeedback(${messageIndex}, 'good')">Good</button>
+          <button class="feedback-btn ${msg.feedbackSaved === 'bad' ? 'saved' : ''}" onclick="sendFeedback(${messageIndex}, 'bad')">Needs work</button>
+        </div>
+      ` : '';
       return `
         <div class="chat-message assistant">
           <div class="chat-avatar">AI</div>
           <div class="chat-message-content">
             ${answerWrapper.outerHTML}
             ${sourcesHtml}
+            ${feedbackHtml}
           </div>
         </div>
       `;
@@ -2121,6 +2151,37 @@ function renderMessages() {
 
   // Scroll to bottom
   chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+async function sendFeedback(messageIndex, rating) {
+  const msg = messages[messageIndex];
+  if (!msg || msg.role !== 'assistant' || !msg.question) return;
+
+  const note = rating === 'bad'
+    ? (prompt('What should be better? This becomes local feedback for future evals.', '') || '')
+    : '';
+
+  try {
+    const res = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rating,
+        question: msg.question,
+        answer: msg.content,
+        sources: msg.sources || [],
+        note,
+      }),
+    });
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Feedback failed');
+
+    msg.feedbackSaved = rating;
+    renderMessages();
+  } catch (err) {
+    alert(`Feedback failed: ${err.message}`);
+  }
 }
 
 async function ask() {
@@ -2165,6 +2226,7 @@ async function ask() {
       messages.push({
         role: 'assistant',
         content: `**Error:** ${data.error || 'Unknown error'}`,
+        question,
         sources: [],
       });
     } else {
@@ -2172,6 +2234,7 @@ async function ask() {
       messages.push({
         role: 'assistant',
         content: data.answer,
+        question,
         sources: data.sources || [],
       });
     }
@@ -2179,6 +2242,7 @@ async function ask() {
     messages.push({
       role: 'assistant',
       content: `**Network error:** ${err.message}`,
+      question,
       sources: [],
     });
   } finally {
