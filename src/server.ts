@@ -13,6 +13,14 @@ import {
   updateKnowledgeNote,
   type KnowledgeNoteInput,
 } from "./lib/knowledge-notes.js"
+import {
+  affectedReposForRegistryEntry,
+  deleteServiceRegistryEntry,
+  readServiceRegistryFile,
+  upsertServiceRegistryEntry,
+  writeServiceRegistryFile,
+  type ServiceRegistryInput,
+} from "./lib/service-registry.js"
 import type { ServiceType } from "./lib/chunker.js"
 
 const execFileAsync = promisify(execFile)
@@ -462,6 +470,61 @@ app.post("/api/index/docs", async (request, response) => {
       error: message,
       raw: [stdout, stderr].filter(Boolean).join("\n"),
     })
+  }
+})
+
+app.get("/api/registry", async (_request, response) => {
+  try {
+    const registry = await readServiceRegistryFile()
+
+    response.json({
+      entries: registry.entries,
+      affectedRepos: [...new Set(registry.entries.flatMap(affectedReposForRegistryEntry))].sort(),
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(500).json({ error: message })
+  }
+})
+
+app.put("/api/registry", async (request, response) => {
+  try {
+    const registry = await writeServiceRegistryFile(request.body as ServiceRegistryInput)
+
+    response.json({
+      entries: registry.entries,
+      affectedRepos: [...new Set(registry.entries.flatMap(affectedReposForRegistryEntry))].sort(),
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(400).json({ error: message })
+  }
+})
+
+app.post("/api/registry/entries", async (request, response) => {
+  try {
+    const result = await upsertServiceRegistryEntry(request.body)
+
+    response.json(result)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(400).json({ error: message })
+  }
+})
+
+app.delete("/api/registry/entries/:entryName", async (request, response) => {
+  try {
+    const result = await deleteServiceRegistryEntry(request.params.entryName)
+
+    response.json(result)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const status = message.startsWith("Registry entry not found:") ? 404 : 400
+
+    response.status(status).json({ error: message })
   }
 })
 

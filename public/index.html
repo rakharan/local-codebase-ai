@@ -857,6 +857,35 @@
           </div>
 
           <div class="manager-panel wide-panel">
+            <h2>Project Registry</h2>
+            <div class="manager-form">
+              <input id="registryProjectId" placeholder="projectId, e.g. wallet" />
+              <input id="registryName" placeholder="name, e.g. Wallet" />
+              <select id="registryKind">
+                <option value="domain">domain</option>
+                <option value="service">service</option>
+                <option value="broker">broker</option>
+                <option value="concept">concept</option>
+              </select>
+              <input id="registryDescription" placeholder="description" />
+              <textarea class="wide" id="registryAliases" placeholder="aliases, comma or newline separated"></textarea>
+              <textarea class="wide" id="registryRepos" placeholder="repos, comma or newline separated"></textarea>
+              <textarea class="wide" id="registryDocs" placeholder="docs folders, comma or newline separated"></textarea>
+              <textarea class="wide" id="registryKeywords" placeholder="keywords, comma or newline separated"></textarea>
+              <textarea class="wide" id="registryRoutes" placeholder="routes, comma or newline separated"></textarea>
+              <textarea class="wide" id="registryFunctions" placeholder="functions, comma or newline separated"></textarea>
+              <textarea class="wide" id="registryQueues" placeholder="queues, comma or newline separated"></textarea>
+              <textarea class="wide" id="registryTables" placeholder="tables, comma or newline separated"></textarea>
+              <textarea class="wide" id="registryPathRules" placeholder="path rules, one per line: repo | pattern | projectId"></textarea>
+              <textarea class="wide" id="registryNotes" placeholder="notes, one per line"></textarea>
+              <button class="manager-btn primary" onclick="saveRegistryEntry()">Save Project</button>
+              <button class="manager-btn" onclick="resetRegistryForm()">Cancel Edit</button>
+            </div>
+            <div class="manager-status" id="registryStatus"></div>
+            <div class="manager-list" id="registryList"></div>
+          </div>
+
+          <div class="manager-panel wide-panel">
             <h2>Knowledge Notes</h2>
             <div class="manager-form">
               <input class="wide" id="noteTitle" placeholder="Title, e.g. iSignal flow change from BOD meeting" />
@@ -962,6 +991,8 @@ const settingsPanel = document.getElementById('settingsPanel');
 const mainEl = document.querySelector('.main');
 const managerStatus = document.getElementById('managerStatus');
 const indexSummaryRows = document.getElementById('indexSummaryRows');
+const registryStatus = document.getElementById('registryStatus');
+const registryList = document.getElementById('registryList');
 const notesStatus = document.getElementById('notesStatus');
 const knowledgeNotesList = document.getElementById('knowledgeNotesList');
 const evalStatus = document.getElementById('evalStatus');
@@ -970,6 +1001,8 @@ const evalOutput = document.getElementById('evalOutput');
 const STORAGE_KEY = 'lca_recent_searches';
 const MAX_RECENT = 10;
 let mermaidRenderCounter = 0;
+let registryEntries = [];
+let editingRegistryEntryName = null;
 let knowledgeNotes = [];
 let editingKnowledgeNoteId = null;
 
@@ -1020,6 +1053,7 @@ function toggleSettings() {
 function showManager() {
   mainEl.classList.add('manager-active');
   loadIndexSummary();
+  loadRegistry();
   loadKnowledgeNotes();
 }
 
@@ -1067,7 +1101,7 @@ function clearRecent() {
 
 function splitCsv(value) {
   return (value || '')
-    .split(',')
+    .split(/[\n,]/)
     .map(v => v.trim())
     .filter(Boolean);
 }
@@ -1250,6 +1284,213 @@ async function runIndexRequest(url, body, label) {
     await loadIndexSummary();
   } catch (err) {
     managerStatus.textContent = `${label} failed: ${err.message}`;
+  }
+}
+
+function formatListForTextarea(values) {
+  return (values || []).join('\n');
+}
+
+function parsePathRules(value) {
+  return (value || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      const parts = line.split('|').map(part => part.trim());
+      if (parts.length < 3) {
+        throw new Error(`Invalid path rule: ${line}. Use: repo | pattern | projectId`);
+      }
+
+      return {
+        repo: parts[0],
+        pattern: parts[1],
+        projectId: parts[2],
+      };
+    });
+}
+
+function formatPathRules(rules) {
+  return (rules || [])
+    .map(rule => `${rule.repo} | ${rule.pattern} | ${rule.projectId}`)
+    .join('\n');
+}
+
+function affectedReposForEntry(entry) {
+  return [...new Set([
+    ...(entry.repos || []),
+    ...(entry.pathRules || []).map(rule => rule.repo),
+  ].filter(Boolean))].sort();
+}
+
+async function loadRegistry() {
+  registryStatus.textContent = 'Loading project registry...';
+  registryList.innerHTML = '<div class="manager-muted">Loading registry...</div>';
+
+  try {
+    const res = await fetch('/api/registry');
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Failed to load registry');
+
+    registryEntries = data.entries || [];
+    registryStatus.textContent = `${registryEntries.length} project registry entr${registryEntries.length === 1 ? 'y' : 'ies'}.`;
+    renderRegistryEntries();
+  } catch (err) {
+    registryStatus.textContent = `Could not load registry: ${err.message}`;
+    registryList.innerHTML = '<div class="manager-muted">Project registry API is not available.</div>';
+  }
+}
+
+function renderRegistryEntries() {
+  if (registryEntries.length === 0) {
+    registryList.innerHTML = '<div class="manager-muted">No project registry entries yet.</div>';
+    return;
+  }
+
+  registryList.innerHTML = registryEntries.map(entry => {
+    const projectId = entry.projectId || entry.name;
+    const entryName = entry.name;
+    const affectedRepos = affectedReposForEntry(entry);
+
+    return `
+      <div class="manager-list-item">
+        <div class="manager-list-title">${escapeHtml(entry.name)} <code>${escapeHtml(projectId)}</code></div>
+        <div class="manager-list-meta">
+          <code>${escapeHtml(entry.kind || 'domain')}</code>
+          · repos: ${affectedRepos.length > 0 ? affectedRepos.map(repo => `<code>${escapeHtml(repo)}</code>`).join(' ') : '<span class="manager-muted">none</span>'}
+        </div>
+        <div class="manager-list-body">${escapeHtml(entry.description || 'No description.')}</div>
+        <div class="manager-muted">
+          aliases: ${(entry.aliases || []).slice(0, 8).map(value => `<code>${escapeHtml(value)}</code>`).join(' ') || 'none'}
+        </div>
+        <div class="manager-actions" style="margin-top:8px;">
+          <button class="manager-btn" onclick="editRegistryEntry('${escapeHtml(entryName).replace(/'/g, "\\'")}')">Edit</button>
+          <button class="manager-btn danger" onclick="deleteRegistryEntry('${escapeHtml(entryName).replace(/'/g, "\\'")}')">Delete</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function resetRegistryForm() {
+  editingRegistryEntryName = null;
+  document.getElementById('registryProjectId').value = '';
+  document.getElementById('registryName').value = '';
+  document.getElementById('registryKind').value = 'domain';
+  document.getElementById('registryDescription').value = '';
+  document.getElementById('registryAliases').value = '';
+  document.getElementById('registryRepos').value = '';
+  document.getElementById('registryDocs').value = '';
+  document.getElementById('registryKeywords').value = '';
+  document.getElementById('registryRoutes').value = '';
+  document.getElementById('registryFunctions').value = '';
+  document.getElementById('registryQueues').value = '';
+  document.getElementById('registryTables').value = '';
+  document.getElementById('registryPathRules').value = '';
+  document.getElementById('registryNotes').value = '';
+}
+
+function editRegistryEntry(entryName) {
+  const entry = registryEntries.find(item => item.name === entryName);
+  if (!entry) return;
+
+  editingRegistryEntryName = entry.name;
+  document.getElementById('registryProjectId').value = entry.projectId || entry.name || '';
+  document.getElementById('registryName').value = entry.name || '';
+  document.getElementById('registryKind').value = entry.kind || 'domain';
+  document.getElementById('registryDescription').value = entry.description || '';
+  document.getElementById('registryAliases').value = formatListForTextarea(entry.aliases);
+  document.getElementById('registryRepos').value = formatListForTextarea(entry.repos);
+  document.getElementById('registryDocs').value = formatListForTextarea(entry.docs);
+  document.getElementById('registryKeywords').value = formatListForTextarea(entry.keywords);
+  document.getElementById('registryRoutes').value = formatListForTextarea(entry.routes);
+  document.getElementById('registryFunctions').value = formatListForTextarea(entry.functions);
+  document.getElementById('registryQueues').value = formatListForTextarea(entry.queues);
+  document.getElementById('registryTables').value = formatListForTextarea(entry.tables);
+  document.getElementById('registryPathRules').value = formatPathRules(entry.pathRules);
+  document.getElementById('registryNotes').value = formatListForTextarea(entry.notes);
+  registryStatus.textContent = `Editing registry entry: ${entry.name}`;
+}
+
+async function saveRegistryEntry() {
+  const projectId = document.getElementById('registryProjectId').value.trim();
+  const name = document.getElementById('registryName').value.trim();
+
+  if (!projectId || !name) {
+    registryStatus.textContent = 'projectId and name are required.';
+    return;
+  }
+
+  let pathRules;
+  try {
+    pathRules = parsePathRules(document.getElementById('registryPathRules').value);
+  } catch (err) {
+    registryStatus.textContent = err.message;
+    return;
+  }
+
+  const entry = {
+    previousName: editingRegistryEntryName || undefined,
+    projectId,
+    name,
+    kind: document.getElementById('registryKind').value,
+    description: document.getElementById('registryDescription').value.trim() || undefined,
+    aliases: splitCsv(document.getElementById('registryAliases').value),
+    repos: splitCsv(document.getElementById('registryRepos').value),
+    docs: splitCsv(document.getElementById('registryDocs').value),
+    keywords: splitCsv(document.getElementById('registryKeywords').value),
+    routes: splitCsv(document.getElementById('registryRoutes').value),
+    functions: splitCsv(document.getElementById('registryFunctions').value),
+    queues: splitCsv(document.getElementById('registryQueues').value),
+    tables: splitCsv(document.getElementById('registryTables').value),
+    pathRules,
+    notes: splitCsv(document.getElementById('registryNotes').value),
+  };
+
+  registryStatus.textContent = editingRegistryEntryName ? 'Updating registry entry...' : 'Saving registry entry...';
+
+  try {
+    const res = await fetch('/api/registry/entries', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(entry),
+    });
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Save failed');
+
+    registryEntries = data.entries || [];
+    resetRegistryForm();
+    renderRegistryEntries();
+    registryStatus.textContent = `Saved ${data.entry.name}. Reindex affected repos for chunk tags: ${(data.affectedRepos || []).join(', ') || 'none'}.`;
+  } catch (err) {
+    registryStatus.textContent = `Save failed: ${err.message}`;
+  }
+}
+
+async function deleteRegistryEntry(entryName) {
+  const entry = registryEntries.find(item => item.name === entryName);
+  const name = entry?.name || entryName;
+
+  if (!confirm(`Delete registry entry "${name}"? This does not delete indexed chunks, but future registry expansion will stop using it.`)) {
+    return;
+  }
+
+  registryStatus.textContent = `Deleting registry entry: ${name}`;
+
+  try {
+    const res = await fetch(`/api/registry/entries/${encodeURIComponent(entryName)}`, { method: 'DELETE' });
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Delete failed');
+
+    registryEntries = data.entries || [];
+    if (editingRegistryEntryName === entryName) resetRegistryForm();
+    renderRegistryEntries();
+    registryStatus.textContent = `Deleted ${name}. Reindex affected repos if you want old chunk tags refreshed: ${(data.affectedRepos || []).join(', ') || 'none'}.`;
+  } catch (err) {
+    registryStatus.textContent = `Delete failed: ${err.message}`;
   }
 }
 

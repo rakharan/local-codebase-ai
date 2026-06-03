@@ -1,4 +1,5 @@
 import fs from "node:fs"
+import fsp from "node:fs/promises"
 import path from "node:path"
 import type { ProjectTag } from "./chunker.js"
 
@@ -27,6 +28,14 @@ type ServiceRegistryFile = {
   entries: ServiceRegistryEntry[]
 }
 
+export type ServiceRegistryInput = {
+  entries?: unknown
+}
+
+type RegistryEntryUpsertInput = Record<string, unknown> & {
+  previousName?: unknown
+}
+
 export type RegistryExpansion = {
   expandedQuestion: string
   matchedEntries: ServiceRegistryEntry[]
@@ -35,6 +44,7 @@ export type RegistryExpansion = {
 }
 
 const registryPath = path.join(process.cwd(), "config", "services.json")
+const registryKinds = ["service", "broker", "domain", "concept"] as const
 
 function unique(values: string[], max = 80): string[] {
   return [...new Set(values.map(value => value.trim()).filter(Boolean))].slice(0, max)
@@ -47,6 +57,187 @@ export function loadServiceRegistry(): ServiceRegistryEntry[] {
     return Array.isArray(parsed.entries) ? parsed.entries : []
   } catch {
     return []
+  }
+}
+
+function asString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : ""
+}
+
+function asStringArray(value: unknown, max = 120): string[] {
+  if (Array.isArray(value)) {
+    return unique(value.map(asString), max)
+  }
+
+  if (typeof value === "string") {
+    return unique(value.split(/[\n,]/).map(item => item.trim()), max)
+  }
+
+  return []
+}
+
+function normalizeKind(value: unknown): ServiceRegistryEntry["kind"] {
+  return registryKinds.includes(value as ServiceRegistryEntry["kind"])
+    ? value as ServiceRegistryEntry["kind"]
+    : "domain"
+}
+
+function normalizePathRules(value: unknown): NonNullable<ServiceRegistryEntry["pathRules"]> {
+  if (!Array.isArray(value)) return []
+
+  return value
+    .map(rule => {
+      if (!rule || typeof rule !== "object") return undefined
+
+      const record = rule as Record<string, unknown>
+      const repo = asString(record.repo)
+      const pattern = asString(record.pattern)
+      const projectId = normalizeProjectIds([asString(record.projectId)])[0]
+
+      if (!repo || !pattern || !projectId) return undefined
+
+      return {
+        repo,
+        pattern,
+        projectId,
+      }
+    })
+    .filter((rule): rule is { repo: string; pattern: string; projectId: string } => Boolean(rule))
+}
+
+export function normalizeServiceRegistryEntry(input: unknown): ServiceRegistryEntry {
+  if (!input || typeof input !== "object") {
+    throw new Error("Registry entry must be an object")
+  }
+
+  const record = input as Record<string, unknown>
+  const name = asString(record.name)
+  const projectId = normalizeProjectIds([asString(record.projectId || record.name)])[0]
+
+  if (!name) {
+    throw new Error("Registry entry is missing required field: name")
+  }
+
+  if (!projectId) {
+    throw new Error(`Registry entry "${name}" has an invalid projectId`)
+  }
+
+  const entry: ServiceRegistryEntry = {
+    name,
+    kind: normalizeKind(record.kind),
+    projectId,
+    aliases: asStringArray(record.aliases),
+    repos: asStringArray(record.repos),
+    docs: asStringArray(record.docs),
+    keywords: asStringArray(record.keywords),
+    routes: asStringArray(record.routes),
+    functions: asStringArray(record.functions),
+    queues: asStringArray(record.queues),
+    tables: asStringArray(record.tables),
+    pathRules: normalizePathRules(record.pathRules),
+    notes: asStringArray(record.notes),
+  }
+
+  const description = asString(record.description)
+  if (description) {
+    entry.description = description
+  }
+
+  return entry
+}
+
+export function affectedReposForRegistryEntry(entry: ServiceRegistryEntry): string[] {
+  return unique([
+    ...entry.repos,
+    ...(entry.pathRules ?? []).map(rule => rule.repo),
+  ], 100)
+}
+
+export function normalizeServiceRegistryFile(input: ServiceRegistryInput): ServiceRegistryFile {
+  if (!Array.isArray(input.entries)) {
+    throw new Error("Registry file must contain an entries array")
+  }
+
+  const entries = input.entries.map(normalizeServiceRegistryEntry)
+  const seenNames = new Set<string>()
+
+  for (const entry of entries) {
+    const normalizedName = entry.name.toLowerCase()
+
+    if (seenNames.has(normalizedName)) {
+      throw new Error(`Duplicate registry entry name: ${entry.name}`)
+    }
+
+    seenNames.add(normalizedName)
+  }
+
+  return { entries }
+}
+
+export async function readServiceRegistryFile(): Promise<ServiceRegistryFile> {
+  const parsed = JSON.parse(await fsp.readFile(registryPath, "utf8")) as ServiceRegistryInput
+
+  return normalizeServiceRegistryFile(parsed)
+}
+
+export async function writeServiceRegistryFile(input: ServiceRegistryInput): Promise<ServiceRegistryFile> {
+  const registry = normalizeServiceRegistryFile(input)
+  const tempPath = `${registryPath}.tmp`
+
+  await fsp.mkdir(path.dirname(registryPath), { recursive: true })
+  await fsp.writeFile(tempPath, `${JSON.stringify(registry, null, 2)}\n`, "utf8")
+  await fsp.rename(tempPath, registryPath)
+
+  return registry
+}
+
+export async function upsertServiceRegistryEntry(input: unknown): Promise<{
+  entry: ServiceRegistryEntry
+  entries: ServiceRegistryEntry[]
+  affectedRepos: string[]
+}> {
+  const registry = await readServiceRegistryFile()
+  const entry = normalizeServiceRegistryEntry(input)
+  const previousName = asString((input as RegistryEntryUpsertInput | null | undefined)?.previousName)
+  const lookupName = (previousName || entry.name).toLowerCase()
+  const index = registry.entries.findIndex(existing => existing.name.toLowerCase() === lookupName)
+  const entries = index >= 0
+    ? registry.entries.map((existing, existingIndex) => existingIndex === index ? entry : existing)
+    : [...registry.entries, entry]
+  const saved = await writeServiceRegistryFile({ entries })
+
+  return {
+    entry,
+    entries: saved.entries,
+    affectedRepos: affectedReposForRegistryEntry(entry),
+  }
+}
+
+export async function deleteServiceRegistryEntry(entryName: string): Promise<{
+  deleted: ServiceRegistryEntry
+  entries: ServiceRegistryEntry[]
+  affectedRepos: string[]
+}> {
+  const lookupName = entryName.trim().toLowerCase()
+  if (!lookupName) {
+    throw new Error("Missing registry entry name")
+  }
+
+  const registry = await readServiceRegistryFile()
+  const deleted = registry.entries.find(entry => entry.name.toLowerCase() === lookupName)
+
+  if (!deleted) {
+    throw new Error(`Registry entry not found: ${entryName}`)
+  }
+
+  const saved = await writeServiceRegistryFile({
+    entries: registry.entries.filter(entry => entry.name.toLowerCase() !== lookupName),
+  })
+
+  return {
+    deleted,
+    entries: saved.entries,
+    affectedRepos: affectedReposForRegistryEntry(deleted),
   }
 }
 
