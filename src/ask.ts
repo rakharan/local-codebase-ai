@@ -64,6 +64,7 @@ const program = new Command()
 program
   .argument("<question...>", "Question to ask")
   .option("--limit <limit>", "Number of chunks to retrieve", "8")
+  .option("--deep", "Run bounded read-only multi-step investigation before answering")
   .option("--repo-name <repoName>", "Only search one indexed repository")
   .option("--project <projectId>", "Only search one project/product/domain")
   .option("--branch <branchName>", "Only search one indexed branch")
@@ -72,8 +73,9 @@ program
   .parse()
 
 const question = program.args.join(" ")
-const options = program.opts<{ limit: string; repoName?: string; project?: string; branch?: string; serviceType?: string; history?: string }>()
+const options = program.opts<{ limit: string; deep?: boolean; repoName?: string; project?: string; branch?: string; serviceType?: string; history?: string }>()
 const limit = Number(options.limit)
+const deepMode = Boolean(options.deep)
 const serviceType = options.serviceType && serviceTypes.has(options.serviceType as ServiceType)
   ? (options.serviceType as ServiceType)
   : undefined
@@ -2493,6 +2495,134 @@ function mergeChunks(chunks: RetrievedChunk[], maxResults = Math.max(limit, 12))
   return compactRetrievedChunks(chunks, maxResults)
 }
 
+type DeepInvestigation = {
+  trace: string[]
+  chunks: RetrievedChunk[]
+}
+
+async function runDeepInvestigation(
+  questionText: string,
+  graph: RelationshipEdge[],
+  seedChunks: RetrievedChunk[],
+  exactRoutes: string[],
+  exactTerms: string[],
+  hints: RelationshipHints,
+): Promise<DeepInvestigation> {
+  const trace: string[] = [
+    "Deep investigation mode: read-only, bounded to indexed Qdrant chunks and relationship graph.",
+  ]
+  const collected: RetrievedChunk[] = [...seedChunks]
+  const investigationTerms = unique([
+    ...exactTerms,
+    ...extractQuestionHints(questionText),
+    ...extractConceptTokens(questionText),
+    ...extractQuestionTerms(questionText),
+    ...exactRoutes,
+    ...hints.routes,
+    ...hints.symbols,
+    ...hints.messageNames,
+    ...hints.queueNames,
+    ...hints.exchangeNames,
+    ...hints.dbTables,
+  ].filter(term => term.length >= 2), 40)
+
+  trace.push(`Step 1: extracted ${investigationTerms.length} search anchor(s): ${investigationTerms.slice(0, 16).join(", ") || "none"}.`)
+
+  const exactMatches = investigationTerms.length > 0
+    ? await retrieveExactTermMatches(investigationTerms, 80)
+    : []
+
+  collected.push(...exactMatches)
+  trace.push(`Step 2: exact index search found ${exactMatches.length} chunk(s).`)
+
+  const neighborMatches = exactMatches.length > 0
+    ? await retrieveNeighborChunks(exactMatches.slice(0, 24), 120)
+    : []
+
+  collected.push(...neighborMatches)
+  trace.push(`Step 3: neighbor expansion added ${neighborMatches.length} nearby chunk(s).`)
+
+  const graphTerms = new Set(investigationTerms.map(term => term.toLowerCase()))
+  const graphMatches = graph
+    .filter(edge => {
+      if (!options.repoName && edge.repoName === "local-codebase-ai") return false
+      if (options.repoName && edge.repoName !== options.repoName) return false
+      if (options.branch && edge.branchName !== options.branch) return false
+      if (serviceType && edge.serviceType !== serviceType) return false
+      if (projectFilterIds.length > 0) {
+        const edgeProjectIds = edge.projectIds ?? []
+
+        if (edgeProjectIds.length > 0) {
+          return edgeProjectIds.some(projectId => projectFilterIds.includes(projectId))
+        }
+
+        return projectFilterRepos.has(edge.repoName)
+      }
+
+      return true
+    })
+    .map(edge => {
+      const text = edgeTextForConceptSearch(edge)
+      let score = 0
+
+      for (const term of graphTerms) {
+        if (term.length >= 2 && text.includes(term)) score += term.includes("/") ? 60 : 12
+      }
+
+      if (exactRoutes.some(route => edge.toRoute && routeMatches(edge.toRoute, route))) score += 100
+      if (questionAsksAboutServicesOrFlow(questionText) && (edge.toRoute || edge.rpcFunc || edge.table || edge.symbol || edge.handler)) score += 20
+
+      return { edge, score }
+    })
+    .filter(item => item.score > 0)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 12)
+    .map(item => item.edge)
+
+  trace.push(`Step 4: relationship graph matched ${graphMatches.length} route/message/table edge(s).`)
+
+  const graphFileKeys = unique(
+    graphMatches.map(edge => `${edge.repoName}|${edge.branchName || "unknown"}|${edge.filePath}`),
+    8,
+  )
+  let graphFileChunkCount = 0
+
+  for (const key of graphFileKeys) {
+    const [repoName, branchName, filePath] = key.split("|")
+
+    if (!repoName || !branchName || !filePath) continue
+
+    const fileChunks = await retrieveFileChunks(repoName, branchName, filePath)
+    graphFileChunkCount += fileChunks.length
+    collected.push(...fileChunks)
+  }
+
+  trace.push(`Step 5: graph file expansion loaded ${graphFileChunkCount} chunk(s) from ${graphFileKeys.length} file(s).`)
+
+  const semanticQueries = unique(buildExpansionQueries(questionText, hints), 4)
+  let semanticChunkCount = 0
+
+  for (const queryText of semanticQueries) {
+    const semanticChunks = await retrieve(queryText, 6)
+
+    semanticChunkCount += semanticChunks.length
+    collected.push(...semanticChunks)
+  }
+
+  trace.push(`Step 6: follow-up semantic searches ran ${semanticQueries.length} query/queries and added ${semanticChunkCount} chunk(s).`)
+
+  const scopedCollected = options.repoName
+    ? collected
+    : collected.filter(chunk => chunk.payload.repoName !== "local-codebase-ai")
+  const finalChunks = mergeChunks(scopedCollected, Math.max(limit, deepMode ? 48 : 16))
+  trace.push(`Step 7: compacted evidence set to ${finalChunks.length} source chunk(s).`)
+
+  return {
+    trace,
+    chunks: finalChunks,
+  }
+}
+
 function filterEndpointSourceChunks(
   chunks: RetrievedChunk[],
   routes: string[],
@@ -4742,7 +4872,18 @@ async function main() {
 
     if (graphFlowAnswer) {
       console.log("\nANSWER\n")
-      console.log(localizeAnswer(graphFlowAnswer.answer, question))
+      const answer = deepMode
+        ? [
+            localized("Investigation trace:", "Investigation trace:"),
+            localized("- Step 1: mencari anchor flow di relationship graph yang ter-index.", "- Step 1: searched indexed relationship graph for flow anchors."),
+            localized("- Step 2: menemukan path terkonfirmasi dari edge route/caller/handler yang saling cocok.", "- Step 2: found a confirmed path from matching route/caller/handler edges."),
+            localized("- Step 3: menjawab hanya dari source graph/chunk yang terkonfirmasi.", "- Step 3: answered only from confirmed graph/chunk sources."),
+            "",
+            graphFlowAnswer.answer,
+          ].join("\n")
+        : graphFlowAnswer.answer
+
+      console.log(localizeAnswer(answer, question))
 
       console.log("\nSOURCES\n")
 
@@ -4757,7 +4898,17 @@ async function main() {
 
     if (queueMetadataAnswer) {
       console.log("\nANSWER\n")
-      console.log(localizeAnswer(queueMetadataAnswer.answer, question))
+      const answer = deepMode
+        ? [
+            localized("Investigation trace:", "Investigation trace:"),
+            localized("- Step 1: mencari queue/message/repo anchor di index.", "- Step 1: searched indexed queue/message/repo anchors."),
+            localized("- Step 2: memisahkan evidence consumer/listener dan publisher bila tersedia.", "- Step 2: separated consumer/listener and publisher evidence when available."),
+            "",
+            queueMetadataAnswer.answer,
+          ].join("\n")
+        : queueMetadataAnswer.answer
+
+      console.log(localizeAnswer(answer, question))
 
       console.log("\nSOURCES\n")
       console.log(queueMetadataAnswer.sources.join("\n"))
@@ -5036,7 +5187,13 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
   const answerChunks = accountTypeFileChunks.length > 0
     ? mergeChunks([...retrievedChunks, ...accountTypeFileChunks], Math.max(retrievalLimit, 320))
     : retrievedChunks
-  const chunks = answerChunks.map(chunk => chunk.payload)
+  const deepInvestigation = deepMode
+    ? await runDeepInvestigation(question, relationshipGraph, answerChunks, exactRoutes, exactTermSearchTerms, hints)
+    : undefined
+  const finalAnswerChunks = deepInvestigation
+    ? mergeChunks([...answerChunks, ...deepInvestigation.chunks], Math.max(retrievalLimit, 64))
+    : answerChunks
+  const chunks = finalAnswerChunks.map(chunk => chunk.payload)
   const routeDefinitions = orderRouteDefinitions(extractRouteDefinitions(exactChunks, exactRoutes), exactRoutes)
   const exactRouteRepoNames = unique(exactChunks.map(chunk => chunk.payload.repoName ?? ""), 12)
   const handlerFacts = extractHandlerFactSummary(exactDetailChunks, exactHandlerRefs, exactRouteRepoNames)
@@ -5065,7 +5222,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     ? buildExactEndpointDetailAnswer(routeDefinitions, endpointFacts, genericDownstreamFacts, chunks, upstreamFacts)
     : undefined
 
-  if (deterministicExactAnswer || deterministicEndpointAnswer) {
+  if (!deepMode && (deterministicExactAnswer || deterministicEndpointAnswer)) {
     const sourceChunks = compactPayloadSources(deterministicEndpointAnswer
       ? filterEndpointSourceChunks(
           retrievedChunks,
@@ -5099,7 +5256,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
       ? buildExactSymbolAnswer(extractNamedSymbolsFromQuestion(question), mergeChunks([...exactTermChunks, ...exactTermDetailChunks], 24))
       : undefined
 
-  if (exactSymbolAnswer) {
+  if (!deepMode && exactSymbolAnswer) {
     const sourceChunks = compactPayloadSources(mergeChunks([...exactTermChunks, ...exactTermDetailChunks], 16).map(chunk => chunk.payload), 16)
 
     console.log("\nANSWER\n")
@@ -5118,7 +5275,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const platformTypeGlossaryAnswer = buildPlatformTypeGlossaryAnswer(chunks, question, localized)
 
-  if (platformTypeGlossaryAnswer) {
+  if (!deepMode && platformTypeGlossaryAnswer) {
     const sourceChunks = compactPayloadSources(chunks.filter(chunk => {
       return /platform_type|mt4DemoType|mt5DemoType|MetaTrader|MT4|MT5/i.test(chunk.content ?? "")
     }), 12)
@@ -5139,7 +5296,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const accountTypeGlossaryAnswer = buildAccountTypeGlossaryAnswer(chunks, question, localized)
 
-  if (accountTypeGlossaryAnswer) {
+  if (!deepMode && accountTypeGlossaryAnswer) {
     const sourceChunks = compactPayloadSources(accountTypeRelevantSourceChunks(chunks, question), 12)
 
     console.log("\nANSWER\n")
@@ -5156,7 +5313,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     return
   }
 
-  if (questionAsksAboutAccountTypes(question)) {
+  if (!deepMode && questionAsksAboutAccountTypes(question)) {
     console.log("\nANSWER\n")
     console.log(buildAccountTypeNotFoundAnswer(question, localized))
 
@@ -5167,7 +5324,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const medalMechanismAnswer = buildMedalMechanismAnswer(chunks, question)
 
-  if (medalMechanismAnswer) {
+  if (!deepMode && medalMechanismAnswer) {
     const sourceChunks = compactPayloadSources(chunks
       .filter(chunk => /dsc_channels_point_events|dsc_channels_point_medal_journal|dsc_channels_point_balance|dsc_channels_point_redeem|POINT_LEVELS|RANGE_MEDAL|prev_channel_medal|total_pips|last_qualify_id|qualify|redeemPointAsync|CalculatePointAndMedal20260531|current_month_vp|minimum_vp|average_monthly_vp|signal_settled|reset_channel/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
       , 12)
@@ -5189,7 +5346,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
   const metaTraderPayloads = mergeChunks([...exactMetaTraderChunks, ...exactTermChunks, ...exactTermDetailChunks], 80).map(chunk => chunk.payload)
   const metaTraderTermAnswer = buildMetaTraderTermAnswer(metaTraderPayloads.length > 0 ? metaTraderPayloads : chunks, question)
 
-  if (metaTraderTermAnswer) {
+  if (!deepMode && metaTraderTermAnswer) {
     const sourceChunks = compactPayloadSources((metaTraderPayloads.length > 0 ? metaTraderPayloads : chunks)
       .filter(chunk => /metatrader|platform_type|metaserver|serverplatform|tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier|akun metatrader/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
       .filter(chunk => !/devops-docs/i.test(chunk.filePath ?? ""))
@@ -5211,7 +5368,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const vocabularyAnswer = buildVocabularyAnswer(chunks, question, registryExpansion)
 
-  if (vocabularyAnswer) {
+  if (!deepMode && vocabularyAnswer) {
     const sourceChunks = compactPayloadSources(chunks.filter(chunk => chunk.filePath?.startsWith("vocabulary://")), 12)
 
     console.log("\nANSWER\n")
@@ -5230,7 +5387,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const commentRuleAnswer = buildCommentRuleAnswer(chunks, question)
 
-  if (commentRuleAnswer) {
+  if (!deepMode && commentRuleAnswer) {
     console.log("\nANSWER\n")
     console.log(commentRuleAnswer)
 
@@ -5241,7 +5398,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const documentationTimelineAnswer = buildDocumentationTimelineAnswer(chunks, question)
 
-  if (documentationTimelineAnswer) {
+  if (!deepMode && documentationTimelineAnswer) {
     const sourceChunks = compactPayloadSources(chunks
       .filter(chunk => chunk.evidenceTypes?.includes("documentation"))
       .filter(chunk => /changelog|timeline|roadmap|history/i.test(chunk.filePath ?? ""))
@@ -5264,7 +5421,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const minimumEquityConfigAnswer = buildMinimumEquityConfigAnswer(chunks, question)
 
-  if (minimumEquityConfigAnswer) {
+  if (!deepMode && minimumEquityConfigAnswer) {
     const sourceChunks = compactPayloadSources(chunks
       .filter(chunk => /AUTO_COPY_MINIMUM_EQUITY|minimumEquity/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
       , 12)
@@ -5285,7 +5442,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const documentationEligibilityAnswer = buildDocumentationEligibilityAnswer(chunks, question)
 
-  if (documentationEligibilityAnswer) {
+  if (!deepMode && documentationEligibilityAnswer) {
     const sourceChunks = compactPayloadSources(chunks
       .filter(chunk => /isignal|auto copy|copy signal|bot copy|ois|subscription|bot|account|akun|equity|balance|mt4|mt5/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
       .filter(chunk => !isCronDocChunk(chunk))
@@ -5307,7 +5464,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const mermaidDiagramAnswer = await buildMermaidDiagramAnswer(chunks, question)
 
-  if (mermaidDiagramAnswer) {
+  if (!deepMode && mermaidDiagramAnswer) {
     console.log("\nANSWER\n")
     console.log(mermaidDiagramAnswer.answer)
 
@@ -5324,7 +5481,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const documentationGlossaryAnswer = await buildDocumentationGlossaryAnswer(chunks, question)
 
-  if (documentationGlossaryAnswer) {
+  if (!deepMode && documentationGlossaryAnswer) {
     const sourceChunks = compactPayloadSources(documentationGlossarySourceChunks(chunks, question), 12)
 
     console.log("\nANSWER\n")
@@ -5346,7 +5503,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
       ? buildStructuralEvidenceAnswer(chunks, question)
       : undefined
 
-  if (structuralEvidenceAnswer) {
+  if (!deepMode && structuralEvidenceAnswer) {
     console.log("\nANSWER\n")
     console.log(localizeAnswer(structuralEvidenceAnswer, question))
 
@@ -5389,6 +5546,13 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     .join("\n\n")
   const evidenceInventory = buildEvidenceInventory(chunks, question)
   const registryPromptContext = buildRegistryPromptContext(registryExpansion)
+  const investigationTraceLines = deepInvestigation
+    ? [
+        "Investigation trace:",
+        ...deepInvestigation.trace.map(item => `- ${item}`),
+        "",
+      ]
+    : []
 
   const historyLines = history.length > 0
     ? [
@@ -5420,6 +5584,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     "Evidence inventory:",
     evidenceInventory,
     "",
+    ...investigationTraceLines,
     "Relevant context:",
     context,
     "",
@@ -5448,6 +5613,8 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     "- If the evidence inventory says requested service/flow evidence is not present, do not describe a flow; say what anchor was missing.",
     "- For cross-service flows, separate confirmed facts from guesses.",
     "- Prefer evidence from RabbitMQ handlers, API routes, cron jobs, database usage, and config files.",
+    deepMode ? "- Deep investigation mode is enabled. Include a short 'Investigation trace' section before the final answer, summarizing which indexed evidence paths were followed. Keep it concise and do not expose hidden chain-of-thought." : undefined,
+    deepMode ? "- In deep investigation mode, use the expanded evidence set to follow route -> handler -> RPC/message -> consumer -> database/config/docs when those links are present. Stop at NEED_MORE_EVIDENCE when the next link is missing." : undefined,
     "- Mention queue, routing key, exchange, and database table names when present.",
     "- If a route calls a symbol/message and another service consumes or handles the same symbol/message, explain that link as confirmed only when both sides appear in sources.",
     "- Do not add architecture, database, deployment, or cross-service sections unless the question asks for them or the context directly supports them.",

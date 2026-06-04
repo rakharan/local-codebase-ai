@@ -47,6 +47,7 @@ type HistoryMessage = {
 type AskBody = {
   question: string
   limit?: number
+  deep?: boolean
   repoName?: string
   project?: string
   branch?: string
@@ -316,6 +317,10 @@ app.post("/api/ask", async (request, response) => {
     args.push("--limit", String(body.limit))
   }
 
+  if (body.deep) {
+    args.push("--deep")
+  }
+
   if (body.repoName) {
     args.push("--repo-name", body.repoName)
   }
@@ -339,7 +344,7 @@ app.post("/api/ask", async (request, response) => {
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, args, {
       cwd: rootDir,
-      timeout: 180_000,
+      timeout: body.deep ? 360_000 : 180_000,
       maxBuffer: 10 * 1024 * 1024,
       windowsHide: true,
     })

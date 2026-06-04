@@ -894,6 +894,10 @@
       <input id="project" type="text" placeholder="project (optional)" />
       <input id="branch" type="text" placeholder="branch (optional)" />
       <input id="serviceType" type="text" placeholder="service-type (optional)" />
+      <label class="manager-checks" title="Runs extra read-only retrieval passes before answering. Slower, better for messy flow questions.">
+        <input id="deepMode" type="checkbox" />
+        Deep investigation
+      </label>
     </div>
 
     <section class="manager-view" id="managerView">
@@ -2215,6 +2219,7 @@ async function ask() {
   const project = document.getElementById('project').value.trim() || undefined;
   const branch = document.getElementById('branch').value.trim() || undefined;
   const serviceType = document.getElementById('serviceType').value.trim() || undefined;
+  const deep = document.getElementById('deepMode').checked;
 
   // Add user message
   messages.push({ role: 'user', content: question });
@@ -2240,7 +2245,7 @@ async function ask() {
     const res = await fetch('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, repoName, project, branch, serviceType, history: historyForApi }),
+      body: JSON.stringify({ question, repoName, project, branch, serviceType, deep, history: historyForApi }),
     });
 
     const data = await res.json();
