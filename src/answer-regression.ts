@@ -205,13 +205,18 @@ const cases: AnswerCase[] = [
     ],
   },
   {
-    name: "iSignal minimum equity does not invent a number",
+    name: "iSignal minimum equity reads config fallback",
     question: "berapa minimal equity untuk bisa ikut isignal",
     required: [
-      "Saya tidak menemukan angka minimal equity yang eksplisit",
-      "bukan cron-job summary",
+      "Minimal equity iSignal",
+      "1000",
+      "AUTO_COPY_MINIMUM_EQUITY",
+      "runtime bisa berbeda",
+      "tf2-ois@develop",
+      "controllers/api.js",
     ],
     forbidden: [
+      "Saya tidak menemukan angka minimal equity",
       "CronCheckAutoCopyTrade",
       "By Tier Balance",
       "Margin Level",

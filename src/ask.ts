@@ -3820,6 +3820,12 @@ function questionAsksEligibilityRequirement(question: string): boolean {
     /\b(isignal|auto copy|copy signal|bot copy|ois)\b/i.test(question)
 }
 
+function questionAsksMinimumEquityConfig(question: string): boolean {
+  return /\b(equity|balance|saldo)\b/i.test(question) &&
+    /\b(berapa|minimal|minimum|min|required|requirement|syarat|persyaratan|dibutuhkan|ikut|join|participate)\b/i.test(question) &&
+    /\b(isignal|auto copy|copy signal|bot copy|ois|ikut|join|participate)\b/i.test(question)
+}
+
 function isCronDocChunk(chunk: RetrievedPayload): boolean {
   return /cron-jobs|cron jobs|cronjob/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`)
 }
@@ -3990,6 +3996,87 @@ function buildDocumentationEligibilityAnswer(chunks: RetrievedPayload[], questio
     asksEquity || asksAccountKind ? "" : undefined,
     asksEquity || asksAccountKind ? missingSpecific : undefined,
   ].filter((line): line is string => typeof line === "string").join("\n")
+}
+
+type MinimumEquityConfigFact = {
+  envName: string
+  fallbackValue?: string
+  variableName?: string
+  evidenceLine: string
+  source: string
+}
+
+function extractMinimumEquityConfigFacts(chunks: RetrievedPayload[]): MinimumEquityConfigFact[] {
+  const facts: MinimumEquityConfigFact[] = []
+
+  for (const chunk of chunks) {
+    const lines = (chunk.content ?? "").split(/\r?\n/)
+
+    for (const line of lines) {
+      if (!/AUTO_COPY_MINIMUM_EQUITY|minimumEquity/i.test(line)) continue
+
+      const trimmedLine = line.trim()
+      const fallbackMatch = trimmedLine.match(
+        /\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)?\s*=?\s*parseInt\(\s*process\.env\.(AUTO_COPY_MINIMUM_EQUITY)\s*\|\|\s*["'](\d+)["']/,
+      ) ?? trimmedLine.match(
+        /\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)?\s*=?\s*Number\(\s*process\.env\.(AUTO_COPY_MINIMUM_EQUITY)\s*\|\|\s*["'](\d+)["']/,
+      ) ?? trimmedLine.match(
+        /\b(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)?\s*=?\s*process\.env\.(AUTO_COPY_MINIMUM_EQUITY)\s*\|\|\s*["'](\d+)["']/,
+      )
+      const envOnlyMatch = trimmedLine.match(/process\.env\.(AUTO_COPY_MINIMUM_EQUITY)\b/)
+
+      if (!fallbackMatch && !envOnlyMatch) continue
+
+      const fact: MinimumEquityConfigFact = {
+        envName: fallbackMatch?.[2] ?? fallbackMatch?.[1] ?? envOnlyMatch?.[1] ?? "AUTO_COPY_MINIMUM_EQUITY",
+        evidenceLine: trimmedLine,
+        source: payloadSource(chunk),
+      }
+
+      if (fallbackMatch?.[3]) fact.fallbackValue = fallbackMatch[3]
+      if (fallbackMatch?.[1]) fact.variableName = fallbackMatch[1]
+
+      facts.push(fact)
+    }
+  }
+
+  return unique(facts.map(fact => JSON.stringify(fact)), 8).map(value => JSON.parse(value) as MinimumEquityConfigFact)
+}
+
+function buildMinimumEquityConfigAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
+  if (!questionAsksMinimumEquityConfig(question)) return undefined
+
+  const facts = extractMinimumEquityConfigFacts(chunks)
+  const factWithFallback = facts.find(fact => fact.fallbackValue)
+  const firstFact = factWithFallback ?? facts[0]
+
+  if (!firstFact) return undefined
+
+  if (factWithFallback?.fallbackValue) {
+    return [
+      localized(
+        `Minimal equity iSignal yang terkonfirmasi dari kode adalah ${factWithFallback.fallbackValue}.`,
+        `The confirmed iSignal minimum equity fallback in code is ${factWithFallback.fallbackValue}.`,
+      ),
+      localized(
+        `Nilai itu berasal dari fallback env ${factWithFallback.envName}; jika env var ini diset di runtime, nilai runtime bisa berbeda dari fallback kode.`,
+        `That value comes from the ${factWithFallback.envName} env fallback; if this env var is set at runtime, the runtime value can differ from the code fallback.`,
+      ),
+      "",
+      "Evidence:",
+      `- ${factWithFallback.evidenceLine} (${factWithFallback.source})`,
+    ].join("\n")
+  }
+
+  return [
+    localized(
+      `Saya menemukan config env ${firstFact.envName} untuk minimum equity iSignal, tapi angka fallback eksplisitnya tidak ada di chunk yang ter-retrieve.`,
+      `I found the ${firstFact.envName} env config for iSignal minimum equity, but no explicit fallback number in the retrieved chunks.`,
+    ),
+    "",
+    "Evidence:",
+    `- ${firstFact.evidenceLine} (${firstFact.source})`,
+  ].join("\n")
 }
 
 async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: string): Promise<string | undefined> {
@@ -4719,6 +4806,15 @@ async function main() {
         "ServerPlatform",
       ]
     : []
+  const minimumEquitySearchTerms = questionAsksMinimumEquityConfig(question)
+    ? [
+        "AUTO_COPY_MINIMUM_EQUITY",
+        "minimumEquity",
+        "minimum equity",
+        "auto copy minimum equity",
+        "equity",
+      ]
+    : []
 
   const exactTermSearchTerms = unique([
     ...questionHints,
@@ -4727,6 +4823,7 @@ async function main() {
     ...vocabBoostTerms,
     ...medalMechanismTerms,
     ...metaTraderSearchTerms,
+    ...minimumEquitySearchTerms,
   ], 48)
   const exactTermChunks = exactRoutes.length === 0
     ? await retrieveExactTermMatches(exactTermSearchTerms, questionAsksAboutAccountTypes(question) ? 60 : 32)
@@ -5103,6 +5200,27 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
     console.log("\nANSWER\n")
     console.log(documentationTimelineAnswer)
+
+    console.log("\nSOURCES\n")
+
+    for (const chunk of sourceChunks) {
+      console.log(
+        `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
+      )
+    }
+
+    return
+  }
+
+  const minimumEquityConfigAnswer = buildMinimumEquityConfigAnswer(chunks, question)
+
+  if (minimumEquityConfigAnswer) {
+    const sourceChunks = compactPayloadSources(chunks
+      .filter(chunk => /AUTO_COPY_MINIMUM_EQUITY|minimumEquity/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
+      , 12)
+
+    console.log("\nANSWER\n")
+    console.log(minimumEquityConfigAnswer)
 
     console.log("\nSOURCES\n")
 
