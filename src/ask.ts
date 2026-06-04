@@ -417,6 +417,52 @@ async function retrieveMetaTraderTermMatches(term: "MT4" | "MT5", resultLimit: n
     .slice(0, resultLimit)
 }
 
+async function retrieveMinimumEquityConfigChunks(resultLimit: number): Promise<RetrievedChunk[]> {
+  const matches: Array<RetrievedChunk & { score: number }> = []
+  let offset: string | number | Record<string, unknown> | null | undefined
+
+  do {
+    const filter = buildFilter()
+    const page = await qdrant.scroll(config.collectionName, {
+      limit: 256,
+      with_payload: true,
+      with_vector: false,
+      ...(filter ? { filter } : {}),
+      ...(offset ? { offset } : {}),
+    })
+
+    for (const point of page.points) {
+      const payload = point.payload as RetrievedPayload | null | undefined
+
+      if (!payload?.content) continue
+
+      const text = `${payload.filePath ?? ""}\n${payload.content}`
+
+      if (!/AUTO_COPY_MINIMUM_EQUITY|minimumEquity/i.test(text)) continue
+
+      let score = 0
+
+      if (/AUTO_COPY_MINIMUM_EQUITY/i.test(text)) score += 100
+      if (/minimumEquity/i.test(text)) score += 80
+      if (/auto copy|isignal|copy signal|bot copy|dsc_bot/i.test(text)) score += 30
+      if (/controllers|models|libs|config/i.test(payload.filePath ?? "")) score += 15
+      if (payload.evidenceTypes?.includes("documentation")) score -= 30
+
+      matches.push({
+        id: String(point.id),
+        payload,
+        score,
+      })
+    }
+
+    offset = page.next_page_offset
+  } while (offset)
+
+  return matches
+    .sort((left, right) => right.score - left.score)
+    .slice(0, resultLimit)
+}
+
 function shouldAnswerIndonesian(question: string): boolean {
   return shouldAnswerIndonesianFor(question, answerLanguage)
 }
@@ -4834,6 +4880,9 @@ async function main() {
 const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
   ? await retrieveMetaTraderTermMatches(metaTraderTerm, 64)
     : []
+  const exactMinimumEquityChunks = exactRoutes.length === 0 && questionAsksMinimumEquityConfig(question)
+    ? await retrieveMinimumEquityConfigChunks(24)
+    : []
 
   // Fallback: if the question is about general vocabulary topics (medal, level, rank) but no vocabulary
   // chunks were retrieved via exact matching, explicitly search for vocabulary chunks.
@@ -4940,7 +4989,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
   const exactDocumentationSubjectNeighborChunks = exactDocumentationSubjectChunks.length > 0 && questionAsksAboutGlossary(question)
     ? await retrieveNeighborChunks(exactDocumentationSubjectChunks, 40)
     : []
-  const hints = collectHints([...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactVocabularyChunks, ...exactMetaTraderChunks, ...exactTermDetailChunks, ...vocabUsageChunks, ...exactDocumentationSubjectChunks, ...initialChunks])
+  const hints = collectHints([...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactVocabularyChunks, ...exactMetaTraderChunks, ...exactMinimumEquityChunks, ...exactTermDetailChunks, ...vocabUsageChunks, ...exactDocumentationSubjectChunks, ...initialChunks])
   const expansionQueries =
     exactRoutes.length > 0 && exactChunks.length === 0
       ? []
@@ -4966,6 +5015,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
       ...exactTermChunks,
       ...exactVocabularyChunks,
       ...exactMetaTraderChunks,
+      ...exactMinimumEquityChunks,
       ...generalVocabChunks,
       ...vocabUsageChunks,
       ...exactTermDetailChunks,

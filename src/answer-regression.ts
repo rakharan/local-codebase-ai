@@ -213,7 +213,7 @@ const cases: AnswerCase[] = [
       "AUTO_COPY_MINIMUM_EQUITY",
       "runtime bisa berbeda",
       "tf2-ois@develop",
-      "controllers/api.js",
+      "models/ois.js",
     ],
     forbidden: [
       "Saya tidak menemukan angka minimal equity",

@@ -813,9 +813,22 @@
     font-size: 0.75rem;
   }
   .feedback-btn:hover { border-color: #58a6ff; }
+  .feedback-btn:disabled {
+    cursor: wait;
+    opacity: 0.65;
+  }
   .feedback-btn.saved {
     color: #7ee787;
     border-color: #238636;
+  }
+  .feedback-status {
+    color: #8b949e;
+  }
+  .feedback-status.error {
+    color: #ff7b72;
+  }
+  .feedback-status.saved {
+    color: #7ee787;
   }
 
   @media (max-width: 768px) {
@@ -2122,9 +2135,11 @@ function renderMessages() {
       }
       const feedbackHtml = msg.question ? `
         <div class="feedback-row">
-          <span>${msg.feedbackSaved ? 'Feedback saved' : 'Was this useful?'}</span>
-          <button class="feedback-btn ${msg.feedbackSaved === 'good' ? 'saved' : ''}" onclick="sendFeedback(${messageIndex}, 'good')">Good</button>
-          <button class="feedback-btn ${msg.feedbackSaved === 'bad' ? 'saved' : ''}" onclick="sendFeedback(${messageIndex}, 'bad')">Needs work</button>
+          <span class="feedback-status ${msg.feedbackError ? 'error' : msg.feedbackSaved ? 'saved' : ''}">
+            ${msg.feedbackError ? escapeHtml(msg.feedbackError) : msg.feedbackSaving ? 'Saving feedback...' : msg.feedbackSaved ? 'Feedback saved locally' : 'Was this useful?'}
+          </span>
+          <button class="feedback-btn ${msg.feedbackSaved === 'good' ? 'saved' : ''}" ${msg.feedbackSaving ? 'disabled' : ''} onclick="sendFeedback(${messageIndex}, 'good')">Good</button>
+          <button class="feedback-btn ${msg.feedbackSaved === 'bad' ? 'saved' : ''}" ${msg.feedbackSaving ? 'disabled' : ''} onclick="sendFeedback(${messageIndex}, 'bad')">Needs work</button>
         </div>
       ` : '';
       return `
@@ -2161,6 +2176,10 @@ async function sendFeedback(messageIndex, rating) {
     ? (prompt('What should be better? This becomes local feedback for future evals.', '') || '')
     : '';
 
+  msg.feedbackSaving = true;
+  msg.feedbackError = '';
+  renderMessages();
+
   try {
     const res = await fetch('/api/feedback', {
       method: 'POST',
@@ -2178,9 +2197,13 @@ async function sendFeedback(messageIndex, rating) {
     if (!res.ok) throw new Error(data.error || 'Feedback failed');
 
     msg.feedbackSaved = rating;
+    msg.feedbackSaving = false;
+    msg.feedbackError = '';
     renderMessages();
   } catch (err) {
-    alert(`Feedback failed: ${err.message}`);
+    msg.feedbackSaving = false;
+    msg.feedbackError = `Feedback failed: ${err.message}`;
+    renderMessages();
   }
 }
 
