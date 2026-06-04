@@ -5419,15 +5419,31 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     return
   }
 
-  const minimumEquityConfigAnswer = buildMinimumEquityConfigAnswer(chunks, question)
+  const minimumEquityEvidenceChunks = mergeChunks([
+    ...exactMinimumEquityChunks,
+    ...exactTermChunks,
+    ...exactTermDetailChunks,
+    ...answerChunks,
+  ], 32).map(chunk => chunk.payload)
+  const minimumEquityConfigAnswer = buildMinimumEquityConfigAnswer(minimumEquityEvidenceChunks.length > 0 ? minimumEquityEvidenceChunks : chunks, question)
 
-  if (!deepMode && minimumEquityConfigAnswer) {
-    const sourceChunks = compactPayloadSources(chunks
+  if (minimumEquityConfigAnswer) {
+    const sourceChunks = compactPayloadSources((minimumEquityEvidenceChunks.length > 0 ? minimumEquityEvidenceChunks : chunks)
       .filter(chunk => /AUTO_COPY_MINIMUM_EQUITY|minimumEquity/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
       , 12)
+    const answer = deepMode
+      ? [
+          localized("Investigation trace:", "Investigation trace:"),
+          localized("- Step 1: mendeteksi pertanyaan minimum equity iSignal.", "- Step 1: detected an iSignal minimum equity question."),
+          localized("- Step 2: mencari config code exact untuk AUTO_COPY_MINIMUM_EQUITY/minimumEquity.", "- Step 2: searched exact config code for AUTO_COPY_MINIMUM_EQUITY/minimumEquity."),
+          localized("- Step 3: memakai evidence config terkonfirmasi sebelum retrieval dokumentasi yang lebih noisy.", "- Step 3: used confirmed config evidence before noisier documentation retrieval."),
+          "",
+          minimumEquityConfigAnswer,
+        ].join("\n")
+      : minimumEquityConfigAnswer
 
     console.log("\nANSWER\n")
-    console.log(minimumEquityConfigAnswer)
+    console.log(answer)
 
     console.log("\nSOURCES\n")
 
