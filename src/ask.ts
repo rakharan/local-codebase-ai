@@ -2495,6 +2495,88 @@ function mergeChunks(chunks: RetrievedChunk[], maxResults = Math.max(limit, 12))
   return compactRetrievedChunks(chunks, maxResults)
 }
 
+function chunkHasStrongQuestionEvidence(chunk: RetrievedPayload, questionText: string): boolean {
+  const text = [
+    chunk.filePath ?? "",
+    chunk.content ?? "",
+    ...(chunk.routes ?? []),
+    ...(chunk.symbols ?? []),
+    ...(chunk.messageNames ?? []),
+    ...(chunk.queueNames ?? []),
+    ...(chunk.exchangeNames ?? []),
+    ...(chunk.dbTables ?? []),
+  ].join("\n").toLowerCase()
+  const terms = unique([
+    ...extractQuestionRoutes(questionText),
+    ...extractQuestionHints(questionText),
+    ...extractQuestionTerms(questionText),
+    ...extractConceptTokens(questionText),
+    ...registryExactSearchTerms(),
+  ].filter(term => term.length >= 2), 48)
+
+  if (terms.length === 0) return true
+
+  return terms.some(term => text.includes(term.toLowerCase()))
+}
+
+function scoreFallbackContextChunk(chunk: RetrievedPayload, questionText: string): number {
+  const lowerQuestion = questionText.toLowerCase()
+  const text = [
+    chunk.filePath ?? "",
+    chunk.content ?? "",
+    ...(chunk.routes ?? []),
+    ...(chunk.symbols ?? []),
+    ...(chunk.messageNames ?? []),
+    ...(chunk.queueNames ?? []),
+    ...(chunk.exchangeNames ?? []),
+    ...(chunk.dbTables ?? []),
+  ].join("\n").toLowerCase()
+  let score = 0
+
+  if (chunk.filePath?.startsWith("knowledge-notes://")) score += 70
+  if (chunk.filePath?.startsWith("vocabulary://")) score += questionAsksAboutGlossary(questionText) ? 50 : 8
+  if (chunk.evidenceTypes?.includes("documentation")) score += questionAsksAboutGlossary(questionText) || questionAsksHowWorks(questionText) ? 45 : -12
+  if ((chunk.routes?.length ?? 0) > 0) score += 28
+  if ((chunk.symbols?.length ?? 0) > 0) score += 18
+  if ((chunk.messageNames?.length ?? 0) > 0 || (chunk.queueNames?.length ?? 0) > 0 || (chunk.exchangeNames?.length ?? 0) > 0) score += 24
+  if ((chunk.dbTables?.length ?? 0) > 0) score += questionAsksAboutDatabase(questionText) ? 35 : 12
+  if (chunk.evidenceTypes?.includes("env_config")) score += /\b(config|env|minimum|minimal|syarat|requirement|rules?|aturan)\b/i.test(questionText) ? 30 : 4
+  if (chunk.evidenceTypes?.includes("test")) score -= 10
+  if (!options.repoName && chunk.repoName === "local-codebase-ai") score -= 100
+
+  for (const term of unique([...extractQuestionHints(questionText), ...extractQuestionTerms(questionText), ...extractConceptTokens(questionText)], 36)) {
+    const normalized = term.toLowerCase()
+
+    if (normalized.length < 2) continue
+    if (text.includes(normalized)) score += normalized.includes("/") ? 55 : 10
+  }
+
+  if (lowerQuestion.includes("isignal") && /isignal|auto copy|copy signal|bot copy|dsc_/i.test(text)) score += 22
+  if (lowerQuestion.includes("flow") || lowerQuestion.includes("alur") || lowerQuestion.includes("jelasin")) {
+    if (/route|handler|rpc|queue|consumer|publisher|model|controller/i.test(text)) score += 18
+  }
+
+  return score
+}
+
+function selectFallbackContextChunks(chunks: RetrievedPayload[], questionText: string): RetrievedPayload[] {
+  const maxContextChunks = deepMode ? 28 : Math.max(limit, 12)
+  const scored = chunks
+    .filter(chunk => chunk.content)
+    .filter(chunk => chunkHasStrongQuestionEvidence(chunk, questionText) || questionAsksAboutGlossary(questionText))
+    .map((chunk, index) => ({
+      chunk,
+      index,
+      score: scoreFallbackContextChunk(chunk, questionText),
+    }))
+    .filter(item => item.score > -40)
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .slice(0, maxContextChunks)
+    .map(item => item.chunk)
+
+  return scored.length > 0 ? scored : chunks.slice(0, maxContextChunks)
+}
+
 type DeepInvestigation = {
   trace: string[]
   chunks: RetrievedChunk[]
@@ -5222,7 +5304,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     ? buildExactEndpointDetailAnswer(routeDefinitions, endpointFacts, genericDownstreamFacts, chunks, upstreamFacts)
     : undefined
 
-  if (!deepMode && (deterministicExactAnswer || deterministicEndpointAnswer)) {
+  if (deterministicExactAnswer || deterministicEndpointAnswer) {
     const sourceChunks = compactPayloadSources(deterministicEndpointAnswer
       ? filterEndpointSourceChunks(
           retrievedChunks,
@@ -5256,7 +5338,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
       ? buildExactSymbolAnswer(extractNamedSymbolsFromQuestion(question), mergeChunks([...exactTermChunks, ...exactTermDetailChunks], 24))
       : undefined
 
-  if (!deepMode && exactSymbolAnswer) {
+  if (exactSymbolAnswer) {
     const sourceChunks = compactPayloadSources(mergeChunks([...exactTermChunks, ...exactTermDetailChunks], 16).map(chunk => chunk.payload), 16)
 
     console.log("\nANSWER\n")
@@ -5275,7 +5357,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const platformTypeGlossaryAnswer = buildPlatformTypeGlossaryAnswer(chunks, question, localized)
 
-  if (!deepMode && platformTypeGlossaryAnswer) {
+  if (platformTypeGlossaryAnswer) {
     const sourceChunks = compactPayloadSources(chunks.filter(chunk => {
       return /platform_type|mt4DemoType|mt5DemoType|MetaTrader|MT4|MT5/i.test(chunk.content ?? "")
     }), 12)
@@ -5296,7 +5378,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const accountTypeGlossaryAnswer = buildAccountTypeGlossaryAnswer(chunks, question, localized)
 
-  if (!deepMode && accountTypeGlossaryAnswer) {
+  if (accountTypeGlossaryAnswer) {
     const sourceChunks = compactPayloadSources(accountTypeRelevantSourceChunks(chunks, question), 12)
 
     console.log("\nANSWER\n")
@@ -5313,7 +5395,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     return
   }
 
-  if (!deepMode && questionAsksAboutAccountTypes(question)) {
+  if (questionAsksAboutAccountTypes(question)) {
     console.log("\nANSWER\n")
     console.log(buildAccountTypeNotFoundAnswer(question, localized))
 
@@ -5324,7 +5406,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const medalMechanismAnswer = buildMedalMechanismAnswer(chunks, question)
 
-  if (!deepMode && medalMechanismAnswer) {
+  if (medalMechanismAnswer) {
     const sourceChunks = compactPayloadSources(chunks
       .filter(chunk => /dsc_channels_point_events|dsc_channels_point_medal_journal|dsc_channels_point_balance|dsc_channels_point_redeem|POINT_LEVELS|RANGE_MEDAL|prev_channel_medal|total_pips|last_qualify_id|qualify|redeemPointAsync|CalculatePointAndMedal20260531|current_month_vp|minimum_vp|average_monthly_vp|signal_settled|reset_channel/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
       , 12)
@@ -5346,7 +5428,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
   const metaTraderPayloads = mergeChunks([...exactMetaTraderChunks, ...exactTermChunks, ...exactTermDetailChunks], 80).map(chunk => chunk.payload)
   const metaTraderTermAnswer = buildMetaTraderTermAnswer(metaTraderPayloads.length > 0 ? metaTraderPayloads : chunks, question)
 
-  if (!deepMode && metaTraderTermAnswer) {
+  if (metaTraderTermAnswer) {
     const sourceChunks = compactPayloadSources((metaTraderPayloads.length > 0 ? metaTraderPayloads : chunks)
       .filter(chunk => /metatrader|platform_type|metaserver|serverplatform|tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier|akun metatrader/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
       .filter(chunk => !/devops-docs/i.test(chunk.filePath ?? ""))
@@ -5368,7 +5450,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const vocabularyAnswer = buildVocabularyAnswer(chunks, question, registryExpansion)
 
-  if (!deepMode && vocabularyAnswer) {
+  if (vocabularyAnswer) {
     const sourceChunks = compactPayloadSources(chunks.filter(chunk => chunk.filePath?.startsWith("vocabulary://")), 12)
 
     console.log("\nANSWER\n")
@@ -5387,7 +5469,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const commentRuleAnswer = buildCommentRuleAnswer(chunks, question)
 
-  if (!deepMode && commentRuleAnswer) {
+  if (commentRuleAnswer) {
     console.log("\nANSWER\n")
     console.log(commentRuleAnswer)
 
@@ -5398,7 +5480,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const documentationTimelineAnswer = buildDocumentationTimelineAnswer(chunks, question)
 
-  if (!deepMode && documentationTimelineAnswer) {
+  if (documentationTimelineAnswer) {
     const sourceChunks = compactPayloadSources(chunks
       .filter(chunk => chunk.evidenceTypes?.includes("documentation"))
       .filter(chunk => /changelog|timeline|roadmap|history/i.test(chunk.filePath ?? ""))
@@ -5458,7 +5540,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const documentationEligibilityAnswer = buildDocumentationEligibilityAnswer(chunks, question)
 
-  if (!deepMode && documentationEligibilityAnswer) {
+  if (documentationEligibilityAnswer) {
     const sourceChunks = compactPayloadSources(chunks
       .filter(chunk => /isignal|auto copy|copy signal|bot copy|ois|subscription|bot|account|akun|equity|balance|mt4|mt5/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
       .filter(chunk => !isCronDocChunk(chunk))
@@ -5480,7 +5562,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const mermaidDiagramAnswer = await buildMermaidDiagramAnswer(chunks, question)
 
-  if (!deepMode && mermaidDiagramAnswer) {
+  if (mermaidDiagramAnswer) {
     console.log("\nANSWER\n")
     console.log(mermaidDiagramAnswer.answer)
 
@@ -5497,7 +5579,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const documentationGlossaryAnswer = await buildDocumentationGlossaryAnswer(chunks, question)
 
-  if (!deepMode && documentationGlossaryAnswer) {
+  if (documentationGlossaryAnswer) {
     const sourceChunks = compactPayloadSources(documentationGlossarySourceChunks(chunks, question), 12)
 
     console.log("\nANSWER\n")
@@ -5519,7 +5601,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
       ? buildStructuralEvidenceAnswer(chunks, question)
       : undefined
 
-  if (!deepMode && structuralEvidenceAnswer) {
+  if (structuralEvidenceAnswer) {
     console.log("\nANSWER\n")
     console.log(localizeAnswer(structuralEvidenceAnswer, question))
 
@@ -5534,7 +5616,8 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     return
   }
 
-  const context = chunks
+  const fallbackContextChunks = selectFallbackContextChunks(chunks, question)
+  const context = fallbackContextChunks
     .map((chunk, index) => {
       return [
         `SOURCE ${index + 1}`,
@@ -5560,7 +5643,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
       ].join("\n")
     })
     .join("\n\n")
-  const evidenceInventory = buildEvidenceInventory(chunks, question)
+  const evidenceInventory = buildEvidenceInventory(fallbackContextChunks, question)
   const registryPromptContext = buildRegistryPromptContext(registryExpansion)
   const investigationTraceLines = deepInvestigation
     ? [
@@ -5648,7 +5731,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   console.log("\nSOURCES\n")
 
-  for (const chunk of chunks) {
+  for (const chunk of fallbackContextChunks) {
     console.log(
       `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
     )

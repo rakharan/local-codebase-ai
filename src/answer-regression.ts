@@ -6,6 +6,7 @@ const execFileAsync = promisify(execFile)
 type AnswerCase = {
   name: string
   question: string
+  args?: string[]
   required: string[]
   forbidden?: string[]
   timeoutMs?: number
@@ -223,6 +224,26 @@ const cases: AnswerCase[] = [
     ],
   },
   {
+    name: "deep mode keeps iSignal minimum equity grounded in config",
+    question: "berapa minimal equity untuk bisa ikut isignal",
+    args: ["--deep"],
+    required: [
+      "Investigation trace",
+      "Minimal equity iSignal",
+      "1000",
+      "AUTO_COPY_MINIMUM_EQUITY",
+      "tf2-ois@develop",
+      "models/ois.js",
+    ],
+    forbidden: [
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+      "docs:isignal-docs\\cron-jobs",
+      "By Tier Balance",
+      "Margin Level",
+    ],
+    timeoutMs: 240_000,
+  },
+  {
     name: "short acronym definition prefers FA product docs",
     question: "apa itu FA",
     required: [
@@ -354,10 +375,10 @@ const cases: AnswerCase[] = [
   },
 ]
 
-async function ask(question: string, timeoutMs: number): Promise<string> {
+async function ask(question: string, timeoutMs: number, args: string[] = []): Promise<string> {
   const { stdout, stderr } = await execFileAsync(
     process.execPath,
-    ["--import", "./register-ts-node.mjs", "src/ask.ts", question],
+    ["--import", "./register-ts-node.mjs", "src/ask.ts", question, ...args],
     {
       cwd: process.cwd(),
       timeout: timeoutMs,
@@ -380,7 +401,7 @@ async function main() {
     process.stdout.write(`Running: ${answerCase.name}... `)
 
     try {
-      const output = await ask(answerCase.question, answerCase.timeoutMs ?? 180_000)
+      const output = await ask(answerCase.question, answerCase.timeoutMs ?? 180_000, answerCase.args)
       const missing = findMissing(output, answerCase.required)
       const presentForbidden = (answerCase.forbidden ?? []).filter(value => output.includes(value))
 
