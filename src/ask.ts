@@ -4357,6 +4357,22 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
     ...extractShortSubjectTokens(question),
     ...registryExpansion.terms.filter(term => term.length >= 4),
   ], 24).map(term => term.toLowerCase())
+  const explicitSubjectTerms = unique([
+    ...extractDefinitionSubjectTerms(question),
+    ...extractQuestionAcronyms(question),
+    ...extractShortSubjectTokens(question),
+  ], 12).map(term => term.toLowerCase())
+  const shortDefinitionTerms = asksDefinition
+    ? explicitSubjectTerms.filter(term => term.length >= 2 && term.length <= 4)
+    : []
+  const asksShortDefinition = asksDefinition && shortDefinitionTerms.length > 0
+  function mentionsExactSubject(text: string, terms = shortDefinitionTerms): boolean {
+    return terms.some(term => {
+      const escaped = escapeRegExp(term)
+
+      return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, "i").test(text)
+    })
+  }
   const asksFinancialAdvisor = subjectTerms.includes("fa") ||
     subjectTerms.includes("financial advisor") ||
     /\b(financial advisor|penasihat keuangan|fa porto)\b/i.test(question)
@@ -4369,6 +4385,10 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       ...(chunk.symbols ?? []),
       ...(chunk.messageNames ?? []),
     ].join("\n").toLowerCase()
+
+    if (asksShortDefinition && !asksFinancialAdvisor) {
+      return mentionsExactSubject(text)
+    }
 
     return subjectTerms.some(term => {
       const normalizedTerm = term.toLowerCase()
@@ -4434,6 +4454,10 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
         const content = chunk.content?.toLowerCase() ?? ""
         const isTopLevelIndex = isTopLevelIndexPath(filePath)
 
+        if (asksShortDefinition && !asksFinancialAdvisor && !mentionsExactSubject(`${filePath}\n${content}`)) {
+          return false
+        }
+
         return isTopLevelIndex ||
           (asksGuide && (filePath.includes("onboarding") || filePath.includes("guide"))) ||
           (asksGlossaryExplicitly && (filePath.includes("glossarium") || filePath.includes("glossary"))) ||
@@ -4443,6 +4467,15 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
           content.includes("memungkinkan pengguna")
       })
     : sortedDocChunks
+
+  if (asksShortDefinition && !asksFinancialAdvisor && docChunks.length === 0) {
+    const subject = shortDefinitionTerms[0]?.toUpperCase() ?? explicitSubjectTerms[0] ?? "term"
+
+    return localized(
+      `Saya tidak menemukan definisi ${subject} yang eksplisit di indexed code/docs. Registry hanya punya alias untuk membantu retrieval, tapi itu bukan evidence definisi.`,
+      `I did not find an explicit ${subject} definition in indexed code/docs. The registry only has aliases for retrieval, but that is not definition evidence.`,
+    )
+  }
 
   if (!asksOverview && asksRules) {
     const fullRuleChunks: RetrievedPayload[] = []
@@ -4536,10 +4569,12 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       const isDocusaurusComponent = /^<|^import\s+|DocCardList|useCurrentSidebarCategory|items=\{/.test(line)
       const isMetadataLine = /^---$/.test(line) || /^>\s+/.test(line)
       const mentionsSubject = subjectTerms.some(term => lowerLine.includes(term))
+      const mentionsShortSubject = asksShortDefinition ? mentionsExactSubject(lowerLine) : false
 
       if (isDiagramOrCode || isDocusaurusComponent || isMetadataLine) continue
       if (!asksCron && (/^\|?\s*Cron[A-Z]/.test(line) || lowerLine.includes("croncheck"))) continue
       if (asksOverview && isListOrTable && !asksRules) continue
+      if (asksShortDefinition && !asksFinancialAdvisor && !mentionsShortSubject) continue
 
       if (mentionsSubject || (asksRules && isListOrTable) || (!asksRules && !isListOrTable && !isHeader)) {
         facts.push(`${line} (${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine})`)
@@ -4553,7 +4588,18 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
 
   const uniqueFacts = unique(facts, maxFacts)
 
-  if (uniqueFacts.length === 0) return undefined
+  if (uniqueFacts.length === 0) {
+    if (asksShortDefinition && !asksFinancialAdvisor) {
+      const subject = shortDefinitionTerms[0]?.toUpperCase() ?? explicitSubjectTerms[0] ?? "term"
+
+      return localized(
+        `Saya tidak menemukan definisi ${subject} yang eksplisit di indexed code/docs. Registry hanya punya alias untuk membantu retrieval, tapi itu bukan evidence definisi.`,
+        `I did not find an explicit ${subject} definition in indexed code/docs. The registry only has aliases for retrieval, but that is not definition evidence.`,
+      )
+    }
+
+    return undefined
+  }
 
   function parseDocFact(fact: string): { text: string; source: string } {
     const match = fact.match(/^(.*)\s+\(([^()]+:\d+-\d+)\)$/)
@@ -4642,6 +4688,13 @@ function documentationGlossarySourceChunks(chunks: RetrievedPayload[], question:
     ...extractQuestionAcronyms(question),
     ...extractShortSubjectTokens(question),
   ], 16).map(term => term.toLowerCase())
+  const shortDefinitionTerms = asksDefinition
+    ? subjectTerms.filter(term => term.length >= 2 && term.length <= 4)
+    : []
+  const asksShortDefinition = asksDefinition && shortDefinitionTerms.length > 0
+  function mentionsExactSubject(text: string): boolean {
+    return shortDefinitionTerms.some(term => new RegExp(`(^|[^a-z0-9])${escapeRegExp(term)}([^a-z0-9]|$)`, "i").test(text))
+  }
   const asksFinancialAdvisor = subjectTerms.includes("fa") ||
     subjectTerms.includes("financial advisor") ||
     /\b(financial advisor|penasihat keuangan|fa porto)\b/i.test(question)
@@ -4651,6 +4704,11 @@ function documentationGlossarySourceChunks(chunks: RetrievedPayload[], question:
 
     const filePath = chunk.filePath?.toLowerCase() ?? ""
     const content = chunk.content?.toLowerCase() ?? ""
+    const text = `${filePath}\n${content}`
+
+    if (asksShortDefinition && !asksFinancialAdvisor && !mentionsExactSubject(text)) {
+      return false
+    }
 
     if (asksFinancialAdvisor) {
       return filePath.includes("fa-porto-docs") &&
@@ -5580,7 +5638,10 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
   const documentationGlossaryAnswer = await buildDocumentationGlossaryAnswer(chunks, question)
 
   if (documentationGlossaryAnswer) {
-    const sourceChunks = compactPayloadSources(documentationGlossarySourceChunks(chunks, question), 12)
+    const glossaryNotFoundAnswer = /Saya tidak menemukan definisi|I did not find an explicit/i.test(documentationGlossaryAnswer)
+    const sourceChunks = glossaryNotFoundAnswer
+      ? []
+      : compactPayloadSources(documentationGlossarySourceChunks(chunks, question), 12)
 
     console.log("\nANSWER\n")
     console.log(documentationGlossaryAnswer)

@@ -258,6 +258,21 @@ const cases: AnswerCase[] = [
     ],
   },
   {
+    name: "short acronym definition says not found without exact evidence",
+    question: "apa itu mmb",
+    args: ["--deep"],
+    required: [
+      "Saya tidak menemukan definisi MMB yang eksplisit",
+      "Registry hanya punya alias",
+    ],
+    forbidden: [
+      "Legacy Archives",
+      "Kami telah mempertahankan dokumentasi lama",
+      "docs:devops-docs\\index.mdx",
+    ],
+    timeoutMs: 240_000,
+  },
+  {
     name: "short acronym definition with rules includes FA business rules",
     question: "apa itu FA dan apa saja aturan nya",
     required: [
