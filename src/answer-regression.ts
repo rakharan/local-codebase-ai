@@ -258,12 +258,30 @@ const cases: AnswerCase[] = [
     ],
   },
   {
-    name: "short acronym definition says not found without exact evidence",
+    name: "short broker alias definition answers from registry",
     question: "apa itu mmb",
     args: ["--deep"],
     required: [
-      "Saya tidak menemukan definisi MMB yang eksplisit",
-      "Registry hanya punya alias",
+      "Askap/MMB adalah broker/domain yang sama",
+      "Alias: askap, mmb",
+      "config/services.json",
+    ],
+    forbidden: [
+      "Legacy Archives",
+      "Kami telah mempertahankan dokumentasi lama",
+      "docs:devops-docs\\index.mdx",
+    ],
+    timeoutMs: 240_000,
+  },
+  {
+    name: "canonical broker definition answers from registry",
+    question: "apa itu askap",
+    args: ["--deep"],
+    required: [
+      "Askap/MMB adalah broker/domain yang sama",
+      "MMB adalah alias",
+      "Nama canonical/projectId: askap / askap",
+      "config/services.json",
     ],
     forbidden: [
       "Legacy Archives",

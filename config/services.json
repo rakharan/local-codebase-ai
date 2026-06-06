@@ -12,6 +12,7 @@
       "name": "askap",
       "kind": "broker",
       "projectId": "askap",
+      "description": "Askap/MMB adalah broker/domain yang sama di workspace ini. MMB adalah alias untuk flow, route, dan tipe akun yang terkait Askap.",
       "aliases": ["askap", "mmb", "mmb broker", "askap/mmb"],
       "repos": ["ims-tf", "ims-tf2", "mrg-accounts"],
       "keywords": ["askap", "mmb", "AskapController", "AskapApps", "ReqAccountDemo", "RequestDemoAccount", "GetAccountTypes", "GetAccountTypesV2", "accountTypes", "accountTypesV2", "users_demoid"]

@@ -4,7 +4,7 @@ import { qdrant } from "./lib/qdrant.js"
 import { config } from "./lib/config.js"
 import { createEmbedding, chat } from "./lib/ollama.js"
 import { readRelationshipGraph } from "./lib/graph.js"
-import { buildRegistryPromptContext, expandQuestionWithRegistry, type RegistryExpansion } from "./lib/service-registry.js"
+import { buildRegistryPromptContext, expandQuestionWithRegistry, type RegistryExpansion, type ServiceRegistryEntry } from "./lib/service-registry.js"
 import { normalizeProjectIds, reposForProjectIds } from "./lib/service-registry.js"
 import {
   accountTypeRelevantSourceChunks,
@@ -4337,6 +4337,73 @@ function buildMinimumEquityConfigAnswer(chunks: RetrievedPayload[], question: st
   ].join("\n")
 }
 
+function normalizeRegistryAlias(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
+}
+
+function registryAliasMatchesTerm(entry: ServiceRegistryEntry, term: string): boolean {
+  const normalizedTerm = normalizeRegistryAlias(term)
+
+  if (!normalizedTerm) return false
+
+  return [entry.name, ...(entry.aliases ?? [])].some(alias => {
+    const normalizedAlias = normalizeRegistryAlias(alias)
+
+    return normalizedAlias === normalizedTerm ||
+      normalizedAlias.split(/\s+/g).includes(normalizedTerm)
+  })
+}
+
+function buildRegistryAliasDefinitionAnswer(question: string, expansion: RegistryExpansion): string | undefined {
+  if (!questionAsksAboutGlossary(question)) return undefined
+  if (questionAsksAboutAccountTypes(question)) return undefined
+  if (/\b(aturan|rules?|rule|ketentuan|business rules?)\b/i.test(question)) return undefined
+
+  const asksDefinition = /\b(apa itu|what is|maksud|meaning|define|definition|explain|describe|jelasin|jelaskan)\b/i.test(question)
+
+  if (!asksDefinition) return undefined
+
+  const explicitTerms = unique([
+    ...extractDefinitionSubjectTerms(question),
+    ...extractQuestionAcronyms(question),
+    ...extractShortSubjectTokens(question),
+  ], 12)
+  const entry = expansion.matchedEntries.find(candidate => {
+    if (candidate.kind !== "broker") return false
+
+    return explicitTerms.some(term => registryAliasMatchesTerm(candidate, term))
+  })
+
+  if (!entry?.description) return undefined
+
+  const canonicalName = entry.name
+  const aliases = unique([entry.name, ...(entry.aliases ?? [])], 12)
+  const repos = unique(entry.repos ?? [], 12)
+  const projectId = entry.projectId ?? entry.name
+
+  return [
+    localized(
+      `Berdasarkan registry lokal: ${entry.description}`,
+      `From the local registry: ${entry.description}`,
+    ),
+    localized(
+      `Nama canonical/projectId: ${canonicalName} / ${projectId}.`,
+      `Canonical name/projectId: ${canonicalName} / ${projectId}.`,
+    ),
+    aliases.length > 0
+      ? localized(`Alias: ${aliases.join(", ")}.`, `Aliases: ${aliases.join(", ")}.`)
+      : undefined,
+    repos.length > 0
+      ? localized(`Repo terkait: ${repos.join(", ")}.`, `Related repos: ${repos.join(", ")}.`)
+      : undefined,
+    "",
+    localized(
+      "Catatan: ini berasal dari config/services.json sebagai registry lokal. Untuk detail implementasi, tanyakan endpoint, flow, tabel, atau tipe akun spesifik.",
+      "Note: this comes from config/services.json as local registry knowledge. For implementation details, ask for a specific endpoint, flow, table, or account type.",
+    ),
+  ].filter((line): line is string => typeof line === "string").join("\n")
+}
+
 async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], question: string): Promise<string | undefined> {
   if (!questionAsksAboutGlossary(question)) return undefined
   if (questionAsksAboutAccountTypes(question)) return undefined
@@ -5631,6 +5698,18 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
         `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
       )
     }
+
+    return
+  }
+
+  const registryAliasDefinitionAnswer = buildRegistryAliasDefinitionAnswer(question, registryExpansion)
+
+  if (registryAliasDefinitionAnswer) {
+    console.log("\nANSWER\n")
+    console.log(registryAliasDefinitionAnswer)
+
+    console.log("\nSOURCES\n")
+    console.log("- config/services.json (local registry)")
 
     return
   }
