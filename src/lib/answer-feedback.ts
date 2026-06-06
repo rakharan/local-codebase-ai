@@ -77,3 +77,14 @@ export async function createAnswerFeedback(input: AnswerFeedbackInput): Promise<
 
   return item
 }
+
+export async function deleteAnswerFeedback(feedbackId: string): Promise<boolean> {
+  const items = await readAnswerFeedback()
+  const nextItems = items.filter(item => item.id !== feedbackId)
+
+  if (nextItems.length === items.length) return false
+
+  await writeFeedback(nextItems)
+
+  return true
+}

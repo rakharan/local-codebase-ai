@@ -462,6 +462,39 @@
   .manager-list-body {
     color: #c9d1d9;
     font-size: 0.78rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+  }
+  .manager-list-body code {
+    color: #e6edf3;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 1px 4px;
+  }
+  .feedback-preview-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .feedback-preview-box {
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    background: #161b22;
+    padding: 8px;
+    min-height: 80px;
+  }
+  .feedback-preview-title {
+    color: #8b949e;
+    font-size: 0.7rem;
+    font-weight: 700;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+  }
+  .manager-list-body {
+    color: #c9d1d9;
+    font-size: 0.78rem;
     white-space: pre-wrap;
     margin-bottom: 8px;
   }
@@ -1101,6 +1134,18 @@
           </div>
 
           <div class="manager-panel wide-panel">
+            <h2>Answer Feedback Review</h2>
+            <div class="manager-actions">
+              <button class="manager-btn primary" onclick="loadAnswerFeedback()">Refresh Feedback</button>
+              <button class="manager-btn" onclick="setFeedbackFilter('bad')">Needs Work</button>
+              <button class="manager-btn" onclick="setFeedbackFilter('good')">Good</button>
+              <button class="manager-btn" onclick="setFeedbackFilter('all')">All</button>
+            </div>
+            <div class="manager-status" id="feedbackReviewStatus"></div>
+            <div class="manager-list" id="answerFeedbackList"></div>
+          </div>
+
+          <div class="manager-panel wide-panel">
             <h2>Answer Evaluation</h2>
             <div class="manager-actions">
               <button class="manager-btn primary" onclick="runEvaluationSuite('baseline')">Run Baseline</button>
@@ -1192,6 +1237,8 @@ const registryList = document.getElementById('registryList');
 const registrySearch = document.getElementById('registrySearch');
 const notesStatus = document.getElementById('notesStatus');
 const knowledgeNotesList = document.getElementById('knowledgeNotesList');
+const feedbackReviewStatus = document.getElementById('feedbackReviewStatus');
+const answerFeedbackList = document.getElementById('answerFeedbackList');
 const evalStatus = document.getElementById('evalStatus');
 const evalOutput = document.getElementById('evalOutput');
 
@@ -1202,6 +1249,8 @@ let registryEntries = [];
 let editingRegistryEntryName = null;
 let knowledgeNotes = [];
 let editingKnowledgeNoteId = null;
+let answerFeedbackItems = [];
+let answerFeedbackFilter = 'bad';
 
 // In-memory conversation history
 let messages = [];
@@ -1252,6 +1301,7 @@ function showManager() {
   loadIndexSummary();
   loadRegistry();
   loadKnowledgeNotes();
+  loadAnswerFeedback();
 }
 
 function showChat() {
@@ -1954,6 +2004,161 @@ async function deleteKnowledgeNote(noteId) {
     await loadIndexSummary();
   } catch (err) {
     notesStatus.textContent = `Delete failed: ${err.message}`;
+  }
+}
+
+async function loadAnswerFeedback() {
+  feedbackReviewStatus.textContent = 'Loading answer feedback...';
+  answerFeedbackList.innerHTML = '<div class="manager-muted">Loading feedback...</div>';
+
+  try {
+    const res = await fetch('/api/feedback');
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Failed to load feedback');
+
+    answerFeedbackItems = data.items || [];
+    renderAnswerFeedback();
+  } catch (err) {
+    feedbackReviewStatus.textContent = `Could not load feedback: ${err.message}`;
+    answerFeedbackList.innerHTML = '<div class="manager-muted">Feedback API is not available.</div>';
+  }
+}
+
+function setFeedbackFilter(rating) {
+  answerFeedbackFilter = rating;
+  renderAnswerFeedback();
+}
+
+function feedbackRegressionDraft(item) {
+  const required = item.rating === 'bad'
+    ? ['REPLACE_WITH_EXPECTED_TEXT']
+    : [truncateText((item.answer || '').replace(/\s+/g, ' '), 80)];
+  const forbidden = item.rating === 'bad'
+    ? ['REPLACE_WITH_BAD_TEXT']
+    : ['NOT_FOUND_IN_INDEXED_CODEBASE'];
+
+  return [
+    '{',
+    `  name: ${JSON.stringify(`feedback: ${truncateText(item.question, 56)}`)},`,
+    `  question: ${JSON.stringify(item.question)},`,
+    '  required: [',
+    ...required.map(value => `    ${JSON.stringify(value)},`),
+    '  ],',
+    '  forbidden: [',
+    ...forbidden.map(value => `    ${JSON.stringify(value)},`),
+    '  ],',
+    '},',
+  ].join('\n');
+}
+
+function renderAnswerFeedback() {
+  const filteredItems = answerFeedbackFilter === 'all'
+    ? answerFeedbackItems
+    : answerFeedbackItems.filter(item => item.rating === answerFeedbackFilter);
+  const counts = answerFeedbackItems.reduce((acc, item) => {
+    acc[item.rating] = (acc[item.rating] || 0) + 1;
+    return acc;
+  }, {});
+
+  feedbackReviewStatus.textContent = `${filteredItems.length} shown. Needs work: ${counts.bad || 0}. Good: ${counts.good || 0}.`;
+
+  if (filteredItems.length === 0) {
+    answerFeedbackList.innerHTML = '<div class="manager-muted">No feedback for this filter yet.</div>';
+    return;
+  }
+
+  answerFeedbackList.innerHTML = filteredItems.map(item => `
+    <div class="manager-list-item">
+      <div class="manager-list-title">
+        ${item.rating === 'bad' ? 'Needs work' : 'Good'} feedback
+        <code>${escapeHtml(item.id.slice(0, 8))}</code>
+      </div>
+      <div class="manager-list-meta">
+        created ${escapeHtml(formatDateTime(item.createdAt))}
+        ${item.note ? ` Â· note: ${escapeHtml(truncateText(item.note, 140))}` : ''}
+      </div>
+      <div class="feedback-preview-grid">
+        <div class="feedback-preview-box">
+          <div class="feedback-preview-title">Question</div>
+          <div class="manager-list-body">${escapeHtml(item.question)}</div>
+        </div>
+        <div class="feedback-preview-box">
+          <div class="feedback-preview-title">Answer</div>
+          <div class="manager-list-body">${escapeHtml(truncateText(item.answer, 700))}</div>
+        </div>
+      </div>
+      ${(item.sources || []).length > 0 ? `
+        <div class="manager-list-meta">
+          Sources: ${(item.sources || []).slice(0, 6).map(source => `<code>${escapeHtml(source)}</code>`).join(' ')}
+          ${(item.sources || []).length > 6 ? `<span class="manager-muted">+${item.sources.length - 6} more</span>` : ''}
+        </div>
+      ` : ''}
+      <div class="manager-actions">
+        <button class="manager-btn" onclick="draftKnowledgeNoteFromFeedback('${item.id}')">Draft Note</button>
+        <button class="manager-btn" onclick="copyRegressionDraft('${item.id}')">Copy Regression Draft</button>
+        <button class="manager-btn danger" onclick="deleteAnswerFeedback('${item.id}')">Resolve/Delete</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function draftKnowledgeNoteFromFeedback(feedbackId) {
+  const item = answerFeedbackItems.find(feedback => feedback.id === feedbackId);
+  if (!item) return;
+
+  editingKnowledgeNoteId = null;
+  document.getElementById('noteTitle').value = `Answer feedback: ${truncateText(item.question, 72)}`;
+  document.getElementById('noteProjects').value = '';
+  document.getElementById('noteAuthor').value = 'local feedback';
+  document.getElementById('noteStatus').value = item.rating === 'bad' ? 'proposal' : 'confirmed';
+  document.getElementById('noteBody').value = [
+    `Feedback rating: ${item.rating}`,
+    `Question: ${item.question}`,
+    item.note ? `Reviewer note: ${item.note}` : undefined,
+    '',
+    'Observed answer:',
+    item.answer,
+    '',
+    'Sources:',
+    ...(item.sources || []).map(source => `- ${source}`),
+    '',
+    'Expected correction / confirmed knowledge:',
+    '- ',
+  ].filter(line => line !== undefined).join('\n');
+  notesStatus.textContent = 'Drafted knowledge note from feedback. Edit it, add projects, then Save Note.';
+}
+
+async function copyRegressionDraft(feedbackId) {
+  const item = answerFeedbackItems.find(feedback => feedback.id === feedbackId);
+  if (!item) return;
+
+  const draft = feedbackRegressionDraft(item);
+
+  try {
+    await navigator.clipboard.writeText(draft);
+    feedbackReviewStatus.textContent = 'Regression draft copied. Paste it into src/answer-regression.ts and replace placeholders.';
+  } catch {
+    window.prompt('Copy regression draft:', draft);
+  }
+}
+
+async function deleteAnswerFeedback(feedbackId) {
+  const item = answerFeedbackItems.find(feedback => feedback.id === feedbackId);
+  if (!confirm(`Resolve/delete feedback for: ${item?.question || feedbackId}?`)) return;
+
+  feedbackReviewStatus.textContent = 'Deleting feedback...';
+
+  try {
+    const res = await fetch(`/api/feedback/${feedbackId}`, { method: 'DELETE' });
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Delete failed');
+
+    answerFeedbackItems = answerFeedbackItems.filter(feedback => feedback.id !== feedbackId);
+    renderAnswerFeedback();
+  } catch (err) {
+    feedbackReviewStatus.textContent = `Delete failed: ${err.message}`;
   }
 }
 

@@ -15,6 +15,7 @@ import {
 } from "./lib/knowledge-notes.js"
 import {
   createAnswerFeedback,
+  deleteAnswerFeedback,
   readAnswerFeedback,
   type AnswerFeedbackInput,
 } from "./lib/answer-feedback.js"
@@ -708,6 +709,23 @@ app.post("/api/feedback", async (request, response) => {
     const message = error instanceof Error ? error.message : String(error)
 
     response.status(400).json({ error: message })
+  }
+})
+
+app.delete("/api/feedback/:id", async (request, response) => {
+  try {
+    const deleted = await deleteAnswerFeedback(request.params.id)
+
+    if (!deleted) {
+      response.status(404).json({ error: `Feedback item not found: ${request.params.id}` })
+      return
+    }
+
+    response.json({ ok: true })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(500).json({ error: message })
   }
 })
 
