@@ -35,6 +35,7 @@ import {
   questionAsksAboutServicesOrFlow,
   questionAsksForDiagram,
   questionAsksHowWorks,
+  questionAsksInventory,
   questionAsksMedalMechanism,
   questionBrokerHint,
   questionMetaTraderTerm,
@@ -5195,7 +5196,8 @@ async function main() {
   const shouldDiscoverConceptRoutes = questionRoutes.length === 0 &&
     !negativeRepoConstraint &&
     questionAsksAboutServicesOrFlow(question) &&
-    !questionAsksHowWorks(question)
+    !questionAsksHowWorks(question) &&
+    !questionAsksInventory(question)
   const conceptRoutes = shouldDiscoverConceptRoutes
     ? unique([...discoverGraphRouteAnchors(question, relationshipGraph), ...await discoverConceptRouteAnchors(question)], 10)
     : []

@@ -171,6 +171,10 @@ export function questionAsksHowWorks(question: string): boolean {
   return /\b(how .*works?|how does .*work|cara kerja|gimana .*kerja|bagaimana .*kerja)\b/i.test(question)
 }
 
+export function questionAsksInventory(question: string): boolean {
+  return /\b(what services|services? (detected|list|available)|detected (services?|repos?)|list.*(services?|repos?)|environment variables?|env vars?|process\.env|what env|which env|database tables?|db tables?|which tables?|what tables?|tables? (used|detected))\b/i.test(question)
+}
+
 export function questionAsksForDiagram(question: string): boolean {
   return /\b(flowchart|diagram|mermaid|sequence diagram|sequenceDiagram|visuali[sz]e|gambar(?:kan)? alur|buat(?:kan)? diagram|buat(?:kan)? flowchart|alur visual)\b/i.test(question)
 }
