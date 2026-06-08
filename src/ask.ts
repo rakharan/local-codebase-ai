@@ -5397,10 +5397,20 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
           .filter((p): p is RetrievedPayload => !!p?.content)
 
         if (doctorChunks.length > 0) {
+          // Prefer summary chunks, limit detail output
+          const summaryChunks = doctorChunks.filter(c => c.content?.includes('unique)') || c.content?.includes('# ') || c.content?.includes('## Summary'))
+          const detailChunks = doctorChunks.filter(c => !summaryChunks.includes(c))
+          const output = summaryChunks.length > 0
+            ? [...summaryChunks, ...detailChunks.slice(0, 2)]
+            : doctorChunks.slice(0, 8)
+
           console.log("\nANSWER\n")
-          console.log(doctorChunks.map(c => c.content).join("\n\n---\n\n"))
+          console.log(output.map(c => c.content).join("\n\n---\n\n"))
+          if (detailChunks.length > 2 && summaryChunks.length > 0) {
+            console.log(`\n... (${detailChunks.length - 2} more detail chunks available)`)
+          }
           console.log("\nSOURCES\n")
-          for (const chunk of doctorChunks) {
+          for (const chunk of output) {
             console.log(`- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`)
           }
           return
