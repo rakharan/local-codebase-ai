@@ -5812,6 +5812,20 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
   }
 
   const hasDoctorInventory = questionAsksInventory(question) && chunks.some(c => c.filePath?.startsWith("doctor:"))
+
+  // Direct Doctor inventory answer — no LLM needed for listing questions
+  if (hasDoctorInventory) {
+    const doctorChunks = chunks.filter(c => c.filePath?.startsWith("doctor:") || c.filePath?.startsWith("doctor-fact:"))
+    const content = doctorChunks.map(c => c.content ?? "").join("\n\n---\n\n")
+    console.log("\nANSWER\n")
+    console.log(content)
+    console.log("\nSOURCES\n")
+    for (const chunk of doctorChunks) {
+      console.log(`- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`)
+    }
+    return
+  }
+
   const structuralEvidenceAnswer =
     !hasDoctorInventory && exactRoutes.length === 0 && (questionAsksAboutDatabase(question) || questionAsksAboutServicesOrFlow(question))
       ? buildStructuralEvidenceAnswer(chunks, question)
