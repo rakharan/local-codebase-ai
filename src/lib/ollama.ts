@@ -138,8 +138,14 @@ export async function chat(prompt: string): Promise<string> {
     const data = (await res.json()) as OllamaChatResponse
 
     const raw = data.message?.content ?? ""
-    // Strip qwen3 thinking blocks if present
-    return raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "").trim()
+    // Strip qwen3 thinking blocks (complete or partial) and post-NOT_FOUND hallucination
+    const cleaned = raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "").replace(/^[\s\S]*?<\/think>\s*/g, "")
+    // If NOT_FOUND is present, only keep text up to and including it
+    const notFoundIdx = cleaned.indexOf("NOT_FOUND_IN_INDEXED_CODEBASE")
+    if (notFoundIdx >= 0) {
+      return cleaned.slice(0, notFoundIdx + "NOT_FOUND_IN_INDEXED_CODEBASE".length).trim()
+    }
+    return cleaned.trim()
 }
 
 export async function detectPreferredLanguage(input: string): Promise<AnswerLanguage> {
