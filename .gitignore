@@ -4,3 +4,9 @@ dist
 .data
 backups
 *.log
+
+# Repo Doctor generated output
+repo-docs-*/
+
+# Temp test output
+.tmp-doctor-test
