@@ -4,79 +4,532 @@
       "name": "mrg",
       "kind": "broker",
       "projectId": "mrg",
-      "aliases": ["mrg", "mrg broker", "mrg api"],
-      "repos": ["ims-tf", "ims-tf2", "mrg-accounts", "mrg-cash", "mrg-metatrader"],
-      "keywords": ["mrg", "MrgController", "MrgV2Controller", "MRGAccountRpc", "ReqAccountDemo", "RequestDemoAccount", "GetAccountTypes", "GetAccountTypesV2", "GetAccountTypeByUserId", "accountTypes", "MetaAccountType", "type_name", "group_creation"]
+      "aliases": [
+        "mrg",
+        "mrg broker",
+        "mrg api"
+      ],
+      "repos": [
+        "ims-tf",
+        "ims-tf2",
+        "mrg-accounts",
+        "mrg-cash",
+        "mrg-metatrader"
+      ],
+      "keywords": [
+        "mrg",
+        "MrgController",
+        "MrgV2Controller",
+        "MRGAccountRpc",
+        "ReqAccountDemo",
+        "RequestDemoAccount",
+        "GetAccountTypes",
+        "GetAccountTypesV2",
+        "GetAccountTypeByUserId",
+        "accountTypes",
+        "MetaAccountType",
+        "type_name",
+        "group_creation"
+      ]
     },
     {
       "name": "askap",
       "kind": "broker",
       "projectId": "askap",
       "description": "Askap/MMB adalah broker/domain yang sama di workspace ini. MMB adalah alias untuk flow, route, dan tipe akun yang terkait Askap.",
-      "aliases": ["askap", "mmb", "mmb broker", "askap/mmb"],
-      "repos": ["ims-tf", "ims-tf2", "mrg-accounts"],
-      "keywords": ["askap", "mmb", "AskapController", "AskapApps", "ReqAccountDemo", "RequestDemoAccount", "GetAccountTypes", "GetAccountTypesV2", "accountTypes", "accountTypesV2", "users_demoid"]
+      "aliases": [
+        "askap",
+        "mmb",
+        "mmb broker",
+        "askap/mmb"
+      ],
+      "repos": [
+        "ims-tf",
+        "ims-tf2",
+        "mrg-accounts"
+      ],
+      "keywords": [
+        "askap",
+        "mmb",
+        "AskapController",
+        "AskapApps",
+        "ReqAccountDemo",
+        "RequestDemoAccount",
+        "GetAccountTypes",
+        "GetAccountTypesV2",
+        "accountTypes",
+        "accountTypesV2",
+        "users_demoid"
+      ]
     },
     {
       "name": "isignal",
       "kind": "domain",
       "projectId": "isignal",
       "description": "The Auto Copy system allows users to automatically replicate trading signals from master channels to their accounts. It handles signal ingestion, order execution, and protection from stale or invalid trades.",
-      "aliases": ["isignal", "iSignal", "ois", "copy signal", "auto copy", "bot copy"],
-      "repos": ["tf2-ois", "fa-trade-publisher", "ims-tf2", "tf2-microservice", "tf2-sinyo", "tf-email-sender", "mt5-wrapper", "tf2-mt5-manager", "tf2-mt4-manager", "tf2-ois-admin"],
-      "docs": ["isignal-docs", "i18n/id/docusaurus-plugin-content-docs/current/isignal-docs"],
-      "keywords": ["SignalBroadcast", "subscription", "channel", "bot", "copy trade", "isignal", "ois", "order", "signal", "auto", "copy", "dsc_signals", "dsc_signals_copy", "dsc_bot_copy", "dsc_subs", "SignalService", "nearly expired", "subscription reminder"],
-      "routes": ["/ois/api/v1/copy/auto/setting/create/", "/ois/api/v2/copy/auto/setting/create/", "/ois/api/v1/copy/auto/edit/", "/ois/api/v2/copy/auto/edit/", "/ois/api/v1/copy/auto/config/", "/ois/api/v1/subscribe/payment/price/", "/ois/api/v1/subscribe/payment/fee/", "/auto/"],
-      "functions": ["SignalService.pushSignalToAmqpPubSub"],
-      "queues": ["pubsub-tf-fx-signal-copy"],
-      "tables": ["dsc_bot_copy", "dsc_bot_copy_details", "dsc_bot_copy_details_active", "dsc_subs", "dsc_subs_active", "dsc_subs_details", "dsc_payment", "dsc_payment_transactions", "dsc_signals", "dsc_signals_copy", "dsc_signals_copy_partial", "dsc_subs_reminder"],
-      "pathRules": [
-        { "repo": "ims-tf2", "pattern": "components/mrg/**", "projectId": "mrg" },
-        { "repo": "ims-tf2", "pattern": "components/askap/**", "projectId": "askap" },
-        { "repo": "tf-documentation", "pattern": "isignal-docs/**", "projectId": "isignal" },
-        { "repo": "tf-documentation", "pattern": "docs/isignal-docs/**", "projectId": "isignal" }
+      "aliases": [
+        "isignal",
+        "iSignal",
+        "ois",
+        "copy signal",
+        "auto copy",
+        "bot copy"
       ],
-      "notes": ["ims-tf2 is only involved when creating/updating bot copy", "tf2-ois is the main API that users interact with"]
+      "repos": [
+        "tf2-ois",
+        "fa-trade-publisher",
+        "ims-tf2",
+        "tf2-microservice",
+        "tf2-sinyo",
+        "tf-email-sender",
+        "mt5-wrapper",
+        "tf2-mt5-manager",
+        "tf2-mt4-manager",
+        "tf2-ois-admin"
+      ],
+      "docs": [
+        "isignal-docs",
+        "i18n/id/docusaurus-plugin-content-docs/current/isignal-docs"
+      ],
+      "keywords": [
+        "SignalBroadcast",
+        "subscription",
+        "channel",
+        "bot",
+        "copy trade",
+        "isignal",
+        "ois",
+        "order",
+        "signal",
+        "auto",
+        "copy",
+        "dsc_signals",
+        "dsc_signals_copy",
+        "dsc_bot_copy",
+        "dsc_subs",
+        "SignalService",
+        "nearly expired",
+        "subscription reminder"
+      ],
+      "routes": [
+        "/ois/api/v1/copy/auto/setting/create/",
+        "/ois/api/v2/copy/auto/setting/create/",
+        "/ois/api/v1/copy/auto/edit/",
+        "/ois/api/v2/copy/auto/edit/",
+        "/ois/api/v1/copy/auto/config/",
+        "/ois/api/v1/subscribe/payment/price/",
+        "/ois/api/v1/subscribe/payment/fee/",
+        "/auto/"
+      ],
+      "functions": [
+        "SignalService.pushSignalToAmqpPubSub"
+      ],
+      "queues": [
+        "pubsub-tf-fx-signal-copy"
+      ],
+      "tables": [
+        "dsc_bot_copy",
+        "dsc_bot_copy_details",
+        "dsc_bot_copy_details_active",
+        "dsc_subs",
+        "dsc_subs_active",
+        "dsc_subs_details",
+        "dsc_payment",
+        "dsc_payment_transactions",
+        "dsc_signals",
+        "dsc_signals_copy",
+        "dsc_signals_copy_partial",
+        "dsc_subs_reminder"
+      ],
+      "pathRules": [
+        {
+          "repo": "ims-tf2",
+          "pattern": "components/mrg/**",
+          "projectId": "mrg"
+        },
+        {
+          "repo": "ims-tf2",
+          "pattern": "components/askap/**",
+          "projectId": "askap"
+        },
+        {
+          "repo": "tf-documentation",
+          "pattern": "isignal-docs/**",
+          "projectId": "isignal"
+        },
+        {
+          "repo": "tf-documentation",
+          "pattern": "docs/isignal-docs/**",
+          "projectId": "isignal"
+        }
+      ],
+      "notes": [
+        "ims-tf2 is only involved when creating/updating bot copy",
+        "tf2-ois is the main API that users interact with"
+      ]
     },
     {
       "name": "fa",
       "kind": "domain",
       "projectId": "fa",
-      "aliases": ["fa", "financial advisor", "penasihat keuangan", "fa porto", "porto"],
-      "repos": ["tf2-porto-service", "fa-trade-publisher", "tf2-ois"],
-      "keywords": ["fa", "Financial Advisor", "portfolio", "porto", "incubation", "merchant", "business-rules", "fa-porto-docs"]
+      "aliases": [
+        "fa",
+        "financial advisor",
+        "penasihat keuangan",
+        "fa porto",
+        "porto"
+      ],
+      "repos": [
+        "tf2-porto-service",
+        "fa-trade-publisher",
+        "tf2-ois"
+      ],
+      "keywords": [
+        "fa",
+        "Financial Advisor",
+        "portfolio",
+        "porto",
+        "incubation",
+        "merchant",
+        "business-rules",
+        "fa-porto-docs"
+      ]
     },
     {
       "name": "channel-medal",
       "kind": "domain",
       "projectId": "channel-medal",
-      "aliases": ["medal", "legend", "channel level", "rank", "point", "vp"],
-      "repos": ["tf2-ois", "tf2-sinyo"],
-      "keywords": ["POINT_LEVELS", "RANGE_MEDAL", "MEDALS", "CalculatePointAndMedal20260531", "dsc_channels_point_events", "current_month_vp", "minimum_vp", "average_monthly_vp"]
+      "aliases": [
+        "medal",
+        "legend",
+        "channel level",
+        "rank",
+        "point",
+        "vp"
+      ],
+      "repos": [
+        "tf2-ois",
+        "tf2-sinyo"
+      ],
+      "keywords": [
+        "POINT_LEVELS",
+        "RANGE_MEDAL",
+        "MEDALS",
+        "CalculatePointAndMedal20260531",
+        "dsc_channels_point_events",
+        "current_month_vp",
+        "minimum_vp",
+        "average_monthly_vp"
+      ]
     },
     {
       "name": "platform_type",
       "kind": "concept",
       "projectId": "trading-platform",
-      "aliases": ["platform_type", "platform type", "platform", "tipe platform"],
-      "repos": ["ims-tf", "ims-tf2", "mrg-accounts", "tf2-ois"],
-      "keywords": ["platform_type", "metaserver_id", "MT4", "MT5", "mt4DemoType", "mt5DemoType", "MetaTrader"]
+      "aliases": [
+        "platform_type",
+        "platform type",
+        "platform",
+        "tipe platform"
+      ],
+      "repos": [
+        "ims-tf",
+        "ims-tf2",
+        "mrg-accounts",
+        "tf2-ois"
+      ],
+      "keywords": [
+        "platform_type",
+        "metaserver_id",
+        "MT4",
+        "MT5",
+        "mt4DemoType",
+        "mt5DemoType",
+        "MetaTrader"
+      ]
     },
     {
       "name": "mt4-account-types",
       "kind": "concept",
       "projectId": "account-types",
-      "aliases": ["tipe akun mt4", "account type mt4", "mt4 account type", "akun mt4"],
-      "repos": ["ims-tf", "ims-tf2", "mrg-accounts"],
-      "keywords": ["MT4", "mt4DemoType", "GetDemoAccountTypes", "GetAccountTypes", "GetAccountTypesV2", "accountTypes", "accountTypesV2", "account_type", "platform_type", "platform_name", "group_creation"]
+      "aliases": [
+        "tipe akun mt4",
+        "account type mt4",
+        "mt4 account type",
+        "akun mt4"
+      ],
+      "repos": [
+        "ims-tf",
+        "ims-tf2",
+        "mrg-accounts"
+      ],
+      "keywords": [
+        "MT4",
+        "mt4DemoType",
+        "GetDemoAccountTypes",
+        "GetAccountTypes",
+        "GetAccountTypesV2",
+        "accountTypes",
+        "accountTypesV2",
+        "account_type",
+        "platform_type",
+        "platform_name",
+        "group_creation"
+      ]
     },
     {
       "name": "mt5-account-types",
       "kind": "concept",
       "projectId": "account-types",
-      "aliases": ["tipe akun mt5", "account type mt5", "mt5 account type", "akun mt5"],
-      "repos": ["ims-tf", "ims-tf2", "mrg-accounts"],
-      "keywords": ["MT5", "mt5DemoType", "GetDemoAccountTypes", "GetAccountTypes", "GetAccountTypesV2", "accountTypes", "accountTypesV2", "account_type", "platform_type", "platform_name", "group_creation", "TF_CAN_REQUEST_MMB_MT5"]
+      "aliases": [
+        "tipe akun mt5",
+        "account type mt5",
+        "mt5 account type",
+        "akun mt5"
+      ],
+      "repos": [
+        "ims-tf",
+        "ims-tf2",
+        "mrg-accounts"
+      ],
+      "keywords": [
+        "MT5",
+        "mt5DemoType",
+        "GetDemoAccountTypes",
+        "GetAccountTypes",
+        "GetAccountTypesV2",
+        "accountTypes",
+        "accountTypesV2",
+        "account_type",
+        "platform_type",
+        "platform_name",
+        "group_creation",
+        "TF_CAN_REQUEST_MMB_MT5"
+      ]
+    },
+    {
+      "name": "bpjs",
+      "kind": "worker",
+      "aliases": [
+        "bpjs"
+      ],
+      "repos": [
+        "bpjs"
+      ],
+      "keywords": [
+        "amqp-connection-manager",
+        "amqplib",
+        "async-lock",
+        "chai",
+        "dotenv",
+        "amq.rabbitmq.reply-to",
+        "remote_config_env"
+      ],
+      "description": "bpjs (worker): 4 DB usages, 1 RabbitMQ connections, 24 env vars"
+    },
+    {
+      "name": "bpts",
+      "kind": "worker",
+      "aliases": [
+        "bpts"
+      ],
+      "repos": [
+        "bpts"
+      ],
+      "keywords": [
+        "@types/amqplib",
+        "@types/async-lock",
+        "@types/node",
+        "@types/sqlstring",
+        "@types/underscore",
+        "amq.rabbitmq.reply-to",
+        "amq.rabbitmq.reply-to",
+        "remote_config_env"
+      ],
+      "description": "bpts (worker): 8 DB usages, 2 RabbitMQ connections, 46 env vars"
+    },
+    {
+      "name": "ea-isignal-external",
+      "kind": "library",
+      "aliases": [
+        "ea-isignal-external"
+      ],
+      "repos": [
+        "ea-isignal-external"
+      ],
+      "keywords": [
+        "@types/node",
+        "@types/pg",
+        "csv-parse",
+        "dotenv",
+        "pg",
+        "configs",
+        "contracts"
+      ],
+      "description": "ea-isignal-external (library): 2 DB usages"
+    },
+    {
+      "name": "ea-service",
+      "kind": "service",
+      "aliases": [
+        "ea-service"
+      ],
+      "repos": [
+        "ea-service"
+      ],
+      "keywords": [
+        "sync_checkpoints",
+        "licenses",
+        "contracts",
+        "contract",
+        "license_configs"
+      ],
+      "description": "ea-service (service): 29 DB usages"
+    },
+    {
+      "name": "jbframework",
+      "kind": "service",
+      "aliases": [
+        "jbframework"
+      ],
+      "repos": [
+        "jbframework"
+      ],
+      "keywords": [
+        "modules",
+        "sessions",
+        "user_usergroup",
+        "usergroups",
+        "groups_rules"
+      ],
+      "description": "jbframework (service): 32 DB usages"
+    },
+    {
+      "name": "metaoffice-public",
+      "kind": "library",
+      "aliases": [
+        "metaoffice-public"
+      ],
+      "repos": [
+        "metaoffice-public"
+      ],
+      "keywords": [
+        "@syncfusion/ej2-vue-calendars",
+        "@vue/cli-plugin-babel",
+        "@vue/cli-service",
+        "axios",
+        "babel-eslint"
+      ],
+      "description": "metaoffice-public (library): 309 env vars"
+    },
+    {
+      "name": "mrg-migrations",
+      "kind": "library",
+      "aliases": [
+        "mrg-migrations"
+      ],
+      "repos": [
+        "mrg-migrations"
+      ],
+      "keywords": [
+        "@types/node",
+        "crypto",
+        "dotenv",
+        "moment-timezone",
+        "moment",
+        "information_schema.statistics",
+        "mrg_whitelabel",
+        "email",
+        "mrg_whitelabel_manager_access",
+        "mrg_whitelabel_manager"
+      ],
+      "description": "mrg-migrations (library): 87 DB usages, 20 env vars"
+    },
+    {
+      "name": "ois-admin-service",
+      "kind": "service",
+      "aliases": [
+        "ois-admin-service"
+      ],
+      "repos": [
+        "ois-admin-service"
+      ],
+      "keywords": [
+        "configs",
+        "licenses"
+      ],
+      "description": "ois-admin-service (service): 5 DB usages"
+    },
+    {
+      "name": "tf-documentation",
+      "kind": "library",
+      "aliases": [
+        "tf-documentation",
+        "my-website"
+      ],
+      "repos": [
+        "tf-documentation"
+      ],
+      "keywords": [
+        "@cmfcmf/docusaurus-search-local",
+        "@crowdin/cli",
+        "@docusaurus/core",
+        "@docusaurus/module-type-aliases",
+        "@docusaurus/preset-classic",
+        "the",
+        "command",
+        "token",
+        "SCM",
+        "dropdown"
+      ],
+      "description": "my-website (library): 8 DB usages, 26 env vars"
+    },
+    {
+      "name": "tf2-admin",
+      "kind": "api",
+      "aliases": [
+        "tf2-admin"
+      ],
+      "repos": [
+        "tf2-admin"
+      ],
+      "keywords": [
+        "@fastify/formbody",
+        "amqp-connection-manager",
+        "amqplib",
+        "async-lock",
+        "axios",
+        "rpc-tf2-ois-admin",
+        "logs",
+        "users",
+        "traders_referral",
+        "url_before_register",
+        "dynamic_link_logs"
+      ],
+      "description": "tf2-admin (api): 108 API routes, 355 DB usages, 1 RabbitMQ connections, 360 env vars"
+    },
+    {
+      "name": "tf2-migrations",
+      "kind": "library",
+      "aliases": [
+        "tf2-migrations"
+      ],
+      "repos": [
+        "tf2-migrations"
+      ],
+      "keywords": [
+        "@types/node",
+        "dotenv",
+        "moment-timezone",
+        "moment",
+        "mysql2",
+        "INFORMATION_SCHEMA.COLUMNS",
+        "rules",
+        "dsc_payment_channel",
+        "information_schema.COLUMNS",
+        "fa_details"
+      ],
+      "description": "tf2-migrations (library): 112 DB usages, 31 env vars"
     }
   ]
 }

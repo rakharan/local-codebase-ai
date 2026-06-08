@@ -5367,7 +5367,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   // Fast path: inventory questions with Doctor chunks — filter-only, no embedding needed
   if (questionAsksInventory(question) && exactRoutes.length === 0) {
-    const mentionedRepo = question.match(/\b([\w]+-[\w-]+)\b/i)?.[1]?.toLowerCase()
+    const mentionedRepo = question.match(/\b([\w]+-[\w-]+|bpjs|bpts|ims-tf2?)\b/i)?.[1]?.toLowerCase()
     const doctorRepoName = mentionedRepo ? `${mentionedRepo}-docs` : undefined
     if (doctorRepoName) {
       const asksServices = /\b(what services|services? (detected|list|available)|detected (services?|repos?))\b/i.test(question)

@@ -172,6 +172,8 @@ export function questionAsksHowWorks(question: string): boolean {
 }
 
 export function questionAsksInventory(question: string): boolean {
+  // Juga match "what is <repo-name>" jika repo-name terdeteksi
+  if (/\bwhat is\b/i.test(question) && /\b([\w]+-[\w-]+|bpjs|bpts)\b/i.test(question)) return true
   return /\b(what services|services? (detected|list|available)|detected (services?|repos?)|list.*(services?|repos?)|environment variables?|env vars?|process\.env|what env|which env|database tables?|db tables?|which tables?|what tables?|tables? (used|detected)|what dependenc|which dependenc|dependenc.*(have|use|list))\b/i.test(question)
 }
 
