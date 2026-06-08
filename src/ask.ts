@@ -2766,6 +2766,8 @@ function extractSqlTableNamesFromContent(content: string): string[] {
     ...[...content.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi)].map(match => match[1] ?? ""),
     ...[...content.matchAll(/\b(?:INSERT\s+INTO|DELETE\s+FROM)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi)].map(match => match[1] ?? ""),
     ...[...content.matchAll(/\bsqlstr\.(?:insertObject|updateObject)\(\s*["'`]([A-Za-z_][\w.]*)["'`]/g)].map(match => match[1] ?? ""),
+    // Doctor markdown table rows: | `table_name` | kind | operation |
+    ...[...content.matchAll(/\|\s*`([A-Za-z_][\w.]*)`\s*\|/g)].map(match => match[1] ?? ""),
   ]
 }
 
