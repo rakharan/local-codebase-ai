@@ -5364,15 +5364,12 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
         )
       : []
   const retrievalLimit = questionAsksAboutGlossary(question) ? Math.max(limit, 18) : limit
-  const initialChunks = exactRoutes.length > 0 ? [] : await retrieve(retrievalQuestion, retrievalLimit)
 
-  // Direct Doctor chunk retrieval for inventory questions
-  const inventoryDoctorChunks: RetrievedChunk[] = []
+  // Fast path: inventory questions with Doctor chunks — filter-only, no embedding needed
   if (questionAsksInventory(question) && exactRoutes.length === 0) {
     const mentionedRepo = question.match(/\b([\w]+-[\w-]+)\b/i)?.[1]?.toLowerCase()
     const doctorRepoName = mentionedRepo ? `${mentionedRepo}-docs` : undefined
     if (doctorRepoName) {
-      // Pilih filePath prefix berdasarkan intent
       const asksServices = /\b(what services|services? (detected|list|available)|detected (services?|repos?))\b/i.test(question)
       const asksEnv = /\b(environment variables?|env vars?|process\.env|what env|which env)\b/i.test(question)
       const asksDbTables = /\b(database tables?|db tables?|which tables?|what tables?|tables? (used|detected))\b/i.test(question)
@@ -5383,25 +5380,35 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
       if (asksDbTables) doctorFileFilters.push("doctor:database.md")
       if (doctorFileFilters.length === 0) doctorFileFilters.push("doctor:overview.md")
 
-      const doctorFilter = {
-        must: [
-          { key: "repoName", match: { value: doctorRepoName } },
-          { key: "branchName", match: { value: "doctor" } },
-        ],
-        should: doctorFileFilters.map(fp => ({ key: "filePath", match: { value: fp } })),
-      }
       try {
-        const questionVector = await createEmbedding(retrievalQuestion)
-        const doctorResults = await qdrant.query(config.collectionName, {
-          query: questionVector, limit: 8, with_payload: true, filter: doctorFilter,
-        })
-        for (const point of doctorResults.points) {
-          const payload = point.payload as RetrievedPayload
-          if (payload.content) inventoryDoctorChunks.push({ id: String(point.id), payload })
+        const scrollFilter = {
+          must: [
+            { key: "repoName", match: { value: doctorRepoName } },
+            { key: "branchName", match: { value: "doctor" } },
+          ],
+          should: doctorFileFilters.map(fp => ({ key: "filePath", match: { value: fp } })),
         }
-      } catch { /* no doctor chunks indexed — ok */ }
+        const scrollResult = await qdrant.scroll(config.collectionName, {
+          filter: scrollFilter, limit: 20, with_payload: true, with_vector: false,
+        })
+        const doctorChunks = (scrollResult.points as Array<{ id: string | number; payload?: Record<string, unknown> | null }>)
+          .map(p => p.payload as RetrievedPayload | undefined)
+          .filter((p): p is RetrievedPayload => !!p?.content)
+
+        if (doctorChunks.length > 0) {
+          console.log("\nANSWER\n")
+          console.log(doctorChunks.map(c => c.content).join("\n\n---\n\n"))
+          console.log("\nSOURCES\n")
+          for (const chunk of doctorChunks) {
+            console.log(`- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`)
+          }
+          return
+        }
+      } catch { /* no doctor chunks — fall through to normal retrieval */ }
     }
   }
+
+  const initialChunks = exactRoutes.length > 0 ? [] : await retrieve(retrievalQuestion, retrievalLimit)
   const preferredLocaleDocChunks =
     exactRoutes.length === 0 && questionAsksAboutGlossary(question) && !questionAsksAboutAccountTypes(question)
       ? await retrievePreferredLocaleDocChunks(retrievalQuestion, Math.max(retrievalLimit, 16))
@@ -5438,7 +5445,6 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const retrievedChunks = mergeChunks(
     [
-      ...inventoryDoctorChunks,
       ...exactChunks,
       ...exactDetailChunks,
       ...preferredLocaleDocChunks,
