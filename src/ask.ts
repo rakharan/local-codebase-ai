@@ -5808,8 +5808,9 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     return
   }
 
+  const hasDoctorInventory = questionAsksInventory(question) && chunks.some(c => c.filePath?.startsWith("doctor:"))
   const structuralEvidenceAnswer =
-    exactRoutes.length === 0 && (questionAsksAboutDatabase(question) || questionAsksAboutServicesOrFlow(question))
+    !hasDoctorInventory && exactRoutes.length === 0 && (questionAsksAboutDatabase(question) || questionAsksAboutServicesOrFlow(question))
       ? buildStructuralEvidenceAnswer(chunks, question)
       : undefined
 
