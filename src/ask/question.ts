@@ -172,7 +172,7 @@ export function questionAsksHowWorks(question: string): boolean {
 }
 
 export function questionAsksInventory(question: string): boolean {
-  return /\b(what services|services? (detected|list|available)|detected (services?|repos?)|list.*(services?|repos?)|environment variables?|env vars?|process\.env|what env|which env|database tables?|db tables?|which tables?|what tables?|tables? (used|detected))\b/i.test(question)
+  return /\b(what services|services? (detected|list|available)|detected (services?|repos?)|list.*(services?|repos?)|environment variables?|env vars?|process\.env|what env|which env|database tables?|db tables?|which tables?|what tables?|tables? (used|detected)|what dependenc|which dependenc|dependenc.*(have|use|list))\b/i.test(question)
 }
 
 export function questionAsksForDiagram(question: string): boolean {

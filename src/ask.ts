@@ -5373,9 +5373,10 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
       const asksServices = /\b(what services|services? (detected|list|available)|detected (services?|repos?))\b/i.test(question)
       const asksEnv = /\b(environment variables?|env vars?|process\.env|what env|which env)\b/i.test(question)
       const asksDbTables = /\b(database tables?|db tables?|which tables?|what tables?|tables? (used|detected))\b/i.test(question)
+      const asksDeps = /\b(dependenc)/i.test(question)
 
       const doctorFileFilters: string[] = []
-      if (asksServices) doctorFileFilters.push("doctor:overview.md", "doctor:services.md")
+      if (asksServices || asksDeps) doctorFileFilters.push("doctor:overview.md", "doctor:services.md")
       if (asksEnv) doctorFileFilters.push("doctor:env.md")
       if (asksDbTables) doctorFileFilters.push("doctor:database.md")
       if (doctorFileFilters.length === 0) doctorFileFilters.push("doctor:overview.md")
