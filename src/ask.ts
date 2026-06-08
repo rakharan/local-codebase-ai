@@ -537,10 +537,36 @@ function rerankRetrievedChunks(questionText: string, chunks: RetrievedChunk[]): 
       if (payload.filePath?.startsWith("knowledge-notes://")) score += 20
       if (payload.noteStatus === "proposal") score += /proposal|meeting|change|recent|terbaru|perubahan/i.test(questionText) ? 35 : -5
 
-      // Boost Repo Doctor chunks for architecture/onboarding questions
+      // Inventory intent detection and Repo Doctor chunk boosting
       const isDoctorChunk = payload.filePath?.startsWith("doctor:") || payload.filePath?.startsWith("doctor-fact:")
-      if (isDoctorChunk && /\b(services?|routes?|api|endpoints?|env|environment|rabbitmq|queues?|exchanges?|databases?|tables?|dependenc|architecture|onboarding)\b/i.test(questionText)) {
-        score += 40
+      const asksServiceInventory = /\b(what services|services? (detected|list|available)|detected (services?|repos?)|list.*(services?|repos?))\b/i.test(questionText)
+      const asksEnvInventory = /\b(environment variables?|env vars?|process\.env|what env|which env)\b/i.test(questionText)
+      const asksDbInventory = /\b(database tables?|db tables?|which tables?|what tables?|tables? (used|detected))\b/i.test(questionText)
+      const isInventoryQuestion = asksServiceInventory || asksEnvInventory || asksDbInventory
+
+      if (isDoctorChunk) {
+        if (isInventoryQuestion) {
+          // Strong boost for inventory questions — doctor facts are the primary source
+          score += 100
+          if (asksServiceInventory && (payload.filePath?.includes("service") || payload.filePath?.includes("overview"))) score += 50
+          if (asksEnvInventory && payload.filePath?.includes("env")) score += 50
+          if (asksDbInventory && (payload.filePath?.includes("database") || (payload.dbTables?.length ?? 0) > 0)) score += 50
+        } else if (/\b(services?|routes?|api|endpoints?|env|environment|rabbitmq|queues?|exchanges?|databases?|tables?|dependenc|architecture|onboarding)\b/i.test(questionText)) {
+          score += 40
+        }
+      }
+
+      // Repo-name penalty: penalize unrelated repos for inventory questions with explicit repo name
+      if (isInventoryQuestion) {
+        const mentionedRepo = questionText.match(/\b([\w-]+-(?:service|worker|cron|ois|tf2|ims|admin|api)[\w-]*)\b/i)?.[1]?.toLowerCase()
+        if (mentionedRepo && payload.repoName) {
+          const chunkRepo = payload.repoName.toLowerCase()
+          if (chunkRepo === mentionedRepo || chunkRepo.includes(mentionedRepo) || mentionedRepo.includes(chunkRepo)) {
+            score += 30
+          } else {
+            score -= 40
+          }
+        }
       }
 
       return { chunk, score }
