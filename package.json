@@ -4,6 +4,8 @@
     "index": "node --import ./register-ts-node.mjs src/index-repo.ts",
     "index-docs": "node --import ./register-ts-node.mjs src/index-docs.ts",
     "index-doctor": "node --import ./register-ts-node.mjs src/index-doctor.ts",
+    "doctor-all": "node --import ./register-ts-node.mjs scripts/doctor-all.ts",
+    "index-doctor-all": "node --import ./register-ts-node.mjs scripts/index-doctor-all.ts",
     "ask": "node --import ./register-ts-node.mjs src/ask.ts",
     "test:answers": "node --import ./register-ts-node.mjs src/answer-regression.ts",
     "start": "node --import ./register-ts-node.mjs src/server.ts",
