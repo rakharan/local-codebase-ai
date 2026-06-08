@@ -5369,11 +5369,23 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     const mentionedRepo = question.match(/\b([\w]+-[\w-]+)\b/i)?.[1]?.toLowerCase()
     const doctorRepoName = mentionedRepo ? `${mentionedRepo}-docs` : undefined
     if (doctorRepoName) {
+      // Pilih filePath prefix berdasarkan intent
+      const asksServices = /\b(what services|services? (detected|list|available)|detected (services?|repos?))\b/i.test(question)
+      const asksEnv = /\b(environment variables?|env vars?|process\.env|what env|which env)\b/i.test(question)
+      const asksDbTables = /\b(database tables?|db tables?|which tables?|what tables?|tables? (used|detected))\b/i.test(question)
+
+      const doctorFileFilters: string[] = []
+      if (asksServices) doctorFileFilters.push("doctor:overview.md", "doctor:services.md")
+      if (asksEnv) doctorFileFilters.push("doctor:env.md")
+      if (asksDbTables) doctorFileFilters.push("doctor:database.md")
+      if (doctorFileFilters.length === 0) doctorFileFilters.push("doctor:overview.md")
+
       const doctorFilter = {
         must: [
           { key: "repoName", match: { value: doctorRepoName } },
           { key: "branchName", match: { value: "doctor" } },
         ],
+        should: doctorFileFilters.map(fp => ({ key: "filePath", match: { value: fp } })),
       }
       try {
         const questionVector = await createEmbedding(retrievalQuestion)
