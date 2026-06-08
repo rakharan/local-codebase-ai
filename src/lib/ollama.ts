@@ -84,6 +84,8 @@ export async function createEmbedding(input: string): Promise<number[]> {
 export async function chat(prompt: string): Promise<string> {
     let res
 
+    const isQwen3 = config.chatModel.startsWith("qwen3")
+
     try {
         res = await fetchWithRetry(`${config.ollamaUrl}/api/chat`, {
             method: "POST",
@@ -97,6 +99,7 @@ export async function chat(prompt: string): Promise<string> {
                     {
                         role: "system",
                         content: [
+                            isQwen3 ? "/no_think" : undefined,
                             "You are an internal microservice codebase assistant.",
                             "Answer in the same language as the user question. If the question is in Bahasa Indonesia, answer in Bahasa Indonesia while preserving code identifiers exactly.",
                             "Answer only from the provided context.",
@@ -111,7 +114,7 @@ export async function chat(prompt: string): Promise<string> {
                             "Prefer evidence from RabbitMQ handlers, API routes, cron jobs, database usage, and config files.",
                             "Only discuss cross-service flow, queues, jobs, or database tables when the question asks for them or the retrieved context clearly contains them.",
                             "For general summary questions, do not add cross-service, queue, database, deployment, or speculation sections.",
-                        ].join("\n"),
+                        ].filter(Boolean).join("\n"),
                     },
                     {
                         role: "user",
@@ -134,7 +137,9 @@ export async function chat(prompt: string): Promise<string> {
 
     const data = (await res.json()) as OllamaChatResponse
 
-    return data.message?.content ?? ""
+    const raw = data.message?.content ?? ""
+    // Strip qwen3 thinking blocks if present
+    return raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "").trim()
 }
 
 export async function detectPreferredLanguage(input: string): Promise<AnswerLanguage> {
