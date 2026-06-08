@@ -2568,7 +2568,8 @@ function scoreFallbackContextChunk(chunk: RetrievedPayload, questionText: string
 
   if (chunk.filePath?.startsWith("knowledge-notes://")) score += 70
   if (chunk.filePath?.startsWith("vocabulary://")) score += questionAsksAboutGlossary(questionText) ? 50 : 8
-  if (chunk.evidenceTypes?.includes("documentation")) score += questionAsksAboutGlossary(questionText) || questionAsksHowWorks(questionText) ? 45 : -12
+  if (chunk.filePath?.startsWith("doctor:") || chunk.filePath?.startsWith("doctor-fact:")) score += questionAsksInventory(questionText) ? 80 : 20
+  if (chunk.evidenceTypes?.includes("documentation")) score += questionAsksAboutGlossary(questionText) || questionAsksHowWorks(questionText) || questionAsksInventory(questionText) ? 45 : -12
   if ((chunk.routes?.length ?? 0) > 0) score += 28
   if ((chunk.symbols?.length ?? 0) > 0) score += 18
   if ((chunk.messageNames?.length ?? 0) > 0 || (chunk.queueNames?.length ?? 0) > 0 || (chunk.exchangeNames?.length ?? 0) > 0) score += 24
@@ -2766,8 +2767,8 @@ function extractSqlTableNamesFromContent(content: string): string[] {
     ...[...content.matchAll(/\b(?:FROM|JOIN|INTO|UPDATE|TABLE)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi)].map(match => match[1] ?? ""),
     ...[...content.matchAll(/\b(?:INSERT\s+INTO|DELETE\s+FROM)\s+[`"']?([A-Za-z_][\w.]*)[`"']?/gi)].map(match => match[1] ?? ""),
     ...[...content.matchAll(/\bsqlstr\.(?:insertObject|updateObject)\(\s*["'`]([A-Za-z_][\w.]*)["'`]/g)].map(match => match[1] ?? ""),
-    // Doctor markdown table rows: | `table_name` | kind | operation |
-    ...[...content.matchAll(/\|\s*`([A-Za-z_][\w.]*)`\s*\|/g)].map(match => match[1] ?? ""),
+    // Doctor markdown table rows: first column is table name
+    ...[...content.matchAll(/\|\s*`([a-z_]\w+)`\s*\|\s*(?:table|entity|repository)\s*\|/g)].map(match => match[1] ?? ""),
   ]
 }
 
