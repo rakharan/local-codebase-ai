@@ -537,6 +537,12 @@ function rerankRetrievedChunks(questionText: string, chunks: RetrievedChunk[]): 
       if (payload.filePath?.startsWith("knowledge-notes://")) score += 20
       if (payload.noteStatus === "proposal") score += /proposal|meeting|change|recent|terbaru|perubahan/i.test(questionText) ? 35 : -5
 
+      // Boost Repo Doctor chunks for architecture/onboarding questions
+      const isDoctorChunk = payload.filePath?.startsWith("doctor:") || payload.filePath?.startsWith("doctor-fact:")
+      if (isDoctorChunk && /\b(services?|routes?|api|endpoints?|env|environment|rabbitmq|queues?|exchanges?|databases?|tables?|dependenc|architecture|onboarding)\b/i.test(questionText)) {
+        score += 40
+      }
+
       return { chunk, score }
     })
     .sort((left, right) => right.score - left.score)

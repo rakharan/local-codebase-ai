@@ -3,9 +3,12 @@
   "scripts": {
     "index": "node --import ./register-ts-node.mjs src/index-repo.ts",
     "index-docs": "node --import ./register-ts-node.mjs src/index-docs.ts",
+    "index-doctor": "node --import ./register-ts-node.mjs src/index-doctor.ts",
     "ask": "node --import ./register-ts-node.mjs src/ask.ts",
     "test:answers": "node --import ./register-ts-node.mjs src/answer-regression.ts",
-    "start": "node --import ./register-ts-node.mjs src/server.ts"
+    "start": "node --import ./register-ts-node.mjs src/server.ts",
+    "doctor": "node --import ./register-ts-node.mjs src/doctor-cli.ts",
+    "test:doctor": "node --import ./register-ts-node.mjs src/doctor/test/run-tests.ts"
   },
   "dependencies": {
     "@qdrant/js-client-rest": "^1.18.0",

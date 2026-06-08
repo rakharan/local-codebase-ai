@@ -320,6 +320,87 @@ The registry is used as retrieval/disambiguation help only. Answers still have t
 - Polyglot support uses heuristics, not language parsers.
 - Answers should be treated as investigation aids and verified against the cited files.
 
+## Repo Doctor
+
+Repo Doctor is a deterministic documentation generator that scans a local repository and produces structured Markdown files describing its services, environment variables, API routes, RabbitMQ usage, database usage, and architecture diagrams.
+
+It uses static analysis only — no LLMs, no Ollama, no Qdrant, no network calls. Scanned repositories are **read-only and never modified**.
+
+### Basic Usage
+
+```powershell
+npm run doctor -- ./services --output ./repo-docs
+```
+
+### Generated Files
+
+| File | Contents |
+|------|----------|
+| `overview.md` | Entry point with summary counts and links |
+| `services.md` | Package metadata and dependencies |
+| `env.md` | Environment variables detected in source |
+| `api.md` | HTTP API routes (Express, Fastify) |
+| `rabbitmq.md` | Queues, exchanges, and messaging patterns |
+| `database.md` | SQL tables, TypeORM entities, repositories |
+| `architecture.md` | Mermaid architecture diagrams |
+| `report.json` | Machine-readable report (with `--json`) |
+
+### CLI Options
+
+| Option | Description |
+|--------|-------------|
+| `--output <folder>` | Output folder for generated docs (required) |
+| `--json` | Also write `report.json` beside Markdown files |
+| `--fail-on-empty` | Exit non-zero if no services detected |
+| `--repo-name <name>` | Only include service matching this package name |
+| `--service-type <type>` | Filter by type: `api`, `worker`, `cron`, `library`, `unknown` |
+| `--include <glob...>` | Include patterns for file scanning (repeatable) |
+| `--exclude <glob...>` | Exclude patterns for file scanning (repeatable) |
+| `--max-files <number>` | Stop scanning after N files |
+| `--verbose` | Print scan progress and summary counts |
+| `--silent` | Suppress all output except errors |
+
+### Example Commands
+
+```powershell
+# Basic scan
+npm run doctor -- ./services --output ./repo-docs
+
+# With JSON report
+npm run doctor -- ./services --output ./repo-docs --json
+
+# Filter by service name
+npm run doctor -- ./services --output ./repo-docs --repo-name payment-service
+
+# Scope scanning
+npm run doctor -- ./services --output ./repo-docs --include "src/**/*.ts" --exclude "**/*.test.ts"
+
+# Limit file count for large repos
+npm run doctor -- ./services --output ./repo-docs --max-files 5000 --verbose
+```
+
+### Confidence Labels
+
+Each extracted fact includes a confidence label:
+
+- **high** — pattern match is unambiguous (e.g., `app.get('/path', ...)`)
+- **medium** — pattern match is likely but could be a false positive (e.g., `.subscribe(...)`)
+- **low** — speculative extraction
+
+### Limitations
+
+- Static analysis only — no runtime or dynamic behavior is captured.
+- Regex-based extraction — complex or indirect patterns may be missed.
+- No cross-service resolution — relationships are per-repository.
+- Confidence labels indicate extraction certainty, not code correctness.
+- Results should be verified against source code.
+
+### Running Doctor Tests
+
+```powershell
+npm run test:doctor
+```
+
 ## Useful Commands
 
 ```powershell

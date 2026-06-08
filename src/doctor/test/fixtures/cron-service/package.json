@@ -1,0 +1,11 @@
+{
+  "name": "cron-service",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node dist/cron.js"
+  },
+  "dependencies": {
+    "node-cron": "^3.0.0",
+    "pg": "^8.0.0"
+  }
+}
