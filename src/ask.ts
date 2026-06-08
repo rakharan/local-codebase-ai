@@ -5362,6 +5362,31 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
       : []
   const retrievalLimit = questionAsksAboutGlossary(question) ? Math.max(limit, 18) : limit
   const initialChunks = exactRoutes.length > 0 ? [] : await retrieve(retrievalQuestion, retrievalLimit)
+
+  // Direct Doctor chunk retrieval for inventory questions
+  const inventoryDoctorChunks: RetrievedChunk[] = []
+  if (questionAsksInventory(question) && exactRoutes.length === 0) {
+    const mentionedRepo = question.match(/\b([\w]+-[\w-]+)\b/i)?.[1]?.toLowerCase()
+    const doctorRepoName = mentionedRepo ? `${mentionedRepo}-docs` : undefined
+    if (doctorRepoName) {
+      const doctorFilter = {
+        must: [
+          { key: "repoName", match: { value: doctorRepoName } },
+          { key: "branchName", match: { value: "doctor" } },
+        ],
+      }
+      try {
+        const questionVector = await createEmbedding(retrievalQuestion)
+        const doctorResults = await qdrant.query(config.collectionName, {
+          query: questionVector, limit: 8, with_payload: true, filter: doctorFilter,
+        })
+        for (const point of doctorResults.points) {
+          const payload = point.payload as RetrievedPayload
+          if (payload.content) inventoryDoctorChunks.push({ id: String(point.id), payload })
+        }
+      } catch { /* no doctor chunks indexed — ok */ }
+    }
+  }
   const preferredLocaleDocChunks =
     exactRoutes.length === 0 && questionAsksAboutGlossary(question) && !questionAsksAboutAccountTypes(question)
       ? await retrievePreferredLocaleDocChunks(retrievalQuestion, Math.max(retrievalLimit, 16))
@@ -5398,6 +5423,7 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
 
   const retrievedChunks = mergeChunks(
     [
+      ...inventoryDoctorChunks,
       ...exactChunks,
       ...exactDetailChunks,
       ...preferredLocaleDocChunks,
