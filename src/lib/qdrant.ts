@@ -9,6 +9,29 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+// Bidang yang dipakai sebagai filter di scroll/query — harus diindeks agar tidak full-scan.
+const PAYLOAD_INDEXES: Array<{ field: string; schema: "keyword" | "integer" }> = [
+  { field: "repoName",    schema: "keyword" },
+  { field: "branchName",  schema: "keyword" },
+  { field: "filePath",    schema: "keyword" },
+  { field: "serviceType", schema: "keyword" },
+  { field: "projectIds",  schema: "keyword" },
+  { field: "source_type", schema: "keyword" },
+]
+
+async function ensurePayloadIndexes(): Promise<void> {
+  for (const { field, schema } of PAYLOAD_INDEXES) {
+    try {
+      await qdrant.createPayloadIndex(config.collectionName, {
+        field_name: field,
+        field_schema: schema,
+      })
+    } catch {
+      // Index already exists — ignore.
+    }
+  }
+}
+
 export async function ensureCollection(): Promise<void> {
   let collections
   let lastError: unknown
@@ -38,12 +61,15 @@ export async function ensureCollection(): Promise<void> {
     collection => collection.name === config.collectionName,
   )
 
-  if (exists) return
+  if (!exists) {
+    await qdrant.createCollection(config.collectionName, {
+      vectors: {
+        size: config.vectorSize,
+        distance: "Cosine",
+      },
+    })
+  }
 
-  await qdrant.createCollection(config.collectionName, {
-    vectors: {
-      size: config.vectorSize,
-      distance: "Cosine",
-    },
-  })
+  // Buat payload index untuk semua bidang filter — idempoten, aman dijalankan berulang.
+  await ensurePayloadIndexes()
 }

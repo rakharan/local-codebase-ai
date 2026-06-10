@@ -1,7 +1,7 @@
 import path from "node:path"
 import { Command } from "commander"
 import { qdrant } from "./lib/qdrant.js"
-import { config } from "./lib/config.js"
+import { config, setChatModel } from "./lib/config.js"
 import { createEmbedding, chat } from "./lib/ollama.js"
 import { readRelationshipGraph } from "./lib/graph.js"
 import { buildRegistryPromptContext, expandQuestionWithRegistry, type RegistryExpansion, type ServiceRegistryEntry } from "./lib/service-registry.js"
@@ -13,6 +13,7 @@ import {
   buildPlatformTypeGlossaryAnswer,
 } from "./ask/account-types.js"
 import { compactPayloadSources, compactRetrievedChunks } from "./ask/compaction.js"
+import { buildDoctorInventoryAnswer } from "./ask/doctor.js"
 import {
   answerLanguageLabel as answerLanguageLabelFor,
   detectAnswerLanguage,
@@ -70,11 +71,15 @@ program
   .option("--project <projectId>", "Only search one project/product/domain")
   .option("--branch <branchName>", "Only search one indexed branch")
   .option("--service-type <serviceType>", "Only search one service type")
+  .option("--chat-model <model>", "Ollama chat model override for this question")
   .option("--history <json>", "JSON string of previous conversation messages")
   .parse()
 
 const question = program.args.join(" ")
-const options = program.opts<{ limit: string; deep?: boolean; repoName?: string; project?: string; branch?: string; serviceType?: string; history?: string }>()
+const options = program.opts<{ limit: string; deep?: boolean; repoName?: string; project?: string; branch?: string; serviceType?: string; chatModel?: string; history?: string }>()
+if (options.chatModel) {
+  setChatModel(options.chatModel)
+}
 const limit = Number(options.limit)
 const deepMode = Boolean(options.deep)
 const serviceType = options.serviceType && serviceTypes.has(options.serviceType as ServiceType)
@@ -537,6 +542,12 @@ function rerankRetrievedChunks(questionText: string, chunks: RetrievedChunk[]): 
 
       if (payload.filePath?.startsWith("knowledge-notes://")) score += 20
       if (payload.noteStatus === "proposal") score += /proposal|meeting|change|recent|terbaru|perubahan/i.test(questionText) ? 35 : -5
+
+      // Decision/ADR boost — approved decisions carry retrieval_priority: 10 from Qdrant payload
+      if (payload.source_type === "decision") {
+        score += (payload.retrieval_priority ?? 0) * 2
+        if (/decided|decision|changed|why|rationale|rule|aturan|diputuskan|alasan|perubahan/i.test(questionText)) score += 40
+      }
 
       // Inventory intent detection and Repo Doctor chunk boosting
       const isDoctorChunk = payload.filePath?.startsWith("doctor:") || payload.filePath?.startsWith("doctor-fact:")
@@ -2567,6 +2578,10 @@ function scoreFallbackContextChunk(chunk: RetrievedPayload, questionText: string
   let score = 0
 
   if (chunk.filePath?.startsWith("knowledge-notes://")) score += 70
+  if (chunk.filePath?.startsWith("decision://")) {
+    score += (chunk.retrieval_priority ?? 0) * 2
+    if (/decided|decision|changed|why|rationale|rule|aturan|diputuskan|alasan|perubahan/i.test(questionText)) score += 40
+  }
   if (chunk.filePath?.startsWith("vocabulary://")) score += questionAsksAboutGlossary(questionText) ? 50 : 8
   if (chunk.filePath?.startsWith("doctor:") || chunk.filePath?.startsWith("doctor-fact:")) score += questionAsksInventory(questionText) ? 80 : 20
   if (chunk.evidenceTypes?.includes("documentation")) score += questionAsksAboutGlossary(questionText) || questionAsksHowWorks(questionText) || questionAsksInventory(questionText) ? 45 : -12
@@ -3747,6 +3762,10 @@ function evidenceConfidenceLabel(chunk: RetrievedPayload): string {
     if (chunk.noteStatus === "proposal") return "proposal note"
     if (chunk.noteStatus === "deprecated") return "deprecated note"
     return "confirmed note"
+  }
+
+  if (filePath.startsWith("decision://")) {
+    return chunk.chunk_type === "implicit_rule" ? "implicit rule" : "approved decision"
   }
 
   if ((chunk.routes?.length ?? 0) > 0 || evidenceTypes.has("api_route")) return "confirmed route"
@@ -5137,7 +5156,10 @@ async function main() {
       return
     }
 
-    const queueMetadataAnswer = await buildQueueMetadataAnswer(question, relationshipGraph)
+    // Decision-intent questions should not be intercepted by the queue metadata path,
+    // even when they mention AMQP/queue terms as part of the subject being decided about.
+    const isDecisionQuestion = /\b(decided|decision|why|rationale|rule|changed|aturan|diputuskan|alasan)\b/i.test(question)
+    const queueMetadataAnswer = isDecisionQuestion ? undefined : await buildQueueMetadataAnswer(question, relationshipGraph)
 
     if (queueMetadataAnswer) {
       console.log("\nANSWER\n")
@@ -5266,18 +5288,21 @@ async function main() {
     ...metaTraderSearchTerms,
     ...minimumEquitySearchTerms,
   ], 48)
-  const exactTermChunks = exactRoutes.length === 0
-    ? await retrieveExactTermMatches(exactTermSearchTerms, questionAsksAboutAccountTypes(question) ? 60 : 32)
-    : []
-  const exactVocabularyChunks = exactRoutes.length === 0 && isGeneralVocabQuestion
-    ? await retrieveExactVocabularyMatches(exactTermSearchTerms, 24)
-    : []
-const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
-  ? await retrieveMetaTraderTermMatches(metaTraderTerm, 64)
-    : []
-  const exactMinimumEquityChunks = exactRoutes.length === 0 && questionAsksMinimumEquityConfig(question)
-    ? await retrieveMinimumEquityConfigChunks(24)
-    : []
+  // Run all independent exact-match scroll scans in parallel.
+  const [exactTermChunks, exactVocabularyChunks, exactMetaTraderChunks, exactMinimumEquityChunks] = await Promise.all([
+    exactRoutes.length === 0
+      ? retrieveExactTermMatches(exactTermSearchTerms, questionAsksAboutAccountTypes(question) ? 60 : 32)
+      : Promise.resolve([]),
+    exactRoutes.length === 0 && isGeneralVocabQuestion
+      ? retrieveExactVocabularyMatches(exactTermSearchTerms, 24)
+      : Promise.resolve([]),
+    exactRoutes.length === 0 && metaTraderTerm
+      ? retrieveMetaTraderTermMatches(metaTraderTerm, 64)
+      : Promise.resolve([]),
+    exactRoutes.length === 0 && questionAsksMinimumEquityConfig(question)
+      ? retrieveMinimumEquityConfigChunks(24)
+      : Promise.resolve([]),
+  ])
 
   // Fallback: if the question is about general vocabulary topics (medal, level, rank) but no vocabulary
   // chunks were retrieved via exact matching, explicitly search for vocabulary chunks.
@@ -5349,9 +5374,13 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
       ? await retrieveNeighborChunks(exactTermChunks, questionAsksAboutAccountTypes(question) ? 240 : 70)
       : []
   const exactComparison = exactRoutes.length >= 2 && isExactRouteComparisonQuestion(question)
+  // Decision-intent questions should not be treated as endpoint inspections — they ask
+  // about WHY something was decided, not HOW an endpoint behaves.
+  const isDecisionIntentQuestion = /\b(decided|decision|why|rationale|rule|changed|aturan|diputuskan|alasan)\b/i.test(question)
   const exactEndpointInspection =
     exactRoutes.length > 0 &&
     !exactComparison &&
+    !isDecisionIntentQuestion &&
     (shouldInspectExactEndpointDetails(question) || shouldExpandExactRouteQuestion(question) || conceptRoutes.length > 0)
   const exactHandlerRefs = extractExactRouteHandlerRefs(exactChunks, exactRoutes)
   const exactDetailChunks =
@@ -5419,26 +5448,36 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     }
   }
 
-  const initialChunks = exactRoutes.length > 0 ? [] : await retrieve(retrievalQuestion, retrievalLimit)
-  const preferredLocaleDocChunks =
-    exactRoutes.length === 0 && questionAsksAboutGlossary(question) && !questionAsksAboutAccountTypes(question)
-      ? await retrievePreferredLocaleDocChunks(retrievalQuestion, Math.max(retrievalLimit, 16))
-      : []
-  const exactDocumentationSubjectChunks =
-    exactRoutes.length === 0 && questionAsksAboutGlossary(question) && !questionAsksAboutAccountTypes(question) && !isGeneralVocabQuestion
-      ? await retrieveDocumentationSubjectMatches([
+  // Run independent retrieval calls in parallel to avoid sequential Qdrant round-trips.
+  const isGlossaryNotAccountTypes = exactRoutes.length === 0 && questionAsksAboutGlossary(question) && !questionAsksAboutAccountTypes(question)
+  const [
+    initialChunks,
+    preferredLocaleDocChunksRaw,
+    exactDocumentationSubjectChunksRaw,
+  ] = await Promise.all([
+    exactRoutes.length > 0 ? Promise.resolve([]) : retrieve(retrievalQuestion, retrievalLimit),
+    isGlossaryNotAccountTypes
+      ? retrievePreferredLocaleDocChunks(retrievalQuestion, Math.max(retrievalLimit, 16))
+      : Promise.resolve([]),
+    isGlossaryNotAccountTypes && !isGeneralVocabQuestion
+      ? retrieveDocumentationSubjectMatches([
           ...extractConceptTokens(question),
           ...extractDefinitionSubjectTerms(question),
           ...extractQuestionAcronyms(question),
           ...extractShortSubjectTokens(question),
         ], Math.max(retrievalLimit, 24))
-      : []
-  const preferredLocaleDocNeighborChunks = preferredLocaleDocChunks.length > 0 && questionAsksAboutGlossary(question)
-    ? await retrieveNeighborChunks(preferredLocaleDocChunks, 30)
-    : []
-  const exactDocumentationSubjectNeighborChunks = exactDocumentationSubjectChunks.length > 0 && questionAsksAboutGlossary(question)
-    ? await retrieveNeighborChunks(exactDocumentationSubjectChunks, 40)
-    : []
+      : Promise.resolve([]),
+  ])
+  const preferredLocaleDocChunks = preferredLocaleDocChunksRaw as RetrievedChunk[]
+  const exactDocumentationSubjectChunks = exactDocumentationSubjectChunksRaw as RetrievedChunk[]
+  const [preferredLocaleDocNeighborChunks, exactDocumentationSubjectNeighborChunks] = await Promise.all([
+    preferredLocaleDocChunks.length > 0 && questionAsksAboutGlossary(question)
+      ? retrieveNeighborChunks(preferredLocaleDocChunks, 30)
+      : Promise.resolve([]),
+    exactDocumentationSubjectChunks.length > 0 && questionAsksAboutGlossary(question)
+      ? retrieveNeighborChunks(exactDocumentationSubjectChunks, 40)
+      : Promise.resolve([]),
+  ])
   const hints = collectHints([...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactVocabularyChunks, ...exactMetaTraderChunks, ...exactMinimumEquityChunks, ...exactTermDetailChunks, ...vocabUsageChunks, ...exactDocumentationSubjectChunks, ...initialChunks])
   const expansionQueries =
     exactRoutes.length > 0 && exactChunks.length === 0
@@ -5454,8 +5493,25 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     expandedChunks.push(...await retrieve(`${expansionQuery}\n${registryExpansion.terms.join(" ")}`, Math.max(3, Math.ceil(retrievalLimit / 2))))
   }
 
+  // For decision-intent questions, always fetch approved decision chunks directly
+  // and prepend them — they must not compete for slots against code chunks.
+  const decisionChunks: RetrievedChunk[] = isDecisionIntentQuestion
+    ? await (async () => {
+        const result = await qdrant.scroll(config.collectionName, {
+          filter: { must: [{ key: "source_type", match: { value: "decision" } }] },
+          limit: 20,
+          with_payload: true,
+          with_vector: false,
+        })
+        return result.points
+          .map(point => ({ id: String(point.id), payload: point.payload as RetrievedPayload }))
+          .filter(chunk => chunk.payload.content)
+      })()
+    : []
+
   const retrievedChunks = mergeChunks(
     [
+      ...decisionChunks,
       ...exactChunks,
       ...exactDetailChunks,
       ...preferredLocaleDocChunks,
@@ -5492,7 +5548,12 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
   const finalAnswerChunks = deepInvestigation
     ? mergeChunks([...answerChunks, ...deepInvestigation.chunks], Math.max(retrievalLimit, 64))
     : answerChunks
-  const chunks = finalAnswerChunks.map(chunk => chunk.payload)
+  // For decision-intent questions, only send decision chunks to the LLM — code chunks
+  // are noise that causes smaller models to ignore the actual decision content.
+  const chunks = (isDecisionIntentQuestion && decisionChunks.length > 0
+    ? finalAnswerChunks.filter(chunk => chunk.payload.source_type === "decision")
+    : finalAnswerChunks
+  ).map(chunk => chunk.payload)
   const routeDefinitions = orderRouteDefinitions(extractRouteDefinitions(exactChunks, exactRoutes), exactRoutes)
   const exactRouteRepoNames = unique(exactChunks.map(chunk => chunk.payload.repoName ?? ""), 12)
   const handlerFacts = extractHandlerFactSummary(exactDetailChunks, exactHandlerRefs, exactRouteRepoNames)
@@ -5828,16 +5889,17 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     return
   }
 
-  const hasDoctorInventory = questionAsksInventory(question) && chunks.some(c => c.filePath?.startsWith("doctor:"))
+  const doctorInventoryAnswer = questionAsksInventory(question)
+    ? buildDoctorInventoryAnswer(chunks)
+    : undefined
+  const hasDoctorInventory = Boolean(doctorInventoryAnswer)
 
   // Direct Doctor inventory answer — no LLM needed for listing questions
-  if (hasDoctorInventory) {
-    const doctorChunks = chunks.filter(c => c.filePath?.startsWith("doctor:") || c.filePath?.startsWith("doctor-fact:"))
-    const content = doctorChunks.map(c => c.content ?? "").join("\n\n---\n\n")
+  if (doctorInventoryAnswer) {
     console.log("\nANSWER\n")
-    console.log(content)
+    console.log(doctorInventoryAnswer.answer)
     console.log("\nSOURCES\n")
-    for (const chunk of doctorChunks) {
+    for (const chunk of doctorInventoryAnswer.sources) {
       console.log(`- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`)
     }
     return
@@ -5861,6 +5923,40 @@ const exactMetaTraderChunks = exactRoutes.length === 0 && metaTraderTerm
     }
 
     return
+  }
+
+  // Fast path for decision-intent questions when approved decisions are available.
+  // Send only decision chunks with a focused prompt — avoids noise from code chunks
+  // and works reliably with smaller models.
+  if (isDecisionIntentQuestion && decisionChunks.length > 0) {
+    const decisionPayloads = decisionChunks.map(chunk => chunk.payload)
+    const decisionContext = decisionPayloads.map(p => p.content ?? "").join("\n\n---\n\n")
+    const decisionPrompt = [
+      `Question: ${question}`,
+      "",
+      "The following are approved architectural decisions from the team's decision log:",
+      "",
+      decisionContext,
+      "",
+      "Answer the question using only the decisions above.",
+      "If no decision directly answers the question, say NOT_FOUND_IN_INDEXED_CODEBASE.",
+      "Be concise. State the decision, the rationale if present, and which services are affected.",
+      "Do not invent information not present in the decisions above.",
+    ].join("\n")
+
+    const decisionAnswer = await chat(decisionPrompt).catch(() => "")
+
+    if (decisionAnswer && !/^\s*$/.test(decisionAnswer)) {
+      const sourceChunks = compactPayloadSources(decisionPayloads, 8)
+
+      console.log("\nANSWER\n")
+      console.log(decisionAnswer)
+      console.log("\nSOURCES\n")
+      for (const chunk of sourceChunks) {
+        console.log(`- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`)
+      }
+      return
+    }
   }
 
   const fallbackContextChunks = selectFallbackContextChunks(chunks, question)

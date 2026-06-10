@@ -243,6 +243,51 @@
     font-size: 0.82rem;
     margin-top: 2px;
   }
+  .manager-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 20px;
+    border-bottom: 2px solid #30363d;
+    padding-bottom: 0;
+  }
+  .manager-tab {
+    padding: 10px 16px;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #8b949e;
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    margin-bottom: -2px;
+  }
+  .manager-tab:hover {
+    color: #c9d1d9;
+    background: #21262d;
+  }
+  .manager-tab.active {
+    color: #58a6ff;
+    border-bottom-color: #58a6ff;
+  }
+
+  /* Tab content visibility */
+  [data-tab] {
+    display: none;
+  }
+  .manager-view[data-active-tab="indexing"] [data-tab="indexing"] {
+    display: block;
+  }
+  .manager-view[data-active-tab="configuration"] [data-tab="configuration"] {
+    display: block;
+  }
+  .manager-view[data-active-tab="decisions"] [data-tab="decisions"] {
+    display: block;
+  }
+  .manager-view[data-active-tab="quality"] [data-tab="quality"] {
+    display: block;
+  }
+
   .manager-actions {
     display: flex;
     gap: 8px;
@@ -927,6 +972,7 @@
       <input id="project" type="text" placeholder="project (optional)" />
       <input id="branch" type="text" placeholder="branch (optional)" />
       <input id="serviceType" type="text" placeholder="service-type (optional)" />
+      <input id="chatModel" type="text" value="qwen3:8b" placeholder="chat model, e.g. qwen3:8b" />
       <label class="manager-checks" title="Runs extra read-only retrieval passes before answering. Slower, better for messy flow questions.">
         <input id="deepMode" type="checkbox" />
         Deep investigation
@@ -942,12 +988,27 @@
           </div>
           <div class="manager-actions">
             <button class="manager-btn" onclick="showChat()">Back to Chat</button>
-            <button class="manager-btn primary" onclick="loadIndexSummary()">Refresh</button>
+            <button class="manager-btn primary" onclick="refreshActiveTab()">Refresh</button>
           </div>
         </div>
 
+        <div class="manager-tabs">
+          <button class="manager-tab active" onclick="switchManagerTab('indexing')" data-tab="indexing">
+            📦 Indexing
+          </button>
+          <button class="manager-tab" onclick="switchManagerTab('configuration')" data-tab="configuration">
+            ⚙️ Configuration
+          </button>
+          <button class="manager-tab" onclick="switchManagerTab('decisions')" data-tab="decisions">
+            📝 Decisions
+          </button>
+          <button class="manager-tab" onclick="switchManagerTab('quality')" data-tab="quality">
+            ✓ Quality
+          </button>
+        </div>
+
         <div class="manager-grid">
-          <div class="manager-panel">
+          <div class="manager-panel" data-tab="indexing">
             <h2>Index Repository</h2>
             <div class="manager-form">
               <input class="wide" id="indexRepoPath" placeholder="Repo path, e.g. C:/GIT/work/tf2-ois" />
@@ -972,7 +1033,7 @@
             </div>
           </div>
 
-          <div class="manager-panel">
+          <div class="manager-panel" data-tab="indexing">
             <h2>Index Documentation</h2>
             <div class="manager-form">
               <input class="wide" id="indexDocsPath" placeholder="Docs path, e.g. C:/GIT/work/tf-documentation/my-website/docs" />
@@ -994,7 +1055,7 @@
             </div>
           </div>
 
-          <div class="manager-panel wide-panel">
+          <div class="manager-panel wide-panel" data-tab="configuration">
             <h2>Project Registry</h2>
             <div class="manager-form">
               <div class="manager-subgrid">
@@ -1094,7 +1155,7 @@
             <div class="manager-list" id="registryList"></div>
           </div>
 
-          <div class="manager-panel wide-panel">
+          <div class="manager-panel wide-panel" data-tab="quality">
             <h2>Knowledge Notes</h2>
             <div class="manager-form">
               <div class="manager-field wide">
@@ -1133,7 +1194,65 @@
             <div class="manager-list" id="knowledgeNotesList"></div>
           </div>
 
-          <div class="manager-panel wide-panel">
+          <div class="manager-panel wide-panel" data-tab="decisions">
+            <h2>Draft Management</h2>
+            <div class="manager-actions">
+              <button class="manager-btn primary" onclick="loadDrafts()">Refresh Drafts</button>
+              <button class="manager-btn" onclick="showNewDraftForm()">New Draft</button>
+            </div>
+            <div class="manager-status" id="draftsStatus"></div>
+            <div class="manager-form" id="newDraftForm" style="display:none; margin-top:12px;">
+              <div class="manager-field wide">
+                <label for="draftFileName">File Name</label>
+                <input id="draftFileName" placeholder="draft-2026-06-10-my-decision.md" />
+                <div class="manager-field-hint">Use kebab-case with date prefix. Will be saved to docs/decisions/drafts/</div>
+              </div>
+              <div class="manager-field wide">
+                <label for="draftContent">Content (Markdown)</label>
+                <textarea id="draftContent" placeholder="---
+date: 2026-06-10
+status: draft
+type: adr
+decision_maker: unknown
+affected_services: []
+affected_tables: []
+source: brain_dump
+---
+
+# ADR: Your decision title
+
+## Context
+...
+
+## Decision
+...
+
+## Consequences
+..."></textarea>
+                <div class="manager-field-hint">Include frontmatter with metadata, then markdown body.</div>
+              </div>
+              <button class="manager-btn primary" onclick="saveDraft()">Save Draft</button>
+              <button class="manager-btn" onclick="cancelNewDraft()">Cancel</button>
+            </div>
+            <div class="manager-list" id="draftsList"></div>
+          </div>
+
+          <div class="manager-panel wide-panel" data-tab="decisions">
+            <h2>Approved Decisions</h2>
+            <div class="manager-actions">
+              <button class="manager-btn primary" onclick="loadDecisions()">Refresh Decisions</button>
+              <input id="decisionSearch" placeholder="Search decisions..." style="width:200px;" oninput="loadDecisions()" />
+              <select id="decisionTypeFilter" onchange="loadDecisions()" style="width:140px;">
+                <option value="">All Types</option>
+                <option value="adr">ADR</option>
+                <option value="implicit_rule">Implicit Rule</option>
+              </select>
+            </div>
+            <div class="manager-status" id="decisionsStatus"></div>
+            <div class="manager-list" id="decisionsList"></div>
+          </div>
+
+          <div class="manager-panel wide-panel" data-tab="quality">
             <h2>Answer Feedback Review</h2>
             <div class="manager-actions">
               <button class="manager-btn primary" onclick="loadAnswerFeedback()">Refresh Feedback</button>
@@ -1145,7 +1264,7 @@
             <div class="manager-list" id="answerFeedbackList"></div>
           </div>
 
-          <div class="manager-panel wide-panel">
+          <div class="manager-panel wide-panel" data-tab="quality">
             <h2>Answer Evaluation</h2>
             <div class="manager-actions">
               <button class="manager-btn primary" onclick="runEvaluationSuite('baseline')">Run Baseline</button>
@@ -1156,8 +1275,9 @@
           </div>
         </div>
 
-        <div class="manager-status" id="managerStatus"></div>
-        <div class="manager-table-wrap">
+        <div data-tab="indexing">
+          <div class="manager-status" id="managerStatus"></div>
+          <div class="manager-table-wrap">
           <table class="manager-table">
             <thead>
               <tr>
@@ -1180,6 +1300,7 @@
               <tr><td colspan="13" class="manager-muted">Open Index Manager and click Refresh.</td></tr>
             </tbody>
           </table>
+        </div>
         </div>
       </div>
     </section>
@@ -1251,6 +1372,8 @@ let knowledgeNotes = [];
 let editingKnowledgeNoteId = null;
 let answerFeedbackItems = [];
 let answerFeedbackFilter = 'bad';
+let drafts = [];
+let decisions = [];
 
 // In-memory conversation history
 let messages = [];
@@ -1298,10 +1421,60 @@ function toggleSettings() {
 
 function showManager() {
   mainEl.classList.add('manager-active');
-  loadIndexSummary();
-  loadRegistry();
-  loadKnowledgeNotes();
-  loadAnswerFeedback();
+
+  // Set initial active tab (default to indexing)
+  const managerView = document.getElementById('managerView');
+  const savedTab = localStorage.getItem('activeManagerTab') || 'indexing';
+  managerView.setAttribute('data-active-tab', savedTab);
+
+  // Update tab button states
+  document.querySelectorAll('.manager-tab').forEach(tab => {
+    const tabName = tab.getAttribute('data-tab');
+    tab.classList.toggle('active', tabName === savedTab);
+  });
+
+  // Load data for active tab
+  refreshActiveTab();
+}
+
+function switchManagerTab(tabName) {
+  const managerView = document.getElementById('managerView');
+  managerView.setAttribute('data-active-tab', tabName);
+
+  // Save to localStorage
+  localStorage.setItem('activeManagerTab', tabName);
+
+  // Update tab button states
+  document.querySelectorAll('.manager-tab').forEach(tab => {
+    const thisTabName = tab.getAttribute('data-tab');
+    tab.classList.toggle('active', thisTabName === tabName);
+  });
+
+  // Load data for the new tab
+  refreshActiveTab();
+}
+
+function refreshActiveTab() {
+  const managerView = document.getElementById('managerView');
+  const activeTab = managerView.getAttribute('data-active-tab') || 'indexing';
+
+  // Load data based on active tab
+  switch(activeTab) {
+    case 'indexing':
+      loadIndexSummary();
+      break;
+    case 'configuration':
+      loadRegistry();
+      break;
+    case 'decisions':
+      loadDrafts();
+      loadDecisions();
+      break;
+    case 'quality':
+      loadKnowledgeNotes();
+      loadAnswerFeedback();
+      break;
+  }
 }
 
 function showChat() {
@@ -2424,6 +2597,7 @@ async function ask() {
   const project = document.getElementById('project').value.trim() || undefined;
   const branch = document.getElementById('branch').value.trim() || undefined;
   const serviceType = document.getElementById('serviceType').value.trim() || undefined;
+  const chatModel = document.getElementById('chatModel').value.trim() || undefined;
   const deep = document.getElementById('deepMode').checked;
 
   // Add user message
@@ -2450,7 +2624,7 @@ async function ask() {
     const res = await fetch('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, repoName, project, branch, serviceType, deep, history: historyForApi }),
+      body: JSON.stringify({ question, repoName, project, branch, serviceType, chatModel, deep, history: historyForApi }),
     });
 
     const data = await res.json();
@@ -2488,6 +2662,278 @@ async function ask() {
 // Initialize
 renderRecent();
 questionInput.focus();
+
+// ========================================
+// Draft Management Functions
+// ========================================
+
+async function loadDrafts() {
+  const draftsStatus = document.getElementById('draftsStatus');
+  const draftsList = document.getElementById('draftsList');
+
+  draftsStatus.textContent = 'Loading drafts...';
+  draftsList.innerHTML = '<div class="manager-muted">Loading...</div>';
+
+  try {
+    const res = await fetch('/api/drafts');
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Failed to load drafts');
+
+    drafts = data.drafts || [];
+    draftsStatus.textContent = `${drafts.length} pending draft(s).`;
+    renderDrafts();
+  } catch (err) {
+    draftsStatus.textContent = `Could not load drafts: ${err.message}`;
+    draftsList.innerHTML = '<div class="manager-muted">Draft management API is not available.</div>';
+  }
+}
+
+function renderDrafts() {
+  const draftsList = document.getElementById('draftsList');
+
+  if (drafts.length === 0) {
+    draftsList.innerHTML = '<div class="manager-muted">No pending drafts.</div>';
+    return;
+  }
+
+  draftsList.innerHTML = drafts.map(draft => `
+    <div class="manager-list-item">
+      <div class="manager-list-title">${escapeHtml(draft.decision)}</div>
+      <div class="manager-list-meta">
+        <code>${escapeHtml(draft.type)}</code>
+        · ${escapeHtml(draft.date)}
+        · <code>${escapeHtml(draft.fileName)}</code>
+      </div>
+      <div class="manager-actions" style="margin-top:8px;">
+        <button class="manager-btn" onclick="viewDraftContent('${escapeHtml(draft.fileName).replace(/'/g, "\\'")}')">View</button>
+        <button class="manager-btn primary" onclick="approveDraft('${escapeHtml(draft.fileName).replace(/'/g, "\\'")}')">Approve</button>
+        <button class="manager-btn danger" onclick="discardDraft('${escapeHtml(draft.fileName).replace(/'/g, "\\'")}')">Discard</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function showNewDraftForm() {
+  document.getElementById('newDraftForm').style.display = 'grid';
+  document.getElementById('draftFileName').value = `draft-${new Date().toISOString().slice(0, 10)}-my-decision.md`;
+}
+
+function cancelNewDraft() {
+  document.getElementById('newDraftForm').style.display = 'none';
+  document.getElementById('draftFileName').value = '';
+  document.getElementById('draftContent').value = '';
+}
+
+async function saveDraft() {
+  const draftsStatus = document.getElementById('draftsStatus');
+  const fileName = document.getElementById('draftFileName').value.trim();
+  const content = document.getElementById('draftContent').value.trim();
+
+  if (!fileName || !content) {
+    draftsStatus.textContent = 'File name and content are required.';
+    return;
+  }
+
+  draftsStatus.textContent = 'Saving draft...';
+
+  try {
+    const res = await fetch('/api/drafts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName, content }),
+    });
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Save failed');
+
+    draftsStatus.textContent = `Draft saved: ${data.fileName}`;
+    cancelNewDraft();
+    await loadDrafts();
+  } catch (err) {
+    draftsStatus.textContent = `Save failed: ${err.message}`;
+  }
+}
+
+async function approveDraft(fileName) {
+  const draftsStatus = document.getElementById('draftsStatus');
+
+  if (!confirm(`Approve draft "${fileName}"? This will move it to approved/ and index it to Qdrant.`)) {
+    return;
+  }
+
+  draftsStatus.textContent = `Approving ${fileName}...`;
+
+  try {
+    const res = await fetch(`/api/drafts/${encodeURIComponent(fileName)}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Approve failed');
+
+    draftsStatus.textContent = `Approved ${data.fileName}. Type: ${data.chunkType}. Affected services: ${(data.affectedServices || []).join(', ') || 'none'}. Documented edges: ${data.documentedEdges}.`;
+    await loadDrafts();
+    await loadDecisions();
+  } catch (err) {
+    draftsStatus.textContent = `Approve failed: ${err.message}`;
+  }
+}
+
+async function discardDraft(fileName) {
+  const draftsStatus = document.getElementById('draftsStatus');
+
+  if (!confirm(`Discard draft "${fileName}"? This will permanently delete it.`)) {
+    return;
+  }
+
+  draftsStatus.textContent = `Discarding ${fileName}...`;
+
+  try {
+    const res = await fetch(`/api/drafts/${encodeURIComponent(fileName)}`, {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Discard failed');
+
+    draftsStatus.textContent = `Discarded ${fileName}.`;
+    await loadDrafts();
+  } catch (err) {
+    draftsStatus.textContent = `Discard failed: ${err.message}`;
+  }
+}
+
+async function viewDraftContent(fileName) {
+  const draftsStatus = document.getElementById('draftsStatus');
+
+  draftsStatus.textContent = `Loading ${fileName}...`;
+
+  try {
+    const res = await fetch(`/api/drafts/${encodeURIComponent(fileName)}`);
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Load failed');
+
+    draftsStatus.textContent = `Viewing: ${fileName}`;
+
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'manager-output';
+    contentDiv.style.marginTop = '12px';
+    contentDiv.textContent = data.content;
+
+    const draftItems = document.querySelectorAll('#draftsList .manager-list-item');
+    for (const item of draftItems) {
+      if (item.textContent.includes(fileName)) {
+        const existing = item.querySelector('.manager-output');
+        if (existing) {
+          existing.remove();
+        } else {
+          item.appendChild(contentDiv);
+        }
+        break;
+      }
+    }
+  } catch (err) {
+    draftsStatus.textContent = `Load failed: ${err.message}`;
+  }
+}
+
+// ========================================
+// Approved Decisions Functions
+// ========================================
+
+async function loadDecisions() {
+  const decisionsStatus = document.getElementById('decisionsStatus');
+  const decisionsList = document.getElementById('decisionsList');
+
+  decisionsStatus.textContent = 'Loading decisions...';
+  decisionsList.innerHTML = '<div class="manager-muted">Loading...</div>';
+
+  try {
+    const search = document.getElementById('decisionSearch')?.value.trim() || '';
+    const typeFilter = document.getElementById('decisionTypeFilter')?.value || '';
+
+    const params = new URLSearchParams();
+    if (search) params.append('search', search);
+    if (typeFilter) params.append('type', typeFilter);
+
+    const url = `/api/decisions${params.toString() ? '?' + params.toString() : ''}`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Failed to load decisions');
+
+    decisions = data.decisions || [];
+    decisionsStatus.textContent = `${decisions.length} approved decision(s).`;
+    renderDecisions();
+  } catch (err) {
+    decisionsStatus.textContent = `Could not load decisions: ${err.message}`;
+    decisionsList.innerHTML = '<div class="manager-muted">Approved decisions API is not available.</div>';
+  }
+}
+
+function renderDecisions() {
+  const decisionsList = document.getElementById('decisionsList');
+
+  if (decisions.length === 0) {
+    decisionsList.innerHTML = '<div class="manager-muted">No approved decisions found.</div>';
+    return;
+  }
+
+  decisionsList.innerHTML = decisions.map(decision => `
+    <div class="manager-list-item">
+      <div class="manager-list-title">${escapeHtml(decision.decision)}</div>
+      <div class="manager-list-meta">
+        <code>${escapeHtml(decision.type)}</code>
+        · ${escapeHtml(decision.date)}
+        · affected: ${(decision.affectedServices || []).length > 0 ? decision.affectedServices.map(s => `<code>${escapeHtml(s)}</code>`).join(' ') : '<span class="manager-muted">none</span>'}
+      </div>
+      <div class="manager-list-meta" style="margin-top:4px;">
+        <code>${escapeHtml(decision.fileName)}</code>
+      </div>
+      <div class="manager-actions" style="margin-top:8px;">
+        <button class="manager-btn" onclick="viewDecisionContent('${escapeHtml(decision.fileName).replace(/'/g, "\\'")}')">View Content</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function viewDecisionContent(fileName) {
+  const decisionsStatus = document.getElementById('decisionsStatus');
+
+  decisionsStatus.textContent = `Loading ${fileName}...`;
+
+  try {
+    const res = await fetch(`/api/decisions/${encodeURIComponent(fileName)}`);
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error || 'Load failed');
+
+    decisionsStatus.textContent = `Viewing: ${fileName}`;
+
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'manager-output';
+    contentDiv.style.marginTop = '12px';
+    contentDiv.textContent = data.content;
+
+    const decisionItems = document.querySelectorAll('#decisionsList .manager-list-item');
+    for (const item of decisionItems) {
+      if (item.textContent.includes(fileName)) {
+        const existing = item.querySelector('.manager-output');
+        if (existing) {
+          existing.remove();
+        } else {
+          item.appendChild(contentDiv);
+        }
+        break;
+      }
+    }
+  } catch (err) {
+    decisionsStatus.textContent = `Load failed: ${err.message}`;
+  }
+}
 </script>
 </body>
 </html>

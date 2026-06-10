@@ -20,6 +20,18 @@ import {
   type AnswerFeedbackInput,
 } from "./lib/answer-feedback.js"
 import {
+  listDrafts,
+  readDraft,
+  saveDraft,
+  approveDraft,
+  discardDraft,
+  approvedDirectory,
+  parseDraftFrontmatter,
+  extractDecisionTitle,
+  type DraftSummary,
+} from "./lib/draft-manager.js"
+import fs from "node:fs/promises"
+import {
   affectedReposForRegistryEntry,
   deleteServiceRegistryEntry,
   findServiceRegistryEntry,
@@ -49,6 +61,7 @@ type AskBody = {
   question: string
   limit?: number
   deep?: boolean
+  chatModel?: string
   repoName?: string
   project?: string
   branch?: string
@@ -130,6 +143,23 @@ type RegistryReindexBody = {
   maxChunks?: number
   indexComments?: boolean
   indexCommits?: boolean
+}
+
+type CreateDraftBody = {
+  fileName: string
+  content: string
+}
+
+type UpdateDraftBody = {
+  content: string
+}
+
+type DecisionFilter = {
+  type?: "adr" | "implicit_rule"
+  affectedService?: string
+  dateFrom?: string
+  dateTo?: string
+  search?: string
 }
 
 function parseAskOutput(stdout: string): AskResult {
@@ -320,6 +350,10 @@ app.post("/api/ask", async (request, response) => {
 
   if (body.deep) {
     args.push("--deep")
+  }
+
+  if (body.chatModel?.trim()) {
+    args.push("--chat-model", body.chatModel.trim())
   }
 
   if (body.repoName) {
@@ -726,6 +760,167 @@ app.delete("/api/feedback/:id", async (request, response) => {
     const message = error instanceof Error ? error.message : String(error)
 
     response.status(500).json({ error: message })
+  }
+})
+
+app.get("/api/drafts", async (_request, response) => {
+  try {
+    const drafts = await listDrafts()
+
+    response.json({ drafts })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(500).json({ error: message })
+  }
+})
+
+app.get("/api/drafts/:filename", async (request, response) => {
+  try {
+    const content = await readDraft(request.params.filename)
+
+    response.json({ content })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const status = message.includes("ENOENT") ? 404 : 500
+
+    response.status(status).json({ error: message })
+  }
+})
+
+app.post("/api/drafts", async (request, response) => {
+  const body = request.body as CreateDraftBody
+
+  if (!body.fileName?.trim()) {
+    response.status(400).json({ error: "Missing required field: fileName" })
+    return
+  }
+
+  if (!body.content?.trim()) {
+    response.status(400).json({ error: "Missing required field: content" })
+    return
+  }
+
+  try {
+    const fullPath = await saveDraft(body.fileName, body.content)
+
+    response.status(201).json({ fileName: body.fileName, fullPath })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(400).json({ error: message })
+  }
+})
+
+app.put("/api/drafts/:filename", async (request, response) => {
+  const body = request.body as UpdateDraftBody
+
+  if (!body.content?.trim()) {
+    response.status(400).json({ error: "Missing required field: content" })
+    return
+  }
+
+  try {
+    const fullPath = await saveDraft(request.params.filename, body.content)
+
+    response.json({ fileName: request.params.filename, fullPath })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(400).json({ error: message })
+  }
+})
+
+app.post("/api/drafts/:filename/approve", async (request, response) => {
+  try {
+    const result = await approveDraft(request.params.filename)
+
+    response.json(result)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const status = message.includes("ENOENT") ? 404 : 500
+
+    response.status(status).json({ error: message })
+  }
+})
+
+app.delete("/api/drafts/:filename", async (request, response) => {
+  try {
+    await discardDraft(request.params.filename)
+
+    response.json({ ok: true })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(500).json({ error: message })
+  }
+})
+
+app.get("/api/decisions", async (request, response) => {
+  try {
+    const approvedDir = approvedDirectory()
+    const entries = await fs.readdir(approvedDir)
+    const decisions: Array<DraftSummary & { affectedServices: string[] }> = []
+
+    for (const fileName of entries.filter(name => name.endsWith(".md")).sort()) {
+      const content = await fs.readFile(path.join(approvedDir, fileName), "utf8")
+      const frontmatter = parseDraftFrontmatter(content)
+
+      decisions.push({
+        fileName,
+        date: frontmatter.date,
+        type: frontmatter.type,
+        decision: extractDecisionTitle(content),
+        affectedServices: frontmatter.affectedServices,
+      })
+    }
+
+    // Apply filters from query params
+    const filter = request.query as DecisionFilter
+    let filtered = decisions
+
+    if (filter.type) {
+      filtered = filtered.filter(d => d.type === filter.type)
+    }
+
+    if (filter.affectedService) {
+      filtered = filtered.filter(d =>
+        d.affectedServices.some(s => s.toLowerCase().includes(filter.affectedService!.toLowerCase()))
+      )
+    }
+
+    if (filter.dateFrom) {
+      filtered = filtered.filter(d => d.date >= filter.dateFrom!)
+    }
+
+    if (filter.dateTo) {
+      filtered = filtered.filter(d => d.date <= filter.dateTo!)
+    }
+
+    if (filter.search) {
+      const searchLower = filter.search.toLowerCase()
+      filtered = filtered.filter(d => d.decision.toLowerCase().includes(searchLower))
+    }
+
+    response.json({ decisions: filtered })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    response.status(500).json({ error: message })
+  }
+})
+
+app.get("/api/decisions/:filename", async (request, response) => {
+  try {
+    const approvedDir = approvedDirectory()
+    const content = await fs.readFile(path.join(approvedDir, request.params.filename), "utf8")
+
+    response.json({ content })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const status = message.includes("ENOENT") ? 404 : 500
+
+    response.status(status).json({ error: message })
   }
 })
 

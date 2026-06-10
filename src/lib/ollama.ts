@@ -95,6 +95,9 @@ export async function chat(prompt: string): Promise<string> {
             body: JSON.stringify({
                 model: config.chatModel,
                 stream: false,
+                options: {
+                    num_ctx: config.numCtx,
+                },
                 messages: [
                     {
                         role: "system",
@@ -199,4 +202,58 @@ export async function detectPreferredLanguage(input: string): Promise<AnswerLang
     } catch {
         return "unknown"
     }
+}
+
+export async function chatJson(systemPrompt: string, userPrompt: string): Promise<string> {
+    let res
+
+    const isQwen3 = config.chatModel.startsWith("qwen3")
+    const systemContent = [
+        isQwen3 ? "/no_think" : undefined,
+        systemPrompt,
+    ].filter(Boolean).join("\n")
+
+    try {
+        res = await fetchWithRetry(`${config.ollamaUrl}/api/chat`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                model: config.chatModel,
+                stream: false,
+                format: "json",
+                options: {
+                    temperature: 0,
+                    num_ctx: config.numCtx,
+                },
+                messages: [
+                    {
+                        role: "system",
+                        content: systemContent,
+                    },
+                    {
+                        role: "user",
+                        content: userPrompt,
+                    },
+                ],
+            }),
+        })
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+
+        throw new Error(
+            `Ollama is not reachable at ${config.ollamaUrl}. Start Ollama and run: ollama pull ${config.chatModel}\n${message}`,
+        )
+    }
+
+    if (!res.ok) {
+        throw new Error(`OLLAMA_CHAT_FAILED: ${res.status} ${await res.text()}`)
+    }
+
+    const data = (await res.json()) as OllamaChatResponse
+    const raw = data.message?.content ?? ""
+
+    // Buang blok berpikir qwen3 agar parser JSON tidak menerima teks tambahan.
+    return raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "").replace(/^[\s\S]*?<\/think>\s*/g, "").trim()
 }

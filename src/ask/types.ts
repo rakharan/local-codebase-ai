@@ -27,6 +27,12 @@ export type RetrievedPayload = {
   noteStatus?: "confirmed" | "proposal" | "deprecated"
   noteAuthor?: string
   noteUpdatedAt?: string
+  source_type?: string
+  chunk_type?: string
+  retrieval_priority?: number
+  decision_maker?: string | null
+  affected_services?: string[]
+  affected_tables?: string[]
 }
 
 export type RetrievedChunk = {
