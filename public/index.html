@@ -676,6 +676,54 @@
     text-align: center;
   }
 
+  /* Analytics */
+  .analytics-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .stat-card {
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 10px 12px;
+    text-align: center;
+  }
+  .stat-card-value {
+    font-size: 1.6rem;
+    font-weight: 700;
+    color: #58a6ff;
+    line-height: 1.2;
+  }
+  .stat-card-label {
+    font-size: 0.7rem;
+    color: #8b949e;
+    margin-top: 2px;
+  }
+  .analytics-section {
+    margin-bottom: 14px;
+  }
+  .analytics-section-title {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+  }
+  .bar-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 5px;
+    font-size: 0.8rem;
+  }
+  .bar-label { width: 140px; color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+  .bar-track { flex: 1; background: #21262d; border-radius: 3px; height: 8px; }
+  .bar-fill { background: #58a6ff; border-radius: 3px; height: 8px; transition: width 0.3s; }
+  .bar-count { color: #8b949e; font-size: 0.75rem; width: 24px; text-align: right; flex-shrink: 0; }
+
   /* Empty State */
   .empty-state {
     display: flex;
@@ -993,16 +1041,16 @@
         </div>
 
         <div class="manager-tabs">
-          <button class="manager-tab active" onclick="switchManagerTab('indexing')" data-tab="indexing">
+          <button class="manager-tab active" onclick="switchManagerTab('indexing')">
             📦 Indexing
           </button>
-          <button class="manager-tab" onclick="switchManagerTab('configuration')" data-tab="configuration">
+          <button class="manager-tab" onclick="switchManagerTab('configuration')">
             ⚙️ Configuration
           </button>
-          <button class="manager-tab" onclick="switchManagerTab('decisions')" data-tab="decisions">
+          <button class="manager-tab" onclick="switchManagerTab('decisions')">
             📝 Decisions
           </button>
-          <button class="manager-tab" onclick="switchManagerTab('quality')" data-tab="quality">
+          <button class="manager-tab" onclick="switchManagerTab('quality')">
             ✓ Quality
           </button>
         </div>
@@ -1195,6 +1243,15 @@
           </div>
 
           <div class="manager-panel wide-panel" data-tab="decisions">
+            <h2>Decision Analytics</h2>
+            <div class="manager-actions">
+              <button class="manager-btn primary" onclick="loadAnalytics()">Refresh</button>
+            </div>
+            <div class="manager-status" id="analyticsStatus"></div>
+            <div id="analyticsDashboard"></div>
+          </div>
+
+          <div class="manager-panel wide-panel" data-tab="decisions">
             <h2>Draft Management</h2>
             <div class="manager-actions">
               <button class="manager-btn primary" onclick="loadDrafts()">Refresh Drafts</button>
@@ -1239,14 +1296,21 @@ source: brain_dump
 
           <div class="manager-panel wide-panel" data-tab="decisions">
             <h2>Approved Decisions</h2>
-            <div class="manager-actions">
-              <button class="manager-btn primary" onclick="loadDecisions()">Refresh Decisions</button>
-              <input id="decisionSearch" placeholder="Search decisions..." style="width:200px;" oninput="loadDecisions()" />
-              <select id="decisionTypeFilter" onchange="loadDecisions()" style="width:140px;">
+            <div class="manager-actions" style="flex-wrap:wrap;gap:6px;">
+              <button class="manager-btn primary" onclick="loadDecisions()">Refresh</button>
+              <input id="decisionSearch" placeholder="Search..." style="width:160px;" oninput="loadDecisions()" />
+              <label style="display:flex;align-items:center;gap:4px;font-size:0.8rem;color:#8b949e;">
+                <input type="checkbox" id="decisionFullText" onchange="loadDecisions()" /> Full text
+              </label>
+              <select id="decisionTypeFilter" onchange="loadDecisions()" style="width:130px;">
                 <option value="">All Types</option>
                 <option value="adr">ADR</option>
                 <option value="implicit_rule">Implicit Rule</option>
               </select>
+              <input id="decisionMakerFilter" placeholder="Decision maker..." style="width:150px;" oninput="loadDecisions()" />
+              <input id="decisionTableFilter" placeholder="Affected table..." style="width:150px;" oninput="loadDecisions()" />
+              <input id="decisionDateFrom" type="date" style="width:130px;" onchange="loadDecisions()" />
+              <input id="decisionDateTo" type="date" style="width:130px;" onchange="loadDecisions()" />
             </div>
             <div class="manager-status" id="decisionsStatus"></div>
             <div class="manager-list" id="decisionsList"></div>
@@ -1467,6 +1531,7 @@ function refreshActiveTab() {
       loadRegistry();
       break;
     case 'decisions':
+      loadAnalytics();
       loadDrafts();
       loadDecisions();
       break;
@@ -2664,6 +2729,98 @@ renderRecent();
 questionInput.focus();
 
 // ========================================
+// Decision Analytics Functions
+// ========================================
+
+async function loadAnalytics() {
+  const status = document.getElementById('analyticsStatus');
+  const dashboard = document.getElementById('analyticsDashboard');
+  status.textContent = 'Loading analytics...';
+  dashboard.innerHTML = '';
+
+  try {
+    const res = await fetch('/api/decisions/analytics');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load analytics');
+    status.textContent = '';
+    renderAnalytics(data);
+  } catch (err) {
+    status.textContent = `Could not load analytics: ${err.message}`;
+  }
+}
+
+function renderAnalytics(data) {
+  const dashboard = document.getElementById('analyticsDashboard');
+
+  // Stat cards
+  const adrCount = data.byType['adr'] ?? 0;
+  const implicitCount = data.byType['implicit_rule'] ?? 0;
+  const statsHtml = `
+    <div class="analytics-stats">
+      <div class="stat-card"><div class="stat-card-value">${data.total}</div><div class="stat-card-label">Total Decisions</div></div>
+      <div class="stat-card"><div class="stat-card-value">${adrCount}</div><div class="stat-card-label">ADRs</div></div>
+      <div class="stat-card"><div class="stat-card-value">${implicitCount}</div><div class="stat-card-label">Implicit Rules</div></div>
+      <div class="stat-card"><div class="stat-card-value">${data.thisMonth}</div><div class="stat-card-label">This Month</div></div>
+    </div>`;
+
+  // Services bar chart
+  const serviceEntries = Object.entries(data.byService).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const maxSvc = serviceEntries[0]?.[1] ?? 1;
+  const servicesHtml = serviceEntries.length === 0 ? '<div class="manager-muted">No service data yet.</div>' :
+    serviceEntries.map(([svc, count]) => `
+      <div class="bar-row">
+        <div class="bar-label" title="${escapeHtml(svc)}">${escapeHtml(svc)}</div>
+        <div class="bar-track"><div class="bar-fill" style="width:${Math.round(count/maxSvc*100)}%"></div></div>
+        <div class="bar-count">${count}</div>
+      </div>`).join('');
+
+  // Monthly timeline (last 6 months)
+  const now = new Date();
+  const months = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    months.push(d.toISOString().slice(0, 7));
+  }
+  const maxMonth = Math.max(1, ...months.map(m => data.byMonth[m] ?? 0));
+  const monthlyHtml = months.map(m => {
+    const count = data.byMonth[m] ?? 0;
+    return `<div class="bar-row">
+      <div class="bar-label">${m}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${Math.round(count/maxMonth*100)}%"></div></div>
+      <div class="bar-count">${count}</div>
+    </div>`;
+  }).join('');
+
+  // Decision makers
+  const makerEntries = Object.entries(data.decisionMakers).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const maxMaker = makerEntries[0]?.[1] ?? 1;
+  const makersHtml = makerEntries.length === 0 ? '<div class="manager-muted">No data.</div>' :
+    makerEntries.map(([maker, count]) => `
+      <div class="bar-row">
+        <div class="bar-label" title="${escapeHtml(maker)}">${escapeHtml(maker)}</div>
+        <div class="bar-track"><div class="bar-fill" style="width:${Math.round(count/maxMaker*100)}%"></div></div>
+        <div class="bar-count">${count}</div>
+      </div>`).join('');
+
+  dashboard.innerHTML = `
+    ${statsHtml}
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;">
+      <div class="analytics-section">
+        <div class="analytics-section-title">Most Affected Services</div>
+        ${servicesHtml}
+      </div>
+      <div class="analytics-section">
+        <div class="analytics-section-title">Decisions by Month</div>
+        ${monthlyHtml}
+      </div>
+      <div class="analytics-section">
+        <div class="analytics-section-title">Decision Makers</div>
+        ${makersHtml}
+      </div>
+    </div>`;
+}
+
+// ========================================
 // Draft Management Functions
 // ========================================
 
@@ -2698,7 +2855,7 @@ function renderDrafts() {
   }
 
   draftsList.innerHTML = drafts.map(draft => `
-    <div class="manager-list-item">
+    <div class="manager-list-item" id="draft-item-${escapeHtml(draft.fileName).replace(/\./g,'-')}">
       <div class="manager-list-title">${escapeHtml(draft.decision)}</div>
       <div class="manager-list-meta">
         <code>${escapeHtml(draft.type)}</code>
@@ -2706,10 +2863,11 @@ function renderDrafts() {
         · <code>${escapeHtml(draft.fileName)}</code>
       </div>
       <div class="manager-actions" style="margin-top:8px;">
-        <button class="manager-btn" onclick="viewDraftContent('${escapeHtml(draft.fileName).replace(/'/g, "\\'")}')">View</button>
+        <button class="manager-btn" onclick="editDraft('${escapeHtml(draft.fileName).replace(/'/g, "\\'")}')">Edit</button>
         <button class="manager-btn primary" onclick="approveDraft('${escapeHtml(draft.fileName).replace(/'/g, "\\'")}')">Approve</button>
         <button class="manager-btn danger" onclick="discardDraft('${escapeHtml(draft.fileName).replace(/'/g, "\\'")}')">Discard</button>
       </div>
+      <div class="draft-editor" id="draft-editor-${escapeHtml(draft.fileName).replace(/\./g,'-')}" style="display:none;margin-top:12px;"></div>
     </div>
   `).join('');
 }
@@ -2840,8 +2998,141 @@ async function viewDraftContent(fileName) {
   }
 }
 
+// A: Inline draft editor
+function parseFrontmatterForForm(content) {
+  const fm = {};
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) return { fm: {}, body: content };
+  for (const line of (match[1] || '').split(/\r?\n/)) {
+    const colon = line.indexOf(':');
+    if (colon <= 0) continue;
+    const key = line.slice(0, colon).trim();
+    const val = line.slice(colon + 1).trim().replace(/^\[|\]$/g, '');
+    fm[key] = val;
+  }
+  return { fm, body: (match[2] || '').trim() };
+}
+
+function rebuildMarkdown(fm, body) {
+  const lines = [
+    '---',
+    `date: ${fm.date || new Date().toISOString().slice(0, 10)}`,
+    `status: ${fm.status || 'draft'}`,
+    fm.type === 'implicit_rule' ? 'type: implicit_rule' : '',
+    `decision_maker: ${fm.decision_maker || 'unknown'}`,
+    `affected_services: [${fm.affected_services || ''}]`,
+    `affected_tables: [${fm.affected_tables || ''}]`,
+    `source: ${fm.source || 'brain_dump'}`,
+    fm.discovered_in ? `discovered_in: ${fm.discovered_in}` : '',
+    '---',
+    '',
+    body,
+  ].filter(l => l !== '');
+  return lines.join('\n') + '\n';
+}
+
+async function editDraft(fileName) {
+  const editorId = 'draft-editor-' + fileName.replace(/\./g, '-');
+  const editorDiv = document.getElementById(editorId);
+  if (!editorDiv) return;
+
+  if (editorDiv.style.display !== 'none') {
+    editorDiv.style.display = 'none';
+    return;
+  }
+
+  editorDiv.innerHTML = '<div class="manager-muted">Loading...</div>';
+  editorDiv.style.display = 'block';
+
+  try {
+    const res = await fetch(`/api/drafts/${encodeURIComponent(fileName)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Load failed');
+
+    const { fm, body } = parseFrontmatterForForm(data.content);
+    const safeFile = fileName.replace(/'/g, "\\'");
+
+    editorDiv.innerHTML = `
+      <div class="manager-form" style="margin-top:0;">
+        <div class="manager-field">
+          <label>Type</label>
+          <select id="edit-type-${editorId}">
+            <option value="adr" ${fm.type !== 'implicit_rule' ? 'selected' : ''}>ADR</option>
+            <option value="implicit_rule" ${fm.type === 'implicit_rule' ? 'selected' : ''}>Implicit Rule</option>
+          </select>
+        </div>
+        <div class="manager-field">
+          <label>Source</label>
+          <select id="edit-source-${editorId}">
+            <option value="brain_dump" ${fm.source === 'brain_dump' ? 'selected' : ''}>Brain Dump</option>
+            <option value="jira" ${fm.source === 'jira' ? 'selected' : ''}>Jira</option>
+            <option value="debug_discovery" ${fm.source === 'debug_discovery' ? 'selected' : ''}>Debug Discovery</option>
+          </select>
+        </div>
+        <div class="manager-field">
+          <label>Decision Maker</label>
+          <input id="edit-maker-${editorId}" value="${escapeHtml(fm.decision_maker || '')}" placeholder="e.g. Budi" />
+        </div>
+        <div class="manager-field">
+          <label>Affected Services (comma-separated)</label>
+          <input id="edit-services-${editorId}" value="${escapeHtml(fm.affected_services || '')}" placeholder="tf2-admin, tf2-microservice" />
+        </div>
+        <div class="manager-field">
+          <label>Affected Tables (comma-separated)</label>
+          <input id="edit-tables-${editorId}" value="${escapeHtml(fm.affected_tables || '')}" placeholder="dsc_signals" />
+        </div>
+        <div class="manager-field wide">
+          <label>Body (Markdown)</label>
+          <textarea id="edit-body-${editorId}" style="min-height:180px;font-family:monospace;font-size:0.78rem;">${escapeHtml(body)}</textarea>
+        </div>
+        <button class="manager-btn primary" onclick="saveDraftEdits('${safeFile}', '${editorId}')">Save</button>
+        <button class="manager-btn" onclick="document.getElementById('${editorId}').style.display='none'">Cancel</button>
+        <div id="edit-status-${editorId}" style="font-size:0.8rem;color:#8b949e;margin-top:4px;grid-column:1/-1;"></div>
+      </div>`;
+  } catch (err) {
+    editorDiv.innerHTML = `<div class="manager-muted">Load failed: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function saveDraftEdits(fileName, editorId) {
+  const statusEl = document.getElementById(`edit-status-${editorId}`);
+  statusEl.textContent = 'Saving...';
+
+  const fm = {
+    date: new Date().toISOString().slice(0, 10),
+    status: 'draft',
+    type: document.getElementById(`edit-type-${editorId}`)?.value || 'adr',
+    decision_maker: document.getElementById(`edit-maker-${editorId}`)?.value.trim() || 'unknown',
+    affected_services: document.getElementById(`edit-services-${editorId}`)?.value.trim() || '',
+    affected_tables: document.getElementById(`edit-tables-${editorId}`)?.value.trim() || '',
+    source: document.getElementById(`edit-source-${editorId}`)?.value || 'brain_dump',
+  };
+  const body = document.getElementById(`edit-body-${editorId}`)?.value || '';
+
+  if (!fm.affected_services) {
+    statusEl.textContent = '⚠️ Affected services is empty — add at least one before saving.';
+    return;
+  }
+
+  const content = rebuildMarkdown(fm, body);
+
+  try {
+    const res = await fetch(`/api/drafts/${encodeURIComponent(fileName)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Save failed');
+    statusEl.textContent = '✓ Saved.';
+    await loadDrafts();
+  } catch (err) {
+    statusEl.textContent = `Save failed: ${err.message}`;
+  }
+}
+
 // ========================================
-// Approved Decisions Functions
+// Approved Decisions Functions (C + E)
 // ========================================
 
 async function loadDecisions() {
@@ -2854,10 +3145,20 @@ async function loadDecisions() {
   try {
     const search = document.getElementById('decisionSearch')?.value.trim() || '';
     const typeFilter = document.getElementById('decisionTypeFilter')?.value || '';
+    const fullText = document.getElementById('decisionFullText')?.checked ? 'true' : '';
+    const decisionMaker = document.getElementById('decisionMakerFilter')?.value.trim() || '';
+    const affectedTable = document.getElementById('decisionTableFilter')?.value.trim() || '';
+    const dateFrom = document.getElementById('decisionDateFrom')?.value || '';
+    const dateTo = document.getElementById('decisionDateTo')?.value || '';
 
     const params = new URLSearchParams();
     if (search) params.append('search', search);
     if (typeFilter) params.append('type', typeFilter);
+    if (fullText) params.append('fullText', 'true');
+    if (decisionMaker) params.append('decisionMaker', decisionMaker);
+    if (affectedTable) params.append('affectedTable', affectedTable);
+    if (dateFrom) params.append('dateFrom', dateFrom);
+    if (dateTo) params.append('dateTo', dateTo);
 
     const url = `/api/decisions${params.toString() ? '?' + params.toString() : ''}`;
     const res = await fetch(url);
@@ -2882,56 +3183,192 @@ function renderDecisions() {
     return;
   }
 
-  decisionsList.innerHTML = decisions.map(decision => `
-    <div class="manager-list-item">
-      <div class="manager-list-title">${escapeHtml(decision.decision)}</div>
-      <div class="manager-list-meta">
-        <code>${escapeHtml(decision.type)}</code>
-        · ${escapeHtml(decision.date)}
-        · affected: ${(decision.affectedServices || []).length > 0 ? decision.affectedServices.map(s => `<code>${escapeHtml(s)}</code>`).join(' ') : '<span class="manager-muted">none</span>'}
-      </div>
-      <div class="manager-list-meta" style="margin-top:4px;">
-        <code>${escapeHtml(decision.fileName)}</code>
-      </div>
-      <div class="manager-actions" style="margin-top:8px;">
-        <button class="manager-btn" onclick="viewDecisionContent('${escapeHtml(decision.fileName).replace(/'/g, "\\'")}')">View Content</button>
-      </div>
-    </div>
-  `).join('');
+  decisionsList.innerHTML = decisions.map(decision => {
+    const safeFile = escapeHtml(decision.fileName).replace(/'/g, "\\'");
+    const svcHtml = (decision.affectedServices || []).length > 0
+      ? decision.affectedServices.map(s => `<code>${escapeHtml(s)}</code>`).join(' ')
+      : '<span class="manager-muted">none</span>';
+    return `
+      <div class="manager-list-item" id="decision-item-${escapeHtml(decision.fileName).replace(/\./g,'-')}">
+        <div class="manager-list-title">${escapeHtml(decision.decision)}</div>
+        <div class="manager-list-meta">
+          <code>${escapeHtml(decision.type)}</code>
+          · ${escapeHtml(decision.date)}
+          ${decision.decisionMaker ? `· by <strong>${escapeHtml(decision.decisionMaker)}</strong>` : ''}
+          · affected: ${svcHtml}
+        </div>
+        <div class="manager-list-meta" style="margin-top:4px;"><code>${escapeHtml(decision.fileName)}</code></div>
+        <div class="manager-actions" style="margin-top:8px;">
+          <button class="manager-btn" onclick="viewDecisionContent('${safeFile}')">View</button>
+          <button class="manager-btn" onclick="loadRelatedDecisions('${safeFile}')">Related</button>
+          <button class="manager-btn" onclick="viewDecisionHistory('${safeFile}')">History</button>
+          <button class="manager-btn" onclick="snapshotDecision('${safeFile}')">Snapshot</button>
+        </div>
+        <div id="decision-content-${escapeHtml(decision.fileName).replace(/\./g,'-')}" style="display:none;margin-top:10px;"></div>
+        <div id="decision-related-${escapeHtml(decision.fileName).replace(/\./g,'-')}" style="display:none;margin-top:10px;"></div>
+        <div id="decision-history-${escapeHtml(decision.fileName).replace(/\./g,'-')}" style="display:none;margin-top:10px;"></div>
+      </div>`;
+  }).join('');
 }
 
 async function viewDecisionContent(fileName) {
-  const decisionsStatus = document.getElementById('decisionsStatus');
+  const panelId = 'decision-content-' + fileName.replace(/\./g, '-');
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
 
-  decisionsStatus.textContent = `Loading ${fileName}...`;
+  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+  panel.innerHTML = '<div class="manager-muted">Loading...</div>';
+  panel.style.display = 'block';
 
   try {
     const res = await fetch(`/api/decisions/${encodeURIComponent(fileName)}`);
     const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Load failed');
+    panel.innerHTML = `<pre class="manager-output" style="white-space:pre-wrap;font-size:0.78rem;">${escapeHtml(data.content)}</pre>`;
+  } catch (err) {
+    panel.innerHTML = `<div class="manager-muted">Load failed: ${escapeHtml(err.message)}</div>`;
+  }
+}
 
+// C: Related decisions
+async function loadRelatedDecisions(fileName) {
+  const panelId = 'decision-related-' + fileName.replace(/\./g, '-');
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
+
+  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+  panel.innerHTML = '<div class="manager-muted">Loading related...</div>';
+  panel.style.display = 'block';
+
+  try {
+    const res = await fetch(`/api/decisions/${encodeURIComponent(fileName)}/related`);
+    const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Load failed');
 
-    decisionsStatus.textContent = `Viewing: ${fileName}`;
-
-    const contentDiv = document.createElement('div');
-    contentDiv.className = 'manager-output';
-    contentDiv.style.marginTop = '12px';
-    contentDiv.textContent = data.content;
-
-    const decisionItems = document.querySelectorAll('#decisionsList .manager-list-item');
-    for (const item of decisionItems) {
-      if (item.textContent.includes(fileName)) {
-        const existing = item.querySelector('.manager-output');
-        if (existing) {
-          existing.remove();
-        } else {
-          item.appendChild(contentDiv);
-        }
-        break;
-      }
+    if (!data.related || data.related.length === 0) {
+      panel.innerHTML = '<div class="manager-muted">No related decisions found.</div>';
+      return;
     }
+
+    panel.innerHTML = `
+      <div class="analytics-section-title" style="margin-bottom:6px;">Related Decisions</div>
+      ${data.related.map(r => `
+        <div style="padding:6px 0;border-bottom:1px solid #21262d;">
+          <div style="font-size:0.82rem;color:#f0f6fc;">${escapeHtml(r.decision)}</div>
+          <div style="font-size:0.75rem;color:#8b949e;margin-top:2px;">
+            ${escapeHtml(r.type)} · ${escapeHtml(r.date)}
+            ${r.sharedServices.length > 0 ? `· shared services: ${r.sharedServices.map(s => `<code>${escapeHtml(s)}</code>`).join(' ')}` : ''}
+            ${r.sharedTables.length > 0 ? `· shared tables: ${r.sharedTables.map(t => `<code>${escapeHtml(t)}</code>`).join(' ')}` : ''}
+          </div>
+        </div>`).join('')}`;
   } catch (err) {
-    decisionsStatus.textContent = `Load failed: ${err.message}`;
+    panel.innerHTML = `<div class="manager-muted">Load failed: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+// E: Version history
+async function viewDecisionHistory(fileName) {
+  const panelId = 'decision-history-' + fileName.replace(/\./g, '-');
+  const panel = document.getElementById(panelId);
+  if (!panel) return;
+
+  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+  panel.innerHTML = '<div class="manager-muted">Loading history...</div>';
+  panel.style.display = 'block';
+
+  try {
+    const res = await fetch(`/api/decisions/${encodeURIComponent(fileName)}/history`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Load failed');
+
+    if (!data.versions || data.versions.length === 0) {
+      panel.innerHTML = '<div class="manager-muted">No versions yet. Click Snapshot to save one.</div>';
+      return;
+    }
+
+    const safeFile = fileName.replace(/'/g, "\\'");
+    panel.innerHTML = `
+      <div class="analytics-section-title" style="margin-bottom:6px;">Version History (${data.versions.length})</div>
+      ${data.versions.slice().reverse().map(v => `
+        <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #21262d;">
+          <div style="flex:1;font-size:0.78rem;">
+            <code style="color:#8b949e;">${escapeHtml(v.id)}</code>
+            <span style="color:#c9d1d9;margin-left:6px;">${escapeHtml(v.summary)}</span>
+            <span style="color:#484f58;margin-left:6px;">${new Date(v.timestamp).toLocaleString()}</span>
+          </div>
+          <button class="manager-btn" onclick="viewVersionContent('${safeFile}', '${escapeHtml(v.id)}')">View</button>
+          <button class="manager-btn danger" onclick="rollbackToVersion('${safeFile}', '${escapeHtml(v.id)}')">Restore</button>
+        </div>`).join('')}`;
+  } catch (err) {
+    panel.innerHTML = `<div class="manager-muted">Load failed: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function snapshotDecision(fileName) {
+  const decisionsStatus = document.getElementById('decisionsStatus');
+  decisionsStatus.textContent = `Saving snapshot for ${fileName}...`;
+  try {
+    const res = await fetch(`/api/decisions/${encodeURIComponent(fileName)}/snapshot`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Snapshot failed');
+    decisionsStatus.textContent = `Snapshot saved: ${data.version?.id ?? 'ok'}`;
+  } catch (err) {
+    decisionsStatus.textContent = `Snapshot failed: ${err.message}`;
+  }
+}
+
+async function viewVersionContent(fileName, versionId) {
+  const panelId = 'decision-history-' + fileName.replace(/\./g, '-');
+  const panel = document.getElementById(panelId);
+  const existing = panel?.querySelector(`[data-version="${versionId}"]`);
+  if (existing) { existing.remove(); return; }
+
+  try {
+    const [resOld, resCurrent] = await Promise.all([
+      fetch(`/api/decisions/${encodeURIComponent(fileName)}/history/${encodeURIComponent(versionId)}`),
+      fetch(`/api/decisions/${encodeURIComponent(fileName)}`),
+    ]);
+    const [oldData, currentData] = await Promise.all([resOld.json(), resCurrent.json()]);
+    if (!resOld.ok) throw new Error(oldData.error);
+
+    const oldLines = (oldData.content || '').split('\n');
+    const newLines = (currentData.content || '').split('\n');
+    const maxLen = Math.max(oldLines.length, newLines.length);
+    const diffHtml = Array.from({ length: maxLen }, (_, i) => {
+      const o = oldLines[i] ?? '';
+      const n = newLines[i] ?? '';
+      if (o === n) return `<div style="font-size:0.75rem;color:#8b949e;padding:1px 4px;">${escapeHtml(o)}</div>`;
+      return [
+        o ? `<div style="font-size:0.75rem;background:#2d1010;color:#f85149;padding:1px 4px;">- ${escapeHtml(o)}</div>` : '',
+        n ? `<div style="font-size:0.75rem;background:#0d2a0d;color:#3fb950;padding:1px 4px;">+ ${escapeHtml(n)}</div>` : '',
+      ].join('');
+    }).join('');
+
+    const diffDiv = document.createElement('div');
+    diffDiv.setAttribute('data-version', versionId);
+    diffDiv.style.cssText = 'margin-top:8px;border:1px solid #30363d;border-radius:6px;padding:8px;max-height:300px;overflow-y:auto;';
+    diffDiv.innerHTML = `<div class="analytics-section-title" style="margin-bottom:4px;">Diff: version ${escapeHtml(versionId)} vs current</div>${diffHtml}`;
+    panel.appendChild(diffDiv);
+  } catch (err) {
+    const div = document.createElement('div');
+    div.className = 'manager-muted';
+    div.textContent = `Diff failed: ${err.message}`;
+    panel.appendChild(div);
+  }
+}
+
+async function rollbackToVersion(fileName, versionId) {
+  if (!confirm(`Restore version ${versionId} of "${fileName}"? Current content will be overwritten.`)) return;
+  const decisionsStatus = document.getElementById('decisionsStatus');
+  decisionsStatus.textContent = `Restoring version ${versionId}...`;
+  try {
+    const res = await fetch(`/api/decisions/${encodeURIComponent(fileName)}/rollback/${encodeURIComponent(versionId)}`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Rollback failed');
+    decisionsStatus.textContent = `Restored. New version: ${data.savedVersion?.id ?? 'ok'}`;
+    await loadDecisions();
+  } catch (err) {
+    decisionsStatus.textContent = `Rollback failed: ${err.message}`;
   }
 }
 </script>

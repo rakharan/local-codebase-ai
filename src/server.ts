@@ -7,6 +7,12 @@ import { config } from "./lib/config.js"
 import { ensureCollection, qdrant } from "./lib/qdrant.js"
 import { deleteRelationshipGraphForScope, readRelationshipGraph } from "./lib/graph.js"
 import {
+  saveVersion,
+  listVersions,
+  getVersion,
+  rollbackVersion,
+} from "./lib/decision-versions.js"
+import {
   createKnowledgeNote,
   deleteKnowledgeNote,
   readKnowledgeNotes,
@@ -157,9 +163,12 @@ type UpdateDraftBody = {
 type DecisionFilter = {
   type?: "adr" | "implicit_rule"
   affectedService?: string
+  affectedTable?: string
+  decisionMaker?: string
   dateFrom?: string
   dateTo?: string
   search?: string
+  fullText?: string
 }
 
 function parseAskOutput(stdout: string): AskResult {
@@ -856,11 +865,74 @@ app.delete("/api/drafts/:filename", async (request, response) => {
   }
 })
 
+app.get("/api/decisions/analytics", async (_request, response) => {
+  try {
+    const approvedDir = approvedDirectory()
+    let entries: string[]
+
+    try {
+      entries = await fs.readdir(approvedDir)
+    } catch {
+      entries = []
+    }
+
+    const mdFiles = entries.filter(name => name.endsWith(".md")).sort()
+    const byType: Record<string, number> = {}
+    const byMonth: Record<string, number> = {}
+    const byService: Record<string, number> = {}
+    const decisionMakers: Record<string, number> = {}
+    const recentDecisions: Array<{ fileName: string; date: string; type: string; decision: string; affectedServices: string[] }> = []
+
+    for (const fileName of mdFiles) {
+      const content = await fs.readFile(path.join(approvedDir, fileName), "utf8")
+      const frontmatter = parseDraftFrontmatter(content)
+      const title = extractDecisionTitle(content)
+      const month = frontmatter.date.slice(0, 7)
+      const maker = frontmatter.decisionMaker ?? "unknown"
+
+      byType[frontmatter.type] = (byType[frontmatter.type] ?? 0) + 1
+      byMonth[month] = (byMonth[month] ?? 0) + 1
+      for (const svc of frontmatter.affectedServices) {
+        byService[svc] = (byService[svc] ?? 0) + 1
+      }
+      decisionMakers[maker] = (decisionMakers[maker] ?? 0) + 1
+      recentDecisions.push({ fileName, date: frontmatter.date, type: frontmatter.type, decision: title, affectedServices: frontmatter.affectedServices })
+    }
+
+    const thisMonth = new Date().toISOString().slice(0, 7)
+
+    response.json({
+      total: mdFiles.length,
+      byType,
+      byMonth,
+      byService,
+      decisionMakers,
+      thisMonth: byMonth[thisMonth] ?? 0,
+      recentDecisions: recentDecisions.slice(-5).reverse(),
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
 app.get("/api/decisions", async (request, response) => {
   try {
     const approvedDir = approvedDirectory()
-    const entries = await fs.readdir(approvedDir)
-    const decisions: Array<DraftSummary & { affectedServices: string[] }> = []
+    let entries: string[]
+    try {
+      entries = await fs.readdir(approvedDir)
+    } catch {
+      entries = []
+    }
+
+    type DecisionItem = DraftSummary & {
+      affectedServices: string[]
+      affectedTables: string[]
+      decisionMaker: string | null
+      content?: string
+    }
+    const decisions: DecisionItem[] = []
 
     for (const fileName of entries.filter(name => name.endsWith(".md")).sort()) {
       const content = await fs.readFile(path.join(approvedDir, fileName), "utf8")
@@ -872,40 +944,51 @@ app.get("/api/decisions", async (request, response) => {
         type: frontmatter.type,
         decision: extractDecisionTitle(content),
         affectedServices: frontmatter.affectedServices,
+        affectedTables: frontmatter.affectedTables,
+        decisionMaker: frontmatter.decisionMaker,
+        content,
       })
     }
 
-    // Apply filters from query params
     const filter = request.query as DecisionFilter
     let filtered = decisions
 
-    if (filter.type) {
-      filtered = filtered.filter(d => d.type === filter.type)
-    }
+    if (filter.type) filtered = filtered.filter(d => d.type === filter.type)
 
     if (filter.affectedService) {
-      filtered = filtered.filter(d =>
-        d.affectedServices.some(s => s.toLowerCase().includes(filter.affectedService!.toLowerCase()))
-      )
+      const svcLower = filter.affectedService.toLowerCase()
+      filtered = filtered.filter(d => d.affectedServices.some(s => s.toLowerCase().includes(svcLower)))
     }
 
-    if (filter.dateFrom) {
-      filtered = filtered.filter(d => d.date >= filter.dateFrom!)
+    if (filter.affectedTable) {
+      const tblLower = filter.affectedTable.toLowerCase()
+      filtered = filtered.filter(d => d.affectedTables.some(t => t.toLowerCase().includes(tblLower)))
     }
 
-    if (filter.dateTo) {
-      filtered = filtered.filter(d => d.date <= filter.dateTo!)
+    if (filter.decisionMaker) {
+      const makerLower = filter.decisionMaker.toLowerCase()
+      filtered = filtered.filter(d => (d.decisionMaker ?? "").toLowerCase().includes(makerLower))
     }
+
+    if (filter.dateFrom) filtered = filtered.filter(d => d.date >= filter.dateFrom!)
+    if (filter.dateTo) filtered = filtered.filter(d => d.date <= filter.dateTo!)
 
     if (filter.search) {
       const searchLower = filter.search.toLowerCase()
-      filtered = filtered.filter(d => d.decision.toLowerCase().includes(searchLower))
+      if (filter.fullText === "true") {
+        filtered = filtered.filter(d =>
+          d.decision.toLowerCase().includes(searchLower) ||
+          (d.content ?? "").toLowerCase().includes(searchLower)
+        )
+      } else {
+        filtered = filtered.filter(d => d.decision.toLowerCase().includes(searchLower))
+      }
     }
 
-    response.json({ decisions: filtered })
+    // Strip full content from response — only needed for full-text filtering
+    response.json({ decisions: filtered.map(({ content: _content, ...rest }) => rest) })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-
     response.status(500).json({ error: message })
   }
 })
@@ -924,11 +1007,92 @@ app.get("/api/decisions/:filename", async (request, response) => {
   }
 })
 
+// C: Related decisions — decisions sharing affected_services or affected_tables
+app.get("/api/decisions/:filename/related", async (request, response) => {
+  try {
+    const approvedDir = approvedDirectory()
+    const targetContent = await fs.readFile(path.join(approvedDir, request.params.filename), "utf8")
+    const targetFm = parseDraftFrontmatter(targetContent)
+    const targetServices = new Set(targetFm.affectedServices.map(s => s.toLowerCase()))
+    const targetTables = new Set(targetFm.affectedTables.map(t => t.toLowerCase()))
+
+    let entries: string[]
+    try { entries = await fs.readdir(approvedDir) } catch { entries = [] }
+
+    const related: Array<{ fileName: string; date: string; type: string; decision: string; sharedServices: string[]; sharedTables: string[] }> = []
+
+    for (const fileName of entries.filter(n => n.endsWith(".md") && n !== request.params.filename).sort()) {
+      const content = await fs.readFile(path.join(approvedDir, fileName), "utf8")
+      const fm = parseDraftFrontmatter(content)
+      const sharedServices = fm.affectedServices.filter(s => targetServices.has(s.toLowerCase()))
+      const sharedTables = fm.affectedTables.filter(t => targetTables.has(t.toLowerCase()))
+
+      if (sharedServices.length > 0 || sharedTables.length > 0) {
+        related.push({ fileName, date: fm.date, type: fm.type, decision: extractDecisionTitle(content), sharedServices, sharedTables })
+      }
+    }
+
+    response.json({ related: related.slice(0, 5) })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
+// E: Versioning endpoints
+app.get("/api/decisions/:filename/history", async (request, response) => {
+  try {
+    const versions = await listVersions(request.params.filename)
+    response.json({ versions })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
+app.post("/api/decisions/:filename/snapshot", async (request, response) => {
+  try {
+    const approvedDir = approvedDirectory()
+    const content = await fs.readFile(path.join(approvedDir, request.params.filename), "utf8")
+    const version = await saveVersion(request.params.filename, content)
+    response.json({ version })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const status = message.includes("ENOENT") ? 404 : 500
+    response.status(status).json({ error: message })
+  }
+})
+
+app.get("/api/decisions/:filename/history/:versionId", async (request, response) => {
+  try {
+    const content = await getVersion(request.params.filename, request.params.versionId)
+    if (!content) {
+      response.status(404).json({ error: `Version not found: ${request.params.versionId}` })
+      return
+    }
+    response.json({ content })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
+app.post("/api/decisions/:filename/rollback/:versionId", async (request, response) => {
+  try {
+    const result = await rollbackVersion(request.params.filename, request.params.versionId, approvedDirectory())
+    response.json({ ok: true, savedVersion: result.savedVersion })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const status = message.includes("not found") ? 404 : 500
+    response.status(status).json({ error: message })
+  }
+})
+
 app.get("/api/health", (_request, response) => {
   response.json({ status: "ok" })
 })
 
-const port = Number(process.env.PORT ?? 3456)
+const port = Number(process.env.PORT ?? 9191)
 
 app.listen(port, () => {
   console.log(`Local Codebase AI server running at http://localhost:${port}`)
