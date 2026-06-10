@@ -5867,7 +5867,12 @@ async function main() {
     return
   }
 
-  const documentationGlossaryAnswer = await buildDocumentationGlossaryAnswer(chunks, question)
+  // Decision fast path must run before glossary/documentation paths — decision-intent
+  // questions like "what is the rule about X" match questionAsksAboutGlossary() but
+  // should be answered from approved decisions, not documentation summaries.
+  const documentationGlossaryAnswer = isDecisionIntentQuestion && decisionChunks.length > 0
+    ? undefined
+    : await buildDocumentationGlossaryAnswer(chunks, question)
 
   if (documentationGlossaryAnswer) {
     const glossaryNotFoundAnswer = /Saya tidak menemukan definisi|I did not find an explicit/i.test(documentationGlossaryAnswer)
@@ -5929,7 +5934,29 @@ async function main() {
   // Send only decision chunks with a focused prompt — avoids noise from code chunks
   // and works reliably with smaller models.
   if (isDecisionIntentQuestion && decisionChunks.length > 0) {
-    const decisionPayloads = decisionChunks.map(chunk => chunk.payload)
+    // Pre-filter by keyword relevance — only send decisions that mention terms from the question.
+    // Prevents the model from summarizing all decisions when only one is relevant.
+    const questionTerms = unique([
+      ...extractQuestionHints(question),
+      ...extractQuestionTerms(question),
+      ...extractConceptTokens(question),
+    ], 24).map(t => t.toLowerCase()).filter(t => t.length >= 3)
+
+    const scoredDecisions = decisionChunks.map(chunk => {
+      const text = (chunk.payload.content ?? "").toLowerCase()
+      const score = questionTerms.reduce((s, term) => s + (text.includes(term) ? 1 : 0), 0)
+      return { chunk, score }
+    })
+
+    const relevantDecisions = scoredDecisions
+      .filter(d => d.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .map(d => d.chunk)
+
+    // Fall back to all decisions if none matched by keyword
+    const decisionsToSend = relevantDecisions.length > 0 ? relevantDecisions : decisionChunks
+    const decisionPayloads = decisionsToSend.map(chunk => chunk.payload)
     const decisionContext = decisionPayloads.map(p => p.content ?? "").join("\n\n---\n\n")
     const decisionPrompt = [
       `Question: ${question}`,
