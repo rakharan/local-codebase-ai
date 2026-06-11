@@ -29,6 +29,10 @@ export type RetrievedPayload = {
   noteUpdatedAt?: string
   source_type?: string
   chunk_type?: string
+  chunkType?: string
+  symbolName?: string
+  parentSymbol?: string
+  hasOverlap?: boolean
   retrieval_priority?: number
   decision_maker?: string | null
   affected_services?: string[]

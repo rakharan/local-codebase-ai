@@ -186,8 +186,11 @@ async function retrieve(queryText: string, resultLimit: number): Promise<Retriev
 
   // BM25 pre-filter: for identifier queries, fetch exact matches and merge
   // them into the top of the result set before reranking
-  if (isIdentifierQuery(queryText)) {
-    const bm25Results = await bm25Search(queryText, resultLimit * 2)
+  if (isIdentifierQuery(question)) {
+    // extract identifier tokens from the original question, not the expanded queryText
+    const identifierTokens = extractQuestionHints(question).filter(t => isIdentifierQuery(t))
+    const bm25Query = identifierTokens.length > 0 ? identifierTokens.join(" ") : question
+    const bm25Results = await bm25Search(bm25Query, resultLimit * 2)
     const vectorIds = new Set(chunks.map(c => c.id))
     const bm25Ids = new Set(bm25Results.map(r => r.id))
 
@@ -206,12 +209,12 @@ async function retrieve(queryText: string, resultLimit: number): Promise<Retriev
       }
     }
 
-    // boost chunks found by BM25 to the front before reranking
-    chunks.sort((a, b) => {
-      const aInBm25 = bm25Ids.has(a.id) ? 1 : 0
-      const bInBm25 = bm25Ids.has(b.id) ? 1 : 0
-      return bInBm25 - aInBm25
-    })
+    // Pin BM25 hits at top, rerank the rest separately, then merge
+    const bm25Chunks = chunks.filter(c => bm25Ids.has(c.id))
+    const nonBm25Chunks = chunks.filter(c => !bm25Ids.has(c.id))
+    const rerankedRest = rerankRetrievedChunks(question, nonBm25Chunks)
+    const merged = [...bm25Chunks, ...rerankedRest]
+    return [...new Map(merged.map(c => [c.id, c])).values()].slice(0, resultLimit)
   }
 
   return rerankRetrievedChunks(question, chunks).slice(0, resultLimit)
@@ -554,6 +557,7 @@ function rerankRetrievedChunks(questionText: string, chunks: RetrievedChunk[]): 
         if (text.includes(normalizedTerm)) score += normalizedTerm.includes("/") ? 75 : 18
         if ((payload.routes ?? []).some(route => route.toLowerCase() === normalizedTerm)) score += 100
         if ((payload.symbols ?? []).some(symbol => symbol.toLowerCase() === normalizedTerm)) score += 45
+        if (payload.symbolName && payload.symbolName.toLowerCase() === normalizedTerm) score += 80
         if ((payload.queueNames ?? []).some(queue => queue.toLowerCase() === normalizedTerm)) score += 55
         if ((payload.dbTables ?? []).some(table => table.toLowerCase() === normalizedTerm)) score += 55
       }
@@ -5259,6 +5263,22 @@ async function main() {
     : []
   const exactRoutes = unique([...questionRoutes, ...conceptRoutes], 10)
   const exactChunks = await retrieveExactRouteMatches(exactRoutes)
+
+  // BM25 symbol lookup — runs independently of vector search for identifier queries
+  const symbolIdentifiers = extractQuestionHints(question).filter(t => isIdentifierQuery(t))
+  const symbolChunks: RetrievedChunk[] = symbolIdentifiers.length > 0
+    ? await (async () => {
+        const bm25Results = await bm25Search(symbolIdentifiers.join(" "), 8)
+        if (bm25Results.length === 0) return []
+        const points = await qdrant.retrieve(config.collectionName, {
+          ids: bm25Results.map(r => r.id),
+          with_payload: true,
+        })
+        return points
+          .map(p => ({ id: String(p.id), payload: p.payload as RetrievedPayload }))
+          .filter(c => c.payload.content)
+      })()
+    : []
   const questionHints = extractQuestionHints(question)
   const generalVocabKeywords = ["medal", "level", "rank", "persyaratan", "naik", "requirement", "syarat", "tier", "grade"]
   const isGeneralVocabQuestion = generalVocabKeywords.some(kw => question.toLowerCase().includes(kw))
@@ -5544,6 +5564,7 @@ async function main() {
     [
       ...decisionChunks,
       ...exactChunks,
+      ...symbolChunks,
       ...exactDetailChunks,
       ...preferredLocaleDocChunks,
       ...preferredLocaleDocNeighborChunks,
