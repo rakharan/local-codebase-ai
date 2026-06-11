@@ -5449,18 +5449,19 @@ async function main() {
   if (questionAsksInventory(question) && exactRoutes.length === 0) {
     const mentionedRepo = question.match(/\b([\w]+-[\w-]+|bpjs|bpts|ims-tf2?)\b/i)?.[1]?.toLowerCase()
     const doctorRepoName = mentionedRepo ? `${mentionedRepo}-docs` : undefined
+    const asksServices = /\b(what services|services? (detected|list|available)|detected (services?|repos?))\b/i.test(question)
+    const asksEnv = /\b(environment variables?|env vars?|process\.env|what env|which env)\b/i.test(question)
+    const asksDbTables = /\b(database tables?|db tables?|which tables?|what tables?|tables? (used|detected)|touch|services.*touch|what.*touch)\b/i.test(question)
+    const asksDeps = /\b(dependenc)/i.test(question)
+
+    const doctorFileFilters: string[] = []
+    if (asksServices || asksDeps) doctorFileFilters.push("doctor:overview.md", "doctor:services.md")
+    if (asksEnv) doctorFileFilters.push("doctor:env.md")
+    if (asksDbTables) doctorFileFilters.push("doctor:database.md")
+    if (doctorFileFilters.length === 0) doctorFileFilters.push("doctor:overview.md")
+
     if (doctorRepoName) {
-      const asksServices = /\b(what services|services? (detected|list|available)|detected (services?|repos?))\b/i.test(question)
-      const asksEnv = /\b(environment variables?|env vars?|process\.env|what env|which env)\b/i.test(question)
-      const asksDbTables = /\b(database tables?|db tables?|which tables?|what tables?|tables? (used|detected))\b/i.test(question)
-      const asksDeps = /\b(dependenc)/i.test(question)
-
-      const doctorFileFilters: string[] = []
-      if (asksServices || asksDeps) doctorFileFilters.push("doctor:overview.md", "doctor:services.md")
-      if (asksEnv) doctorFileFilters.push("doctor:env.md")
-      if (asksDbTables) doctorFileFilters.push("doctor:database.md")
-      if (doctorFileFilters.length === 0) doctorFileFilters.push("doctor:overview.md")
-
+      // Single-repo path — repo mentioned in question
       try {
         const scrollFilter = {
           must: [
@@ -5477,7 +5478,6 @@ async function main() {
           .filter((p): p is RetrievedPayload => !!p?.content)
 
         if (doctorChunks.length > 0) {
-          // Prefer summary chunks, limit detail output
           const summaryChunks = doctorChunks.filter(c => c.content?.includes('unique)') || c.content?.includes('# ') || c.content?.includes('## Summary'))
           const detailChunks = doctorChunks.filter(c => !summaryChunks.includes(c))
           const output = summaryChunks.length > 0
@@ -5496,6 +5496,86 @@ async function main() {
           return
         }
       } catch { /* no doctor chunks — fall through to normal retrieval */ }
+    } else if (asksDbTables) {
+      // Cross-repo path — no repo mentioned, fetch database.md from ALL doctor repos
+      // Filter by any table name mentioned in the question
+      const tableHints = [
+        ...extractQuestionHints(question).filter(t => /^[a-z][a-z0-9]+_[a-z][a-z0-9_]+$/.test(t)),
+        // also extract snake_case words directly from the question
+        ...(question.match(/\b[a-z][a-z0-9]+(?:_[a-z][a-z0-9]+)+\b/g) ?? []),
+      ].filter((v, i, a) => a.indexOf(v) === i) // dedupe
+
+      try {
+        const scrollFilter = {
+          must: [
+            { key: "branchName", match: { value: "doctor" } },
+            { key: "filePath", match: { value: "doctor:database.md" } },
+          ],
+        }
+        let offset: string | number | Record<string, unknown> | null | undefined
+        const allDoctorDbChunks: RetrievedPayload[] = []
+
+        do {
+          const page = await qdrant.scroll(config.collectionName, {
+            filter: scrollFilter, limit: 256, with_payload: true, with_vector: false,
+            ...(offset ? { offset } : {}),
+          })
+          for (const p of page.points) {
+            const payload = p.payload as RetrievedPayload | null | undefined
+            if (!payload?.content) continue
+            // if table hints extracted, only keep chunks mentioning those tables
+            if (tableHints.length > 0) {
+              const content = payload.content.toLowerCase()
+              if (!tableHints.some(t => content.includes(t))) continue
+            }
+            allDoctorDbChunks.push(payload)
+          }
+          offset = page.next_page_offset
+        } while (offset)
+
+        if (allDoctorDbChunks.length > 0) {
+          // Group by repo
+          const byRepo = new Map<string, RetrievedPayload[]>()
+          for (const chunk of allDoctorDbChunks) {
+            const repo = chunk.repoName ?? "unknown"
+            const list = byRepo.get(repo) ?? []
+            list.push(chunk)
+            byRepo.set(repo, list)
+          }
+
+          // For each repo, extract only lines matching the table hints
+          const repoSummaries: Array<{ repo: string; chunk: RetrievedPayload; lines: string[] }> = []
+          for (const [repo, chunks] of byRepo) {
+            const matchingLines: string[] = []
+            for (const chunk of chunks) {
+              const lines = (chunk.content ?? "").split("\n")
+              for (const line of lines) {
+                if (tableHints.length === 0 || tableHints.some(t => line.toLowerCase().includes(t))) {
+                  if (line.startsWith("|") || line.startsWith("#")) matchingLines.push(line)
+                }
+              }
+            }
+            if (matchingLines.length > 0) {
+              repoSummaries.push({ repo, chunk: chunks[0]!, lines: matchingLines.slice(0, 20) })
+            }
+          }
+
+          if (repoSummaries.length > 0) {
+            console.log("\nANSWER\n")
+            console.log(`Services that touch \`${tableHints.join(", ")}\` (Repo Doctor, ${repoSummaries.length} repos):\n`)
+            for (const { repo, lines } of repoSummaries) {
+              console.log(`### ${repo}`)
+              console.log(lines.join("\n"))
+              console.log("")
+            }
+            console.log("\nSOURCES\n")
+            for (const { chunk } of repoSummaries) {
+              console.log(`- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`)
+            }
+            return
+          }
+        }
+      } catch { /* fall through */ }
     }
   }
 

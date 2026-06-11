@@ -13,7 +13,7 @@ const result = await q.scroll("code_chunks", {
 
 console.log(`tf2-ois chunks in Qdrant: checking dbTables...`)
 let found = 0
-let offset: unknown = undefined
+let offset: string | number | Record<string, unknown> | null | undefined = undefined
 do {
   const page = await q.scroll("code_chunks", {
     filter: { must: [{ key: "repoName", match: { value: "tf2-ois" } }] },
