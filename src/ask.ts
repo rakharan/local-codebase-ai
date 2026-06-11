@@ -4,6 +4,7 @@ import { qdrant } from "./lib/qdrant.js"
 import { config, setChatModel } from "./lib/config.js"
 import { createEmbedding, chat } from "./lib/ollama.js"
 import { readRelationshipGraph } from "./lib/graph.js"
+import { bm25Search, isIdentifierQuery } from "./lib/bm25-index.js"
 import { buildRegistryPromptContext, expandQuestionWithRegistry, type RegistryExpansion, type ServiceRegistryEntry } from "./lib/service-registry.js"
 import { normalizeProjectIds, reposForProjectIds } from "./lib/service-registry.js"
 import {
@@ -182,6 +183,36 @@ async function retrieve(queryText: string, resultLimit: number): Promise<Retriev
       payload: point.payload as RetrievedPayload,
     }))
     .filter(chunk => chunk.payload.content)
+
+  // BM25 pre-filter: for identifier queries, fetch exact matches and merge
+  // them into the top of the result set before reranking
+  if (isIdentifierQuery(queryText)) {
+    const bm25Results = await bm25Search(queryText, resultLimit * 2)
+    const vectorIds = new Set(chunks.map(c => c.id))
+    const bm25Ids = new Set(bm25Results.map(r => r.id))
+
+    // fetch Qdrant payloads for BM25 hits not already in vector results
+    const missingIds = bm25Results.map(r => r.id).filter(id => !vectorIds.has(id))
+    if (missingIds.length > 0) {
+      const extra = await qdrant.retrieve(config.collectionName, {
+        ids: missingIds,
+        with_payload: true,
+      })
+      for (const point of extra) {
+        const payload = point.payload as RetrievedPayload
+        if (payload?.content) {
+          chunks.push({ id: String(point.id), payload })
+        }
+      }
+    }
+
+    // boost chunks found by BM25 to the front before reranking
+    chunks.sort((a, b) => {
+      const aInBm25 = bm25Ids.has(a.id) ? 1 : 0
+      const bInBm25 = bm25Ids.has(b.id) ? 1 : 0
+      return bInBm25 - aInBm25
+    })
+  }
 
   return rerankRetrievedChunks(question, chunks).slice(0, resultLimit)
 }

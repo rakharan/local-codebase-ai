@@ -23,6 +23,7 @@
     "express": "^5.2.1",
     "fast-glob": "^3.3.3",
     "ignore": "^7.0.5",
+    "minisearch": "^7.1.1",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3"
   },
