@@ -19,7 +19,7 @@ npx tsx src/index-repo.ts C:\GIT\work\mrg-accounts --replace-repo --service-type
 npx tsx src/index-repo.ts C:\GIT\work\fa-trade-publisher --replace-repo --service-type worker
 npx tsx src/index-repo.ts C:\GIT\work\tf-email-sender --replace-repo --service-type worker
 npx tsx src/index-repo.ts C:\GIT\work\mt5-wrapper --replace-repo
-npx tsx src/index-repo.ts C:\GIT\work\ims-tf --replace-repo --service-type api
+npx tsx src/index-repo.ts C:\GIT\work\ims-tf --replace-repo --service-type library --exclude "templates/**" --exclude "css/**" --exclude "images/**" --exclude "avatar/**" --exclude "php/**" --exclude "nginx/**" --exclude "docker/**" --exclude "**/views/**" --exclude "**/assets/**" --exclude "libraries/**" --exclude "plugins/**" --exclude "review/**"
 npx tsx src/index-repo.ts C:\GIT\work\tf2-migrations --replace-repo
 npx tsx src/index-repo.ts C:\GIT\work\mrg-migrations --replace-repo
 ```
@@ -88,4 +88,6 @@ npx tsx src/index-repo.ts C:\GIT\work\<repo> --dry-run
 - Schema version is now `branches-v2` — `--replace-repo` is required to clear old `branches-v1` chunks
 - If a repo path differs from above, adjust accordingly
 - `mmb-migrations` — check if it exists before indexing, not indexed before
+- `ims-tf` — PHP frontend/legacy, exclude templates/libraries/plugins to avoid noise (4317 chunks vs 16k raw)
+- `ims-mrg`, `ims-askap` — not found in `C:\GIT\work\`. Clone them first before indexing
 - Doctor output is stored in `.data/doctor-output/<repo>/` — safe to re-run, overwrites previous output
