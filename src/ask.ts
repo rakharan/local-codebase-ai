@@ -5197,22 +5197,29 @@ async function main() {
     const queueMetadataAnswer = isDecisionQuestion ? undefined : await buildQueueMetadataAnswer(question, relationshipGraph)
 
     if (queueMetadataAnswer) {
+      // Feed queue evidence into LLM for synthesis instead of raw dump
+      const queueContext = queueMetadataAnswer.answer
+      const queuePrompt = [
+        `Question: ${question}`,
+        `Answer language: ${answerLanguageLabel(question)}`,
+        "",
+        "Queue/messaging evidence from relationship graph and indexed code:",
+        queueContext,
+        "",
+        "Answer requirements:",
+        "- Synthesize the queue evidence above into a clear, readable explanation.",
+        "- Explain the flow: which service publishes, which queue/exchange, which service consumes.",
+        "- Mention specific file paths and line numbers from the evidence.",
+        "- If a step in the flow is missing from the evidence, say so explicitly.",
+        "- Do not repeat the raw evidence table — synthesize it into prose.",
+        "- Say NOT_FOUND_IN_INDEXED_CODEBASE only if the evidence contains nothing relevant.",
+      ].join("\n")
+
       console.log("\nANSWER\n")
-      const answer = deepMode
-        ? [
-            localized("Investigation trace:", "Investigation trace:"),
-            localized("- Step 1: mencari queue/message/repo anchor di index.", "- Step 1: searched indexed queue/message/repo anchors."),
-            localized("- Step 2: memisahkan evidence consumer/listener dan publisher bila tersedia.", "- Step 2: separated consumer/listener and publisher evidence when available."),
-            "",
-            queueMetadataAnswer.answer,
-          ].join("\n")
-        : queueMetadataAnswer.answer
-
-      console.log(localizeAnswer(answer, question))
-
+      const synthesized = await chat(queuePrompt)
+      console.log(localizeAnswer(synthesized, question))
       console.log("\nSOURCES\n")
       console.log(queueMetadataAnswer.sources.join("\n"))
-
       return
     }
 
