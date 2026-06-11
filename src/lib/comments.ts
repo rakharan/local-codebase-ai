@@ -205,6 +205,8 @@ export function createCommentChunks(
       evidenceTypes: ["comment"],
       relationshipHints: inferRelationshipHints(block.content),
       structuredFacts: extractStructuredFacts(block.content, block.startLine),
+      chunkType: "block",
+      hasOverlap: false,
     })
   }
 

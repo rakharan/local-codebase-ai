@@ -4,6 +4,7 @@ import type { RelationshipHints } from "./relationships.js"
 import type {
   PackageFacts,
   EnvVarFact,
+  ConfigDefaultFact,
   ApiRouteFact,
   RabbitMqFact,
   DatabaseFact,
@@ -12,12 +13,14 @@ import type {
 export interface DoctorReport {
   services: PackageFacts[];
   envVars: EnvVarFact[];
+  configDefaults?: ConfigDefaultFact[];
   apiRoutes: ApiRouteFact[];
   rabbitMq: RabbitMqFact[];
   database: DatabaseFact[];
   summary: {
     serviceCount: number;
     envVarCount: number;
+    configDefaultCount: number;
     apiRouteCount: number;
     rabbitMqCount: number;
     databaseCount: number;
@@ -46,6 +49,8 @@ function makeChunk(repoName: string, filePath: string, line: number, content: st
     evidenceTypes: ["documentation"],
     relationshipHints: hints,
     structuredFacts: [],
+    chunkType: "block",
+    hasOverlap: false,
   }
 }
 
@@ -76,6 +81,22 @@ export function buildEnvChunks(report: DoctorReport, repoName: string): CodeChun
     const content = `Environment variable ${fact.name} is used in ${fact.sourcePath} line ${fact.line}.\nConfidence: ${fact.confidence}.`
     const hints: RelationshipHints = { ...EMPTY_HINTS }
     return makeChunk(repoName, `doctor-fact:env:${fact.name}`, fact.line, content, hints)
+  })
+}
+
+export function buildConfigDefaultChunks(report: DoctorReport, repoName: string): CodeChunk[] {
+  return (report.configDefaults ?? []).map(fact => {
+    const content = [
+      `Configuration default ${fact.envName} has fallback value ${JSON.stringify(fact.defaultValue)} in ${fact.sourcePath} line ${fact.line}.`,
+      `Expression: ${fact.expression}.`,
+      `Operator: ${fact.operator}.`,
+      fact.businessRuleCandidate ? "Business-rule candidate: yes." : "Business-rule candidate: no.",
+      "Runtime environment values can override this fallback.",
+      `Confidence: ${fact.confidence}.`,
+    ].join("\n")
+    const hints: RelationshipHints = { ...EMPTY_HINTS, symbols: [fact.envName] }
+
+    return makeChunk(repoName, `doctor-fact:config:${fact.envName}:${fact.line}`, fact.line, content, hints)
   })
 }
 
@@ -115,6 +136,7 @@ export function buildReportChunks(report: DoctorReport, repoName: string): CodeC
   return [
     ...buildServiceChunks(report, repoName),
     ...buildEnvChunks(report, repoName),
+    ...buildConfigDefaultChunks(report, repoName),
     ...buildApiRouteChunks(report, repoName),
     ...buildRabbitMqChunks(report, repoName),
     ...buildDatabaseChunks(report, repoName),

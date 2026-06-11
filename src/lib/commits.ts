@@ -49,6 +49,8 @@ export function createCommitChunks(
       evidenceTypes: ["git_commit"],
       relationshipHints: inferRelationshipHints(content),
       structuredFacts: extractStructuredFacts(content),
+      chunkType: "block",
+      hasOverlap: false,
     })
   }
 

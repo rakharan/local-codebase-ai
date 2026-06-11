@@ -221,6 +221,8 @@ function chunkMarkdown(file: DocFile, repoName: string, branchName: string, proj
         evidenceTypes: ["documentation"],
         relationshipHints: inferRelationshipHints(chunkContent),
         structuredFacts: extractStructuredFacts(chunkContent, subStart),
+        chunkType: "section",
+        hasOverlap: false,
       })
     }
 
@@ -376,6 +378,10 @@ async function upsertChunk(chunk: CodeChunk): Promise<void> {
           endLine: chunk.endLine,
           content: chunk.content,
           contentHash: chunk.contentHash,
+          chunkType: chunk.chunkType,
+          symbolName: chunk.symbolName,
+          parentSymbol: chunk.parentSymbol,
+          hasOverlap: chunk.hasOverlap,
         },
       },
     ],

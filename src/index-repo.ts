@@ -271,6 +271,10 @@ async function upsertChunk(chunk: CodeChunk): Promise<void> {
             endLine: chunk.endLine,
             content: chunk.content,
             contentHash: chunk.contentHash,
+            chunkType: chunk.chunkType,
+            symbolName: chunk.symbolName,
+            parentSymbol: chunk.parentSymbol,
+            hasOverlap: chunk.hasOverlap,
           },
         },
       ],
@@ -377,6 +381,8 @@ async function main() {
         dbTables: [],
       },
       structuredFacts: extractStructuredFacts(content),
+      chunkType: "block",
+      hasOverlap: false,
     })
   }
 

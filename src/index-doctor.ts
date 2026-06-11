@@ -14,6 +14,7 @@ const DOC_TYPE_MAP: Record<string, string> = {
   "overview.md": "overview",
   "services.md": "services",
   "env.md": "env",
+  "config.md": "config",
   "api.md": "api",
   "rabbitmq.md": "rabbitmq",
   "database.md": "database",
@@ -89,6 +90,8 @@ export function chunkDoctorMarkdown(file: DoctorDocFile, repo: string): CodeChun
         evidenceTypes: ["documentation"],
         relationshipHints: inferRelationshipHints(chunkContent),
         structuredFacts: extractStructuredFacts(chunkContent, subStart),
+        chunkType: "section",
+        hasOverlap: false,
       })
     }
 
@@ -195,6 +198,7 @@ if (isMainModule) {
           dbTables: chunk.relationshipHints.dbTables, structuredFacts: chunk.structuredFacts,
           filePath: chunk.filePath, startLine: chunk.startLine, endLine: chunk.endLine,
           content: chunk.content, contentHash: chunk.contentHash,
+          chunkType: chunk.chunkType, symbolName: chunk.symbolName, parentSymbol: chunk.parentSymbol, hasOverlap: chunk.hasOverlap,
         },
       }],
     })
