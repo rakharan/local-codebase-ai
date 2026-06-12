@@ -597,6 +597,15 @@ function rerankRetrievedChunks(questionText: string, chunks: RetrievedChunk[]): 
         if (/decided|decision|changed|why|rationale|rule|aturan|diputuskan|alasan|perubahan/i.test(questionText)) score += 40
       }
 
+      // Boost comment chunks for rationale/meaning questions
+      if (payload.evidenceTypes?.includes("comment")) {
+        score += /\b(why|kenapa|mengapa|what does|apa itu|artinya|maksud|mean|means|meaning|rationale|reason|alasan|explain|jelasin|jelaskan)\b/i.test(questionText) ? 35 : 8
+      }
+      // Boost migration chunks for column value meaning questions
+      if (payload.evidenceTypes?.includes("migration")) {
+        score += /\b(status|value|nilai|arti|mean|means|apa itu|what does|column|kolom)\b/i.test(questionText) ? 25 : 0
+      }
+
       // Inventory intent detection and Repo Doctor chunk boosting
       const isDoctorChunk = payload.filePath?.startsWith("doctor:") || payload.filePath?.startsWith("doctor-fact:")
       const asksServiceInventory = /\b(what services|services? (detected|list|available)|detected (services?|repos?)|list.*(services?|repos?))\b/i.test(questionText)
@@ -2647,6 +2656,14 @@ function scoreFallbackContextChunk(chunk: RetrievedPayload, questionText: string
   if (chunk.filePath?.startsWith("vocabulary://")) score += questionAsksAboutGlossary(questionText) ? 50 : 8
   if (chunk.filePath?.startsWith("doctor:") || chunk.filePath?.startsWith("doctor-fact:")) score += questionAsksInventory(questionText) ? 80 : 20
   if (chunk.evidenceTypes?.includes("documentation")) score += questionAsksAboutGlossary(questionText) || questionAsksHowWorks(questionText) || questionAsksInventory(questionText) ? 45 : -12
+  // Boost comment chunks for rationale/meaning questions — comments often explain WHY
+  if (chunk.evidenceTypes?.includes("comment")) {
+    score += /\b(why|kenapa|mengapa|what does|apa itu|artinya|maksud|mean|means|meaning|rationale|reason|alasan|explain|jelasin|jelaskan)\b/i.test(questionText) ? 35 : 8
+  }
+  // Boost migration chunks for "what does X mean" questions about DB columns/values
+  if (chunk.evidenceTypes?.includes("migration")) {
+    score += /\b(status|value|nilai|arti|mean|means|apa itu|what does|column|kolom)\b/i.test(questionText) ? 25 : 0
+  }
   if ((chunk.routes?.length ?? 0) > 0) score += 28
   if ((chunk.symbols?.length ?? 0) > 0) score += 18
   if ((chunk.messageNames?.length ?? 0) > 0 || (chunk.queueNames?.length ?? 0) > 0 || (chunk.exchangeNames?.length ?? 0) > 0) score += 24
@@ -3566,6 +3583,10 @@ function buildVocabularyAnswer(chunks: RetrievedPayload[], question: string, reg
     /\b(service|microservice|worker|cron)\b/i,
     /\b(difference between|compare|vs\.?|versus)\b/i,
     /\b(exist|have a|does .* have)\b/i,
+    // Skip when asking about a specific value (= 0, = 1, = 2, status value, etc.)
+    /[=!<>]\s*\d+/,
+    /\b(status|value|nilai)\s*(=|==|===)\s*\d+/i,
+    /what does.*\d+.*mean/i,
   ]
 
   if (specificQuestionPatterns.some(pattern => pattern.test(question))) {
@@ -5503,8 +5524,10 @@ async function main() {
   // about WHY something was decided, not HOW an endpoint behaves.
   // "rule"/"aturan" alone are too broad — they match glossary+rules questions like "apa itu FA dan aturan nya".
   // Require either an explicit decision verb OR "rule/aturan" paired with a decision subject word.
-  const isDecisionIntentQuestion = /\b(decided|decision|rationale|changed|diputuskan|alasan)\b/i.test(question) ||
-    (/\b(rule|aturan)\b/i.test(question) && /\b(why|kenapa|mengapa|diputus|adr|architectural)\b/i.test(question))
+  const isDecisionIntentQuestion = /\b(decided|decision|rationale|changed|diputuskan|alasan|kenapa|mengapa)\b/i.test(question) ||
+    (/\b(rule|aturan)\b/i.test(question) && /\b(why|kenapa|mengapa|diputus|adr|architectural)\b/i.test(question)) ||
+    // "what does X = N mean" — value meaning questions should check decisions+migrations
+    (/\b(mean|means|meaning|arti|artinya|maksud)\b/i.test(question) && /[=]\s*\d+/.test(question))
   const exactEndpointInspection =
     exactRoutes.length > 0 &&
     !exactComparison &&
@@ -5989,7 +6012,9 @@ async function main() {
     return
   }
 
-  const vocabularyAnswer = buildVocabularyAnswer(chunks, question, registryExpansion)
+  const vocabularyAnswer = isDecisionIntentQuestion && decisionChunks.length > 0
+    ? undefined
+    : buildVocabularyAnswer(chunks, question, registryExpansion)
 
   if (vocabularyAnswer) {
     const sourceChunks = compactPayloadSources(chunks.filter(chunk => chunk.filePath?.startsWith("vocabulary://")), 12)
