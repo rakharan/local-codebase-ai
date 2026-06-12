@@ -164,7 +164,54 @@ export function extractCommentBlocks(filePath: string, fileContent: string): Com
     }
   }
 
-  return blocks.filter(block => block.content.length >= 8)
+  return blocks.filter(block => block.content.length >= 8 && !isCommentedOutCode(block.content))
+}
+
+/**
+ * Returns true if the comment block looks like commented-out code rather than
+ * a human-written explanation. We want to index rationale/documentation comments,
+ * not disabled code.
+ */
+function isCommentedOutCode(content: string): boolean {
+  // Strip comment markers to get the raw text
+  const raw = content
+    .replace(/^\/\*+|\*+\/$/g, "")
+    .replace(/^\s*\*\s?/gm, "")
+    .replace(/^\/\/+\s?/gm, "")
+    .replace(/^#+\s?/gm, "")
+    .trim()
+
+  if (!raw) return false
+
+  const lines = raw.split("\n").map(l => l.trim()).filter(Boolean)
+  if (lines.length === 0) return false
+
+  // Count lines that look like code statements
+  const codeLinePatterns = [
+    /^(const|let|var|function|class|if|else|for|while|return|import|export|require|await|async)\s/,
+    /^\$[a-zA-Z_][\w]*\s*[=({]/, // PHP variables: $foo = ...
+    /^[a-zA-Z_][\w]*\s*[=({].*[;,{]$/, // assignment or call ending with ; , {
+    /^[a-zA-Z_$][\w.]*\(.*\)[;,]?$/, // function call
+    /^\}\s*$/, // closing brace alone
+    /^(public|private|protected|static|abstract)\s+(function|class|\$)/, // PHP/Java modifiers
+    /^<[a-zA-Z][\w-]*[\s/>]/, // HTML/JSX tags
+    /^\[.+\]\s*=/, // array assignment
+    /^(echo|print|var_dump|console\.(log|error|warn))\s*[({]/, // debug statements
+  ]
+
+  const codeLines = lines.filter(line => codeLinePatterns.some(p => p.test(line)))
+  const codeRatio = codeLines.length / lines.length
+
+  // If more than 60% of lines look like code, it's commented-out code
+  if (codeRatio > 0.6) return true
+
+  // Single-line comment that is purely a code expression (no prose words)
+  if (lines.length === 1) {
+    const hasProseWords = /\b(this|the|is|are|was|will|when|how|why|what|note|todo(?!\s*:?\s*$)|fixme|hack|because|should|must|can|use|used|returns?|sets?|gets?|adds?|removes?|handles?|creates?|updates?|deletes?|checks?|fetches?|sends?|calls?)\b/i.test(raw)
+    if (!hasProseWords && codeLinePatterns.some(p => p.test(lines[0] ?? ""))) return true
+  }
+
+  return false
 }
 
 export function createCommentChunks(
