@@ -13,6 +13,9 @@ import { qdrant } from "./qdrant.js"
 import { config } from "./config.js"
 import type { RetrievedPayload } from "../ask/types.js"
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type MiniSearchInstance = any
+
 export type BM25IndexEntry = {
   id: string
   repoName: string
@@ -29,7 +32,7 @@ export type BM25IndexEntry = {
   chunkType: string
 }
 
-let _index: MiniSearch<BM25IndexEntry> | null = null
+let _index: MiniSearchInstance | null = null
 let _indexedAt: number = 0
 const INDEX_TTL_MS = 10 * 60 * 1000  // rebuild after 10 min
 
@@ -51,8 +54,8 @@ function makeEntry(id: string, payload: RetrievedPayload): BM25IndexEntry {
   }
 }
 
-async function buildIndex(): Promise<MiniSearch<BM25IndexEntry>> {
-  const index = new MiniSearch<BM25IndexEntry>({
+async function buildIndex(): Promise<MiniSearchInstance> {
+  const index = new (MiniSearch as unknown as new (opts: object) => MiniSearchInstance)({
     fields: ["symbolName", "symbols", "tables", "queues", "routes", "filePath", "content"],
     storeFields: ["id", "repoName", "branchName", "filePath", "startLine", "endLine", "chunkType", "symbolName"],
     searchOptions: {
@@ -86,7 +89,7 @@ async function buildIndex(): Promise<MiniSearch<BM25IndexEntry>> {
   return index
 }
 
-export async function getBM25Index(): Promise<MiniSearch<BM25IndexEntry>> {
+export async function getBM25Index(): Promise<MiniSearchInstance> {
   const now = Date.now()
   if (_index && now - _indexedAt < INDEX_TTL_MS) return _index
 
@@ -108,7 +111,7 @@ export async function bm25Search(
   const index = await getBM25Index()
   const results = index.search(query).slice(0, limit)
 
-  return results.map(r => ({
+  return results.map((r: Record<string, unknown>) => ({
     id: r.id as string,
     score: r.score,
     repoName: r.repoName as string,

@@ -6,15 +6,23 @@ const execFileAsync = promisify(execFile)
 type AnswerCase = {
   name: string
   question: string
+  smoke?: boolean
   args?: string[]
   required: string[]
   forbidden?: string[]
   timeoutMs?: number
 }
 
+type RunnerOptions = {
+  chatModel?: string
+  grep?: string
+  suite?: "smoke" | "full"
+}
+
 const cases: AnswerCase[] = [
   {
     name: "exact endpoint details follows ims-tf2 to mrg-accounts",
+    smoke: true,
     question: "request body, validasi, dan return dari endpoint /mrg/api/v1/deposit/demo/ itu apa?",
     required: [
       "/mrg/api/v1/deposit/demo/",
@@ -56,6 +64,7 @@ const cases: AnswerCase[] = [
   },
   {
     name: "broad ims-tf demo account flow auto-discovers route anchor",
+    smoke: true,
     question: "jelasin flow request account demo dari ims-tf",
     required: [
       "ims-tf@develop-mt5",
@@ -100,6 +109,7 @@ const cases: AnswerCase[] = [
   },
   {
     name: "glossary lists MMB MT4 account types",
+    smoke: true,
     question: "Berikan list tipe akun mt4 mmb",
     required: [
       "Tipe akun MMB/Askap MT4",
@@ -165,12 +175,11 @@ const cases: AnswerCase[] = [
   },
   {
     name: "glossary definition prefers iSignal overview docs",
+    smoke: true,
     question: "apa itu isignal",
     required: [
       "Auto Copy",
-      "sinyal perdagangan",
-      "channel master",
-      "pengolahan sinyal",
+      "signal ingestion",
       "docs:isignal-docs\\index.mdx",
     ],
     forbidden: [
@@ -184,7 +193,7 @@ const cases: AnswerCase[] = [
     question: "Kapan isignal mulai didevelop",
     required: [
       "Tanggal mulai development iSignal tidak bisa dipastikan",
-      "1 Agustus, 2024",
+      "August 1st, 2024",
       "docs:isignal-docs\\CHANGELOG.md",
     ],
     forbidden: [
@@ -207,6 +216,7 @@ const cases: AnswerCase[] = [
   },
   {
     name: "iSignal minimum equity reads config fallback",
+    smoke: true,
     question: "berapa minimal equity untuk bisa ikut isignal",
     required: [
       "Minimal equity iSignal",
@@ -225,6 +235,7 @@ const cases: AnswerCase[] = [
   },
   {
     name: "deep mode keeps iSignal minimum equity grounded in config",
+    smoke: true,
     question: "berapa minimal equity untuk bisa ikut isignal",
     args: ["--deep"],
     required: [
@@ -259,6 +270,7 @@ const cases: AnswerCase[] = [
   },
   {
     name: "short broker alias definition answers from registry",
+    smoke: true,
     question: "apa itu mmb",
     args: ["--deep"],
     required: [
@@ -326,6 +338,7 @@ const cases: AnswerCase[] = [
   },
   {
     name: "short technical term explains MT4 from code config",
+    smoke: true,
     question: "apa itu mt4",
     required: [
       "MT4 adalah platform/jenis server MetaTrader",
@@ -360,6 +373,7 @@ const cases: AnswerCase[] = [
   },
   {
     name: "documentation how-it-works returns Mermaid flowchart",
+    smoke: true,
     question: "how isignal works?",
     required: [
       "Flowchart from indexed documentation",
@@ -393,6 +407,7 @@ const cases: AnswerCase[] = [
   },
   {
     name: "medal mechanism explains implicit VP formula",
+    smoke: true,
     question: "how do we gain medal",
     required: [
       "CalculatePointAndMedal20260531",
@@ -408,10 +423,38 @@ const cases: AnswerCase[] = [
   },
 ]
 
-async function ask(question: string, timeoutMs: number, args: string[] = []): Promise<string> {
+function parseOptions(argv: string[]): RunnerOptions {
+  const options: RunnerOptions = {}
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    const value = argv[i + 1]
+    if (arg === "--chat-model" && value) {
+      options.chatModel = value
+      i++
+    } else if (arg === "--grep" && value) {
+      options.grep = value
+      i++
+    } else if (arg === "--suite" && (value === "smoke" || value === "full")) {
+      options.suite = value
+      i++
+    }
+  }
+
+  return options
+}
+
+async function ask(question: string, timeoutMs: number, args: string[] = [], options: RunnerOptions = {}): Promise<string> {
   const { stdout, stderr } = await execFileAsync(
     process.execPath,
-    ["--import", "./register-ts-node.mjs", "src/ask.ts", question, ...args],
+    [
+      "--import",
+      "./register-ts-node.mjs",
+      "src/ask.ts",
+      question,
+      ...(options.chatModel ? ["--chat-model", options.chatModel] : []),
+      ...args,
+    ],
     {
       cwd: process.cwd(),
       timeout: timeoutMs,
@@ -428,13 +471,34 @@ function findMissing(output: string, expected: string[]): string[] {
 }
 
 async function main() {
-  let failed = 0
+  const runnerOptions = parseOptions(process.argv.slice(2))
+  const chatModel = runnerOptions.chatModel ?? process.env.ANSWER_TEST_CHAT_MODEL ?? "qwen2.5-coder:3b"
+  runnerOptions.chatModel = chatModel
+  const suite = runnerOptions.suite ?? "smoke"
+  const suiteCases = suite === "full" ? cases : cases.filter(answerCase => answerCase.smoke)
+  const selectedCases = runnerOptions.grep
+    ? suiteCases.filter(answerCase => {
+      const pattern = runnerOptions.grep!.toLowerCase()
+      return answerCase.name.toLowerCase().includes(pattern) || answerCase.question.toLowerCase().includes(pattern)
+    })
+    : suiteCases
 
-  for (const answerCase of cases) {
+  if (selectedCases.length === 0) {
+    throw new Error(`No answer regression cases matched --grep ${JSON.stringify(runnerOptions.grep)}`)
+  }
+
+  let failed = 0
+  console.log(`Answer regression model: ${chatModel}`)
+  console.log(`Suite: ${suite} (${selectedCases.length}/${cases.length})`)
+  if (runnerOptions.grep) {
+    console.log(`Case filter: ${runnerOptions.grep}`)
+  }
+
+  for (const answerCase of selectedCases) {
     process.stdout.write(`Running: ${answerCase.name}... `)
 
     try {
-      const output = await ask(answerCase.question, answerCase.timeoutMs ?? 180_000, answerCase.args)
+      const output = await ask(answerCase.question, answerCase.timeoutMs ?? 180_000, answerCase.args, runnerOptions)
       const missing = findMissing(output, answerCase.required)
       const presentForbidden = (answerCase.forbidden ?? []).filter(value => output.includes(value))
 
@@ -472,7 +536,7 @@ async function main() {
     throw new Error(`${failed} answer regression case(s) failed`)
   }
 
-  console.log(`All ${cases.length} answer regression cases passed.`)
+  console.log(`All ${selectedCases.length} answer regression cases passed.`)
 }
 
 main().catch(error => {

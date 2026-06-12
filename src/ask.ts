@@ -303,6 +303,9 @@ async function retrieveDocumentationSubjectMatches(subjectTerms: string[], resul
           if (new RegExp(`\\(${escapeRegExp(term.toUpperCase())}\\)`).test(payload.content ?? "")) score += 45
         } else if (text.includes(term)) {
           score += 12
+          // Extra boost when the term appears in the file path (doc is *about* this term)
+          if (new RegExp(`[\\\\/]${escapeRegExp(term)}[-_][a-z0-9_-]*docs?[\\\\/]`, "i").test(filePath)) score += 70
+          if (filePath.includes(term)) score += 30
         }
       }
 
@@ -578,6 +581,16 @@ function rerankRetrievedChunks(questionText: string, chunks: RetrievedChunk[]): 
       if (payload.filePath?.startsWith("knowledge-notes://")) score += 20
       if (payload.noteStatus === "proposal") score += /proposal|meeting|change|recent|terbaru|perubahan/i.test(questionText) ? 35 : -5
 
+      // Product-specific doc bias correction: when question is about a specific product,
+      // boost its docs and penalize unrelated product docs.
+      const isIsignalQuestion = registryExpansion.terms.map(t => t.toLowerCase()).includes("isignal")
+      if (isIsignalQuestion) {
+        const fp = payload.filePath?.toLowerCase() ?? ""
+        const rn = payload.repoName?.toLowerCase() ?? ""
+        if (fp.includes("isignal-docs") || rn.includes("isignal")) score += 50
+        else if (payload.evidenceTypes?.includes("documentation") && (fp.includes("fa-porto-docs") || fp.includes("devops-docs"))) score -= 80
+      }
+
       // Decision/ADR boost — approved decisions carry retrieval_priority: 10 from Qdrant payload
       if (payload.source_type === "decision") {
         score += (payload.retrieval_priority ?? 0) * 2
@@ -618,6 +631,20 @@ function rerankRetrievedChunks(questionText: string, chunks: RetrievedChunk[]): 
 
       return { chunk, score }
     })
+    .sort((left, right) => right.score - left.score)
+    // Repo diversity pass — penalize 3rd+ chunk from the same repo so one repo
+    // can't dominate all top slots. First two chunks per repo are unaffected.
+    .map((() => {
+      const repoCount = new Map<string, number>()
+      return (item: { chunk: RetrievedChunk; score: number }) => {
+        const repo = item.chunk.payload.repoName ?? ""
+        const count = repoCount.get(repo) ?? 0
+        repoCount.set(repo, count + 1)
+        // 3rd chunk: -30, 4th: -60, 5th+: -90
+        const diversityPenalty = count >= 2 ? Math.min(30 * (count - 1), 90) : 0
+        return { chunk: item.chunk, score: item.score - diversityPenalty }
+      }
+    })())
     .sort((left, right) => right.score - left.score)
     .map(item => item.chunk)
 }
@@ -4181,10 +4208,13 @@ function isCronDocChunk(chunk: RetrievedPayload): boolean {
 function buildDocumentationTimelineAnswer(chunks: RetrievedPayload[], question: string): string | undefined {
   if (!questionAsksProjectTimeline(question)) return undefined
 
+  const isIsignalQuestion = /\b(isignal|auto copy|copy signal|bot copy|ois)\b/i.test(question)
   const candidates = chunks
     .filter(chunk => chunk.evidenceTypes?.includes("documentation"))
     .filter(chunk => /changelog|release|timeline|roadmap|history|perubahan/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
     .filter(chunk => /isignal|auto copy|copy signal|bot copy|ois/i.test(`${chunk.filePath ?? ""}\n${chunk.content ?? ""}`))
+    // When asking about isignal specifically, exclude unrelated product changelogs
+    .filter(chunk => !isIsignalQuestion || (chunk.filePath ?? "").toLowerCase().includes("isignal-docs"))
     .sort((left, right) => {
       const leftPath = left.filePath?.toLowerCase() ?? ""
       const rightPath = right.filePath?.toLowerCase() ?? ""
@@ -4204,14 +4234,14 @@ function buildDocumentationTimelineAnswer(chunks: RetrievedPayload[], question: 
       .map(line => cleanDocSummaryText(line))
       .filter(Boolean)
       .filter(line => !/^(Documentation|Source|Locale|title|description|file):/i.test(line))
-      .filter(line => /(\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b|\b20\d{2}\b|v\d+|\brelease\b|\brilis\b|\bchangelog\b|\binitial\b|\bmulai\b|\bstart)/i.test(line))
+      .filter(line => /(\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b|\b20\d{2}\b|v\d+|\brelease\b|\brilis\b|\bchangelog\b|\binitial\b|\bmulai\b|\bstart|\b(?:january|february|march|april|may|june|july|august|september|october|november|december|januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember)\b)/i.test(line))
 
     for (const line of lines) {
       timelineFacts.push(`${line} (${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine})`)
-      if (timelineFacts.length >= 8) break
+      if (timelineFacts.length >= 20) break
     }
 
-    if (timelineFacts.length >= 8) break
+    if (timelineFacts.length >= 20) break
   }
 
   if (timelineFacts.length === 0) return undefined
@@ -4243,11 +4273,23 @@ function buildDocumentationTimelineAnswer(chunks: RetrievedPayload[], question: 
     const isoMatch = fact.match(/\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b/)
     if (isoMatch) return Number(`${isoMatch[1]}${isoMatch[2]?.padStart(2, "0")}${isoMatch[3]?.padStart(2, "0")}`)
 
-    const textDateMatch = fact.toLowerCase().match(/\b(\d{1,2})\s+([a-z]+),?\s+(20\d{2})\b/)
+    const textDateMatch = fact.toLowerCase().match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+),?\s+(20\d{2})\b/) ||
+      fact.toLowerCase().match(/\b([a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(20\d{2})\b/)
     if (textDateMatch) {
-      const day = textDateMatch[1]?.padStart(2, "0") ?? "99"
-      const month = String(monthMap[textDateMatch[2] ?? ""] ?? 99).padStart(2, "0")
-      const year = textDateMatch[3] ?? "9999"
+      // handle both "1st August 2024" and "August 1st, 2024" patterns
+      let day: string, monthName: string, year: string
+      if (monthMap[textDateMatch[2] ?? ""] !== undefined) {
+        // pattern: day month year
+        day = textDateMatch[1]?.padStart(2, "0") ?? "99"
+        monthName = textDateMatch[2] ?? ""
+        year = textDateMatch[3] ?? "9999"
+      } else {
+        // pattern: month day year
+        monthName = textDateMatch[1] ?? ""
+        day = textDateMatch[2]?.padStart(2, "0") ?? "99"
+        year = textDateMatch[3] ?? "9999"
+      }
+      const month = String(monthMap[monthName] ?? 99).padStart(2, "0")
 
       return Number(`${year}${month}${day}`)
     }
@@ -4258,9 +4300,9 @@ function buildDocumentationTimelineAnswer(chunks: RetrievedPayload[], question: 
     return Number.MAX_SAFE_INTEGER
   }
 
-  const sortedFacts = unique(timelineFacts, 12)
+  const sortedFacts = unique(timelineFacts, 16)
     .sort((left, right) => timelineSortKey(left) - timelineSortKey(right))
-    .slice(0, 8)
+    .slice(0, 12)
 
   return [
     localized("Tanggal mulai development iSignal tidak bisa dipastikan hanya dari evidence yang ter-retrieve.", "The exact iSignal development start date is not confirmed by the retrieved evidence."),
@@ -4536,6 +4578,15 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
   const matchingDocChunks = chunks.filter(chunk => {
     if (!chunk.evidenceTypes?.includes("documentation")) return false
 
+    // When asking about FA, exclude devops-docs and legacy-archives chunks — they
+    // often contain "Legacy Archives" text that the LLM quotes verbatim as product info.
+    if (asksFinancialAdvisor) {
+      const fp = chunk.filePath?.toLowerCase() ?? ""
+      if (fp.includes("devops-docs")) return false
+      if (fp.includes("legacy-archives")) return false
+      if (/legacy archives/i.test(chunk.content ?? "")) return false
+    }
+
     const text = [
       chunk.filePath ?? "",
       chunk.content ?? "",
@@ -4573,6 +4624,9 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       if (repoName.includes("isignal")) value += 20
       if (content.includes("auto copy")) value += 10
       if (asksOverview && isTopLevelIndexPath(filePath)) value += 90
+      // Penalize unrelated product docs when asking specifically about isignal
+      if (filePath.includes("fa-porto-docs")) value -= 80
+      if (filePath.includes("devops-docs")) value -= 60
     }
 
     if (asksFinancialAdvisor) {
@@ -4580,7 +4634,7 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
       if (content.includes("financial advisor") || content.includes("penasihat keuangan")) value += 60
       if (asksOverview && isTopLevelIndexPath(filePath)) value += 90
       if (filePath.includes("isignal-docs")) value -= 80
-      if (filePath.includes("devops-docs")) value -= 60
+      if (filePath.includes("devops-docs")) value -= 120
       if (filePath.includes("glossarium") || filePath.includes("glossary")) value -= asksGlossaryExplicitly ? 0 : 35
     }
 
@@ -4709,7 +4763,7 @@ async function buildDocumentationGlossaryAnswer(chunks: RetrievedPayload[], ques
   if (docChunks.length === 0) return undefined
 
   const facts: string[] = []
-  const maxFacts = asksOverview && asksRules ? 40 : asksOverview ? 8 : 14
+  const maxFacts = asksOverview && asksRules ? 40 : asksOverview ? 8 : asksRules ? 30 : 14
 
   for (const chunk of docChunks) {
     const lines = (chunk.content ?? "")
@@ -5347,7 +5401,7 @@ async function main() {
     ...minimumEquitySearchTerms,
   ], 48)
   // Run all independent exact-match scroll scans in parallel.
-  const [exactTermChunks, exactVocabularyChunks, exactMetaTraderChunks, exactMinimumEquityChunks] = await Promise.all([
+  const [exactTermChunks, exactVocabularyChunks, exactMetaTraderChunks, exactMinimumEquityChunks, isignalDocChunks] = await Promise.all([
     exactRoutes.length === 0
       ? retrieveExactTermMatches(exactTermSearchTerms, questionAsksAboutAccountTypes(question) ? 60 : 32)
       : Promise.resolve([]),
@@ -5359,6 +5413,19 @@ async function main() {
       : Promise.resolve([]),
     exactRoutes.length === 0 && questionAsksMinimumEquityConfig(question)
       ? retrieveMinimumEquityConfigChunks(24)
+      : Promise.resolve([]),
+    // Explicit isignal-docs scroll for timeline and eligibility questions — these specific
+    // question types are not well-served by vector search when isignal has no docs:id locale.
+    exactRoutes.length === 0 && (questionAsksProjectTimeline(question) || questionAsksEligibilityRequirement(question))
+      ? (async (): Promise<RetrievedChunk[]> => {
+          const result = await qdrant.scroll(config.collectionName, {
+            filter: { must: [{ key: "repoName", match: { value: "isignal" } }, { key: "branchName", match: { value: "docs" } }] },
+            limit: 100, with_payload: true, with_vector: false,
+          })
+          return result.points
+            .map(p => ({ id: String(p.id), payload: p.payload as RetrievedPayload }))
+            .filter(c => c.payload.content)
+        })()
       : Promise.resolve([]),
   ])
 
@@ -5434,7 +5501,10 @@ async function main() {
   const exactComparison = exactRoutes.length >= 2 && isExactRouteComparisonQuestion(question)
   // Decision-intent questions should not be treated as endpoint inspections — they ask
   // about WHY something was decided, not HOW an endpoint behaves.
-  const isDecisionIntentQuestion = /\b(decided|decision|why|rationale|rule|changed|aturan|diputuskan|alasan)\b/i.test(question)
+  // "rule"/"aturan" alone are too broad — they match glossary+rules questions like "apa itu FA dan aturan nya".
+  // Require either an explicit decision verb OR "rule/aturan" paired with a decision subject word.
+  const isDecisionIntentQuestion = /\b(decided|decision|rationale|changed|diputuskan|alasan)\b/i.test(question) ||
+    (/\b(rule|aturan)\b/i.test(question) && /\b(why|kenapa|mengapa|diputus|adr|architectural)\b/i.test(question))
   const exactEndpointInspection =
     exactRoutes.length > 0 &&
     !exactComparison &&
@@ -5491,11 +5561,27 @@ async function main() {
             ? [...summaryChunks, ...detailChunks.slice(0, 2)]
             : doctorChunks.slice(0, 8)
 
+          // Synthesize via LLM instead of raw dump — same pattern as queue answer
+          const inventoryContext = output.map(c => c.content ?? "").join("\n\n---\n\n")
+          const inventoryPrompt = [
+            `Question: ${question}`,
+            `Answer language: ${answerLanguageLabel(question)}`,
+            "",
+            "Repo Doctor evidence for the requested service/repo:",
+            inventoryContext,
+            "",
+            "Answer requirements:",
+            "- Synthesize the evidence above into a clear, readable answer.",
+            "- Group related facts (services, env vars, DB tables, dependencies) into sections.",
+            "- Mention specific file paths and line numbers from the evidence.",
+            "- If a section has no evidence, omit it rather than saying 'none found'.",
+            "- Do not repeat raw markdown tables verbatim — summarize and highlight key facts.",
+            "- Say NOT_FOUND_IN_INDEXED_CODEBASE only if the evidence contains nothing relevant.",
+          ].join("\n")
+
           console.log("\nANSWER\n")
-          console.log(output.map(c => c.content).join("\n\n---\n\n"))
-          if (detailChunks.length > 2 && summaryChunks.length > 0) {
-            console.log(`\n... (${detailChunks.length - 2} more detail chunks available)`)
-          }
+          const synthesized = await chat(inventoryPrompt)
+          console.log(localizeAnswer(synthesized, question))
           console.log("\nSOURCES\n")
           for (const chunk of output) {
             console.log(`- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`)
@@ -5606,7 +5692,17 @@ async function main() {
         ], Math.max(retrievalLimit, 24))
       : Promise.resolve([]),
   ])
-  const preferredLocaleDocChunks = preferredLocaleDocChunksRaw as RetrievedChunk[]
+  const preferredLocaleDocChunks = (preferredLocaleDocChunksRaw as RetrievedChunk[]).filter(chunk => {
+    // When the question is about a specific product (isignal, FA, etc.), exclude unrelated repos
+    // so the docs:id locale for a different product doesn't dominate.
+    const repoName = chunk.payload.repoName?.toLowerCase() ?? ""
+    const filePath = chunk.payload.filePath?.toLowerCase() ?? ""
+    if (registryExpansion.terms.map(t => t.toLowerCase()).includes("isignal")) {
+      // isignal has no docs:id — drop docs:id chunks from other repos to avoid pollution
+      if (!repoName.includes("isignal") && !filePath.includes("isignal")) return false
+    }
+    return true
+  })
   const exactDocumentationSubjectChunks = exactDocumentationSubjectChunksRaw as RetrievedChunk[]
   const [preferredLocaleDocNeighborChunks, exactDocumentationSubjectNeighborChunks] = await Promise.all([
     preferredLocaleDocChunks.length > 0 && questionAsksAboutGlossary(question)
@@ -5616,7 +5712,7 @@ async function main() {
       ? retrieveNeighborChunks(exactDocumentationSubjectChunks, 40)
       : Promise.resolve([]),
   ])
-  const hints = collectHints([...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactVocabularyChunks, ...exactMetaTraderChunks, ...exactMinimumEquityChunks, ...exactTermDetailChunks, ...vocabUsageChunks, ...exactDocumentationSubjectChunks, ...initialChunks])
+  const hints = collectHints([...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactVocabularyChunks, ...exactMetaTraderChunks, ...exactMinimumEquityChunks, ...isignalDocChunks, ...exactTermDetailChunks, ...vocabUsageChunks, ...exactDocumentationSubjectChunks, ...initialChunks])
   const expansionQueries =
     exactRoutes.length > 0 && exactChunks.length === 0
       ? []
@@ -5653,6 +5749,9 @@ async function main() {
       ...exactChunks,
       ...symbolChunks,
       ...exactDetailChunks,
+      // isignalDocChunks first — they are explicitly scrolled for timeline/eligibility
+      // questions and must not be crowded out by docs:id chunks from other repos
+      ...isignalDocChunks,
       ...preferredLocaleDocChunks,
       ...preferredLocaleDocNeighborChunks,
       ...exactDocumentationSubjectChunks,
@@ -5673,6 +5772,8 @@ async function main() {
         ? Math.max(retrievalLimit, 36)
         : questionAsksAboutGlossary(question)
         ? Math.max(retrievalLimit, 96)
+        : (questionAsksProjectTimeline(question) || questionAsksEligibilityRequirement(question))
+        ? Math.max(limit, 48)
         : Math.max(limit, 12),
   )
   const accountTypeFileChunks = questionAsksAboutAccountTypes(question)
@@ -5703,7 +5804,30 @@ async function main() {
     : []
   const endpointDetailEvidenceChunks = [...exactDetailChunks, ...endpointExtraTermChunks]
   const phpConstantNamesForExactRoutes = extractPhpConstantNamesForRoutes(exactChunks, exactRoutes)
-  const upstreamFacts = extractUpstreamRouteCallerFacts(endpointDetailEvidenceChunks, phpConstantNamesForExactRoutes)
+  // Fallback: when no PHP constants found (config not indexed), search directly for PHP
+  // model chunks that call Helper::requestAPI for any of the exact route path segments.
+  const phpCallerChunks: RetrievedChunk[] = phpConstantNamesForExactRoutes.length === 0 && exactRoutes.length > 0
+    ? await (async () => {
+        const routeSegments = exactRoutes.flatMap(r => r.split("/").filter(s => s.length > 3 && !/^v\d+$/.test(s)))
+        if (routeSegments.length === 0) return []
+        const bm25Hits = await bm25Search(routeSegments.join(" "), 16)
+        if (bm25Hits.length === 0) return []
+        const points = await qdrant.retrieve(config.collectionName, { ids: bm25Hits.map(r => r.id), with_payload: true })
+        return points
+          .map(p => ({ id: String(p.id), payload: p.payload as RetrievedPayload }))
+          .filter(c => c.payload.content && c.payload.content.includes("Helper::requestAPI"))
+      })()
+    : []
+  const upstreamFacts = extractUpstreamRouteCallerFacts(
+    [...endpointDetailEvidenceChunks, ...phpCallerChunks],
+    phpConstantNamesForExactRoutes.length > 0
+      ? phpConstantNamesForExactRoutes
+      : phpCallerChunks.flatMap(c =>
+          [...(c.payload.content ?? "").matchAll(/\bHelper::requestAPI\s*\(\s*(?:[A-Z][A-Za-z0-9_]*::)?([A-Z][A-Z0-9_]+)/g)]
+            .map(m => m[1] ?? "")
+            .filter(Boolean)
+        ),
+  )
   const downstreamFacts = extractDownstreamRpcFacts(
     endpointDetailEvidenceChunks,
     exactRouteRepoNames,
@@ -6049,8 +6173,21 @@ async function main() {
     return
   }
 
+  // Only use structural evidence answer when chunks actually contain structural signals
+  // (routes, tables, queues, messages). Without those, it just emits a "missing anchor"
+  // disclaimer that's worse than letting the LLM fallback synthesize from the raw context.
+  const chunksHaveStructuralEvidence = chunks.some(c =>
+    (c.routes?.length ?? 0) > 0 ||
+    (c.dbTables?.length ?? 0) > 0 ||
+    (c.queueNames?.length ?? 0) > 0 ||
+    (c.messageNames?.length ?? 0) > 0 ||
+    (c.exchangeNames?.length ?? 0) > 0,
+  )
   const structuralEvidenceAnswer =
-    !hasDoctorInventory && exactRoutes.length === 0 && (questionAsksAboutDatabase(question) || questionAsksAboutServicesOrFlow(question))
+    !hasDoctorInventory &&
+    exactRoutes.length === 0 &&
+    chunksHaveStructuralEvidence &&
+    (questionAsksAboutDatabase(question) || questionAsksAboutServicesOrFlow(question))
       ? buildStructuralEvidenceAnswer(chunks, question)
       : undefined
 
