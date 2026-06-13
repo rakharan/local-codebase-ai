@@ -70,14 +70,16 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
     throw lastError
 }
 
-// Returns true if Anthropic API should be used (includes 9router)
+// Returns true if Anthropic API should be used (only when no OpenAI-compat config present)
 function isAnthropicCompatible(): boolean {
+    // If OpenAI-compatible base URL is set alongside OpenAI key, prefer that path
+    if (config.openAIApiKey && config.openAIBaseUrl) return false
     return Boolean(config.anthropicApiKey)
 }
 
 // Returns true if the chat model should use OpenAI-compatible API
 function isOpenAICompatible(): boolean {
-    return !isAnthropicCompatible() && (Boolean(config.openAIApiKey) || Boolean(config.groqApiKey) || Boolean(config.geminiApiKey))
+    return Boolean(config.openAIApiKey) || Boolean(config.groqApiKey) || Boolean(config.geminiApiKey)
 }
 
 function getOpenAIBaseUrl(): string {
@@ -123,6 +125,7 @@ async function chatOpenAI(messages: Array<{ role: string; content: string }>, js
         model: config.chatModel,
         messages,
         max_tokens: 2048,
+        stream: false,
     }
 
     if (jsonMode) {

@@ -20,6 +20,7 @@
   "dependencies": {
     "@qdrant/js-client-rest": "^1.18.0",
     "commander": "^14.0.3",
+    "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "fast-glob": "^3.3.3",
     "ignore": "^7.0.5",
