@@ -14,13 +14,17 @@ export const config = {
 
   // Cloud inference — set any one of these to use instead of local Ollama for chat.
   // Embeddings always use local Ollama regardless.
-  // Gemini: set GEMINI_API_KEY + CHAT_MODEL=gemini-2.0-flash
-  // Groq:   set GROQ_API_KEY   + CHAT_MODEL=llama-3.1-8b-instant
-  // OpenAI: set OPENAI_API_KEY + CHAT_MODEL=gpt-4o-mini
+  // Gemini:    set GEMINI_API_KEY + CHAT_MODEL=gemini-2.0-flash
+  // Groq:      set GROQ_API_KEY   + CHAT_MODEL=llama-3.1-8b-instant
+  // OpenAI:    set OPENAI_API_KEY + CHAT_MODEL=gpt-4o-mini
+  // Anthropic: set ANTHROPIC_API_KEY + CHAT_MODEL=claude-opus-4-8 (or kiro-fallback for 9router)
+  // 9router:   set ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL=http://localhost:20128/v1 + CHAT_MODEL=kiro-fallback
   geminiApiKey: process.env.GEMINI_API_KEY ?? "",
   groqApiKey: process.env.GROQ_API_KEY ?? "",
   openAIApiKey: process.env.OPENAI_API_KEY ?? "",
   openAIBaseUrl: process.env.OPENAI_BASE_URL ?? "",
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
+  anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com",
 }
 
 export function setChatModel(model: string): void {

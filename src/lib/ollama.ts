@@ -19,6 +19,13 @@ type OpenAIChatResponse = {
     }>
 }
 
+type AnthropicChatResponse = {
+    content?: Array<{
+        type: string
+        text?: string
+    }>
+}
+
 export type AnswerLanguage = "id" | "en" | "unknown"
 
 const MAX_ATTEMPTS = 4
@@ -63,9 +70,14 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
     throw lastError
 }
 
+// Returns true if Anthropic API should be used (includes 9router)
+function isAnthropicCompatible(): boolean {
+    return Boolean(config.anthropicApiKey)
+}
+
 // Returns true if the chat model should use OpenAI-compatible API
 function isOpenAICompatible(): boolean {
-    return Boolean(config.openAIApiKey) || Boolean(config.groqApiKey) || Boolean(config.geminiApiKey)
+    return !isAnthropicCompatible() && (Boolean(config.openAIApiKey) || Boolean(config.groqApiKey) || Boolean(config.geminiApiKey))
 }
 
 function getOpenAIBaseUrl(): string {
@@ -76,6 +88,31 @@ function getOpenAIBaseUrl(): string {
 
 function getOpenAIApiKey(): string {
     return config.geminiApiKey ?? config.groqApiKey ?? config.openAIApiKey ?? ""
+}
+
+async function chatAnthropic(system: string, userContent: string): Promise<string> {
+    const baseUrl = config.anthropicBaseUrl.replace(/\/$/, "")
+    const res = await fetchWithRetry(`${baseUrl}/messages`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "x-api-key": config.anthropicApiKey,
+            "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+            model: config.chatModel,
+            max_tokens: 2048,
+            system,
+            messages: [{ role: "user", content: userContent }],
+        }),
+    })
+
+    if (!res.ok) {
+        throw new Error(`ANTHROPIC_CHAT_FAILED: ${res.status} ${await res.text()}`)
+    }
+
+    const data = (await res.json()) as AnthropicChatResponse
+    return data.content?.find(b => b.type === "text")?.text?.trim() ?? ""
 }
 
 async function chatOpenAI(messages: Array<{ role: string; content: string }>, jsonMode = false): Promise<string> {
@@ -158,6 +195,15 @@ export async function chat(prompt: string): Promise<string> {
         { role: "user", content: prompt },
     ]
 
+    if (isAnthropicCompatible()) {
+        const raw = await chatAnthropic(SYSTEM_PROMPT, prompt)
+        const notFoundIdx = raw.indexOf("NOT_FOUND_IN_INDEXED_CODEBASE")
+        if (notFoundIdx >= 0) {
+            return raw.slice(0, notFoundIdx + "NOT_FOUND_IN_INDEXED_CODEBASE".length).trim()
+        }
+        return raw
+    }
+
     if (isOpenAICompatible()) {
         const raw = await chatOpenAI(messages)
         const notFoundIdx = raw.indexOf("NOT_FOUND_IN_INDEXED_CODEBASE")
@@ -223,8 +269,18 @@ export async function detectPreferredLanguage(input: string): Promise<AnswerLang
 
     try {
         let content: string
+        const langSystem = [
+            "Detect the user's preferred answer language from the message.",
+            "Return only compact JSON with this shape: {\"language\":\"id\"|\"en\"|\"unknown\"}.",
+            "Use \"id\" for Bahasa Indonesia, Indonesian slang, or mixed Indonesian-English.",
+            "Use \"en\" for English.",
+            "Use \"unknown\" only when the language cannot be inferred.",
+            "Do not translate. Do not answer the message.",
+        ].join("\n")
 
-        if (isOpenAICompatible()) {
+        if (isAnthropicCompatible()) {
+            content = await chatAnthropic(langSystem, input)
+        } else if (isOpenAICompatible()) {
             content = await chatOpenAI(messages, true)
         } else {
             const res = await fetchWithRetry(`${config.ollamaUrl}/api/chat`, {
@@ -255,6 +311,10 @@ export async function chatJson(systemPrompt: string, userPrompt: string): Promis
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
     ]
+
+    if (isAnthropicCompatible()) {
+        return await chatAnthropic(systemPrompt, userPrompt)
+    }
 
     if (isOpenAICompatible()) {
         return await chatOpenAI(messages, true)
