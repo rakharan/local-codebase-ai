@@ -11,10 +11,35 @@ type OllamaChatResponse = {
     }
 }
 
+type OpenAIChatResponse = {
+    choices?: Array<{
+        message?: {
+            content?: string
+        }
+    }>
+}
+
 export type AnswerLanguage = "id" | "en" | "unknown"
 
 const MAX_ATTEMPTS = 4
 const MAX_EMBED_INPUT_CHARS = 3_500
+
+const SYSTEM_PROMPT = [
+    "You are an internal microservice codebase assistant.",
+    "Answer in the same language as the user question. If the question is in Bahasa Indonesia, answer in Bahasa Indonesia while preserving code identifiers exactly.",
+    "Answer only from the provided context.",
+    "If the context is insufficient, say NOT_FOUND_IN_INDEXED_CODEBASE.",
+    "Always mention service/repo name, source file paths, and line ranges.",
+    "Do not invent architecture.",
+    "Do not infer database table names, services, queues, or cross-service flows from domain words or naming conventions.",
+    "Only name database tables when they appear in metadata, SQL, or quoted source context.",
+    "Only claim service involvement when a repo appears in source metadata or an explicit source links the same route, message, RPC function, queue, or handler.",
+    "Avoid likely/probably/might for facts; say not confirmed in retrieved context.",
+    "When explaining cross-service flow, separate confirmed facts from guesses.",
+    "Prefer evidence from RabbitMQ handlers, API routes, cron jobs, database usage, and config files.",
+    "Only discuss cross-service flow, queues, jobs, or database tables when the question asks for them or the retrieved context clearly contains them.",
+    "For general summary questions, do not add cross-service, queue, database, deployment, or speculation sections.",
+].join("\n")
 
 function wait(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms))
@@ -36,6 +61,52 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
     }
 
     throw lastError
+}
+
+// Returns true if the chat model should use OpenAI-compatible API
+function isOpenAICompatible(): boolean {
+    return Boolean(config.openAIApiKey) || Boolean(config.groqApiKey) || Boolean(config.geminiApiKey)
+}
+
+function getOpenAIBaseUrl(): string {
+    if (config.geminiApiKey) return "https://generativelanguage.googleapis.com/v1beta/openai"
+    if (config.groqApiKey) return "https://api.groq.com/openai/v1"
+    return config.openAIBaseUrl ?? "https://api.openai.com/v1"
+}
+
+function getOpenAIApiKey(): string {
+    return config.geminiApiKey ?? config.groqApiKey ?? config.openAIApiKey ?? ""
+}
+
+async function chatOpenAI(messages: Array<{ role: string; content: string }>, jsonMode = false): Promise<string> {
+    const baseUrl = getOpenAIBaseUrl()
+    const apiKey = getOpenAIApiKey()
+
+    const body: Record<string, unknown> = {
+        model: config.chatModel,
+        messages,
+        max_tokens: 2048,
+    }
+
+    if (jsonMode) {
+        body.response_format = { type: "json_object" }
+    }
+
+    const res = await fetchWithRetry(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+    })
+
+    if (!res.ok) {
+        throw new Error(`OPENAI_CHAT_FAILED: ${res.status} ${await res.text()}`)
+    }
+
+    const data = (await res.json()) as OpenAIChatResponse
+    return data.choices?.[0]?.message?.content?.trim() ?? ""
 }
 
 export async function createEmbedding(input: string): Promise<number[]> {
@@ -82,122 +153,97 @@ export async function createEmbedding(input: string): Promise<number[]> {
 }
 
 export async function chat(prompt: string): Promise<string> {
-    let res
+    const messages = [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: prompt },
+    ]
 
+    if (isOpenAICompatible()) {
+        const raw = await chatOpenAI(messages)
+        const notFoundIdx = raw.indexOf("NOT_FOUND_IN_INDEXED_CODEBASE")
+        if (notFoundIdx >= 0) {
+            return raw.slice(0, notFoundIdx + "NOT_FOUND_IN_INDEXED_CODEBASE".length).trim()
+        }
+        return raw
+    }
+
+    // Ollama path
+    let res
     const isQwen3 = config.chatModel.startsWith("qwen3")
 
     try {
         res = await fetchWithRetry(`${config.ollamaUrl}/api/chat`, {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-            },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 model: config.chatModel,
                 stream: false,
-                options: {
-                    num_ctx: config.numCtx,
-                },
+                options: { num_ctx: config.numCtx },
                 messages: [
                     {
                         role: "system",
-                        content: [
-                            isQwen3 ? "/no_think" : undefined,
-                            "You are an internal microservice codebase assistant.",
-                            "Answer in the same language as the user question. If the question is in Bahasa Indonesia, answer in Bahasa Indonesia while preserving code identifiers exactly.",
-                            "Answer only from the provided context.",
-                            "If the context is insufficient, say NOT_FOUND_IN_INDEXED_CODEBASE.",
-                            "Always mention service/repo name, source file paths, and line ranges.",
-                            "Do not invent architecture.",
-                            "Do not infer database table names, services, queues, or cross-service flows from domain words or naming conventions.",
-                            "Only name database tables when they appear in metadata, SQL, or quoted source context.",
-                            "Only claim service involvement when a repo appears in source metadata or an explicit source links the same route, message, RPC function, queue, or handler.",
-                            "Avoid likely/probably/might for facts; say not confirmed in retrieved context.",
-                            "When explaining cross-service flow, separate confirmed facts from guesses.",
-                            "Prefer evidence from RabbitMQ handlers, API routes, cron jobs, database usage, and config files.",
-                            "Only discuss cross-service flow, queues, jobs, or database tables when the question asks for them or the retrieved context clearly contains them.",
-                            "For general summary questions, do not add cross-service, queue, database, deployment, or speculation sections.",
-                        ].filter(Boolean).join("\n"),
+                        content: [isQwen3 ? "/no_think" : undefined, SYSTEM_PROMPT].filter(Boolean).join("\n"),
                     },
-                    {
-                        role: "user",
-                        content: prompt,
-                    },
+                    { role: "user", content: prompt },
                 ],
             }),
         })
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-
-        throw new Error(
-            `Ollama is not reachable at ${config.ollamaUrl}. Start Ollama and run: ollama pull ${config.chatModel}\n${message}`,
-        )
+        throw new Error(`Ollama is not reachable at ${config.ollamaUrl}. Start Ollama and run: ollama pull ${config.chatModel}\n${message}`)
     }
 
-    if (!res.ok) {
-        throw new Error(`OLLAMA_CHAT_FAILED: ${res.status} ${await res.text()}`)
-    }
+    if (!res.ok) throw new Error(`OLLAMA_CHAT_FAILED: ${res.status} ${await res.text()}`)
 
     const data = (await res.json()) as OllamaChatResponse
-
     const raw = data.message?.content ?? ""
-    // Strip qwen3 thinking blocks (complete or partial) and post-NOT_FOUND hallucination
     const cleaned = raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "").replace(/^[\s\S]*?<\/think>\s*/g, "")
-    // If NOT_FOUND is present, only keep text up to and including it
     const notFoundIdx = cleaned.indexOf("NOT_FOUND_IN_INDEXED_CODEBASE")
     if (notFoundIdx >= 0) {
-      return cleaned.slice(0, notFoundIdx + "NOT_FOUND_IN_INDEXED_CODEBASE".length).trim()
+        return cleaned.slice(0, notFoundIdx + "NOT_FOUND_IN_INDEXED_CODEBASE".length).trim()
     }
     return cleaned.trim()
 }
 
 export async function detectPreferredLanguage(input: string): Promise<AnswerLanguage> {
-    let res
+    const messages = [
+        {
+            role: "system",
+            content: [
+                "Detect the user's preferred answer language from the message.",
+                "Return only compact JSON with this shape: {\"language\":\"id\"|\"en\"|\"unknown\"}.",
+                "Use \"id\" for Bahasa Indonesia, Indonesian slang, or mixed Indonesian-English.",
+                "Use \"en\" for English.",
+                "Use \"unknown\" only when the language cannot be inferred.",
+                "Do not translate. Do not answer the message.",
+            ].join("\n"),
+        },
+        { role: "user", content: input },
+    ]
 
     try {
-        res = await fetchWithRetry(`${config.ollamaUrl}/api/chat`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-                model: config.chatModel,
-                stream: false,
-                format: "json",
-                options: {
-                    temperature: 0,
-                    num_predict: 32,
-                },
-                messages: [
-                    {
-                        role: "system",
-                        content: [
-                            "Detect the user's preferred answer language from the message.",
-                            "Return only compact JSON with this shape: {\"language\":\"id\"|\"en\"|\"unknown\"}.",
-                            "Use \"id\" for Bahasa Indonesia, Indonesian slang, or mixed Indonesian-English.",
-                            "Use \"en\" for English.",
-                            "Use \"unknown\" only when the language cannot be inferred.",
-                            "Do not translate. Do not answer the message.",
-                        ].join("\n"),
-                    },
-                    {
-                        role: "user",
-                        content: input,
-                    },
-                ],
-            }),
-        })
-    } catch {
-        return "unknown"
-    }
+        let content: string
 
-    if (!res.ok) return "unknown"
+        if (isOpenAICompatible()) {
+            content = await chatOpenAI(messages, true)
+        } else {
+            const res = await fetchWithRetry(`${config.ollamaUrl}/api/chat`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    model: config.chatModel,
+                    stream: false,
+                    format: "json",
+                    options: { temperature: 0, num_predict: 32 },
+                    messages,
+                }),
+            })
+            if (!res.ok) return "unknown"
+            const data = (await res.json()) as OllamaChatResponse
+            content = data.message?.content ?? ""
+        }
 
-    try {
-        const data = (await res.json()) as OllamaChatResponse
-        const content = data.message?.content ?? ""
         const parsed = JSON.parse(content) as { language?: unknown }
-
         return parsed.language === "id" || parsed.language === "en" ? parsed.language : "unknown"
     } catch {
         return "unknown"
@@ -205,55 +251,45 @@ export async function detectPreferredLanguage(input: string): Promise<AnswerLang
 }
 
 export async function chatJson(systemPrompt: string, userPrompt: string): Promise<string> {
-    let res
+    const messages = [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+    ]
 
+    if (isOpenAICompatible()) {
+        return await chatOpenAI(messages, true)
+    }
+
+    // Ollama path
+    let res
     const isQwen3 = config.chatModel.startsWith("qwen3")
-    const systemContent = [
-        isQwen3 ? "/no_think" : undefined,
-        systemPrompt,
-    ].filter(Boolean).join("\n")
 
     try {
         res = await fetchWithRetry(`${config.ollamaUrl}/api/chat`, {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-            },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 model: config.chatModel,
                 stream: false,
                 format: "json",
-                options: {
-                    temperature: 0,
-                    num_ctx: config.numCtx,
-                },
+                options: { temperature: 0, num_ctx: config.numCtx },
                 messages: [
                     {
                         role: "system",
-                        content: systemContent,
+                        content: [isQwen3 ? "/no_think" : undefined, systemPrompt].filter(Boolean).join("\n"),
                     },
-                    {
-                        role: "user",
-                        content: userPrompt,
-                    },
+                    { role: "user", content: userPrompt },
                 ],
             }),
         })
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-
-        throw new Error(
-            `Ollama is not reachable at ${config.ollamaUrl}. Start Ollama and run: ollama pull ${config.chatModel}\n${message}`,
-        )
+        throw new Error(`Ollama is not reachable at ${config.ollamaUrl}. Start Ollama and run: ollama pull ${config.chatModel}\n${message}`)
     }
 
-    if (!res.ok) {
-        throw new Error(`OLLAMA_CHAT_FAILED: ${res.status} ${await res.text()}`)
-    }
+    if (!res.ok) throw new Error(`OLLAMA_CHAT_FAILED: ${res.status} ${await res.text()}`)
 
     const data = (await res.json()) as OllamaChatResponse
     const raw = data.message?.content ?? ""
-
-    // Buang blok berpikir qwen3 agar parser JSON tidak menerima teks tambahan.
     return raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "").replace(/^[\s\S]*?<\/think>\s*/g, "").trim()
 }

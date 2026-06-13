@@ -4,13 +4,23 @@ export const config = {
   collectionName: process.env.QDRANT_COLLECTION ?? "code_chunks",
 
   embeddingModel: process.env.EMBEDDING_MODEL ?? "nomic-embed-text",
-  chatModel: process.env.CHAT_MODEL ?? "qwen3:8b",
+  chatModel: process.env.CHAT_MODEL ?? "qwen2.5-coder:3b",
 
   vectorSize: Number(process.env.VECTOR_SIZE ?? 768),
 
   // Cap context window sent to Ollama. Lower = faster on CPU. Default 8192 is a good
   // balance; drop to 4096 if inference is too slow. Raise to 16384 for deep mode.
   numCtx: Number(process.env.OLLAMA_NUM_CTX ?? 8192),
+
+  // Cloud inference — set any one of these to use instead of local Ollama for chat.
+  // Embeddings always use local Ollama regardless.
+  // Gemini: set GEMINI_API_KEY + CHAT_MODEL=gemini-2.0-flash
+  // Groq:   set GROQ_API_KEY   + CHAT_MODEL=llama-3.1-8b-instant
+  // OpenAI: set OPENAI_API_KEY + CHAT_MODEL=gpt-4o-mini
+  geminiApiKey: process.env.GEMINI_API_KEY ?? "",
+  groqApiKey: process.env.GROQ_API_KEY ?? "",
+  openAIApiKey: process.env.OPENAI_API_KEY ?? "",
+  openAIBaseUrl: process.env.OPENAI_BASE_URL ?? "",
 }
 
 export function setChatModel(model: string): void {
