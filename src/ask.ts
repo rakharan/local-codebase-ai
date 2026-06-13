@@ -551,6 +551,7 @@ function rerankRetrievedChunks(questionText: string, chunks: RetrievedChunk[]): 
   const asksFlow = questionAsksAboutServicesOrFlow(questionText)
   const asksGlossary = questionAsksAboutGlossary(questionText)
   const asksDiagram = questionAsksForDiagram(questionText)
+  const asksHowWorks = questionAsksHowWorks(questionText)
 
   return chunks
     .map((chunk, index) => {
@@ -574,6 +575,7 @@ function rerankRetrievedChunks(questionText: string, chunks: RetrievedChunk[]): 
       if (asksFlow && ((payload.routes?.length ?? 0) > 0 || (payload.messageNames?.length ?? 0) > 0 || (payload.queueNames?.length ?? 0) > 0)) score += 30
       if (asksGlossary && (payload.evidenceTypes?.includes("documentation") || payload.filePath?.startsWith("vocabulary://"))) score += 22
       if (asksDiagram && /```mermaid|graph\s+(?:TD|TB|LR|RL)|flowchart/i.test(content)) score += 85
+      if (asksHowWorks && /mermaid|ZoomableMermaid|graph\s+(?:TD|TB|LR|RL)|flowchart/i.test(content)) score += 75
 
       for (const fact of payload.structuredFacts ?? []) {
         if (asksDb && fact.category === "database") score += 16
@@ -1595,7 +1597,7 @@ async function retrieveNeighborChunks(chunks: RetrievedChunk[], lineWindow = 90)
 async function retrieveAccountTypeFileChunks(chunks: RetrievedChunk[]): Promise<RetrievedChunk[]> {
   const fileKeys = unique(
     chunks
-      .filter(chunk => /accountTypes|accountTypesV2|type_name|platform_type|group_creation|MetaAccountType\.getPublicAccountTypes/i.test(chunk.payload.content ?? ""))
+      .filter(chunk => /accountTypes|accountTypesV2|type_name|platform_type|group_creation|MetaAccountType\.getPublicAccountTypes|"mindepo"|minFirstDepo/i.test(chunk.payload.content ?? ""))
       .filter(chunk => chunk.payload.repoName && chunk.payload.branchName && chunk.payload.filePath)
       .map(chunk => `${chunk.payload.repoName}|${chunk.payload.branchName}|${chunk.payload.filePath}`),
     20,
@@ -5015,10 +5017,25 @@ async function buildMermaidDiagramAnswer(chunks: RetrievedPayload[], question: s
     .filter(chunk => chunk.evidenceTypes?.includes("documentation"))
     .filter(chunk => /mermaid|graph\s+(?:TB|TD|LR|RL|BT)|flowchart|sequenceDiagram|ZoomableMermaid/i.test(chunk.content ?? ""))
 
+  // When asking how something works, proactively include diagrams.mdx chunks
+  // even if they didn't rank in the top vector results
+  const isIsignalQuestion = /\b(isignal|auto copy|copy signal|bot copy)\b/i.test(question)
+  const isChannelSubsQuestion = /\b(channel.?subs|channel subscription)\b/i.test(question)
+  const proactiveDiagramKeys: string[] = []
+  if (questionAsksHowWorks(question)) {
+    if (isIsignalQuestion || (!isChannelSubsQuestion)) {
+      proactiveDiagramKeys.push("isignal|docs|docs:isignal-docs\\architecture\\diagrams.mdx")
+    }
+    if (isChannelSubsQuestion) {
+      proactiveDiagramKeys.push("channel-subscription|docs|docs:channel-subs-docs\\architecture\\diagrams.mdx")
+    }
+  }
+
   const candidateFiles = unique(
-    docChunks
-      .map(chunk => [chunk.repoName, chunk.branchName, chunk.filePath].join("|"))
-      .filter(key => !key.includes("undefined")),
+    [
+      ...docChunks.map(chunk => [chunk.repoName, chunk.branchName, chunk.filePath].join("|")),
+      ...proactiveDiagramKeys,
+    ].filter(key => !key.includes("undefined")),
     8,
   )
 

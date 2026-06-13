@@ -9,9 +9,13 @@
  */
 
 import MiniSearch from "minisearch"
-import { qdrant } from "./qdrant.js"
+import { QdrantClient } from "@qdrant/js-client-rest"
 import { config } from "./config.js"
 import type { RetrievedPayload } from "../ask/types.js"
+
+// Dedicated client for BM25 scrolling — separate from the main qdrant client
+// to avoid ECONNRESET when both scroll and vector search run concurrently.
+const bm25QdrantClient = new QdrantClient({ url: config.qdrantUrl })
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type MiniSearchInstance = any
@@ -68,14 +72,14 @@ function makeEntry(id: string, payload: RetrievedPayload): BM25IndexEntry {
 
 async function getQdrantPointCount(): Promise<number> {
   try {
-    const info = await qdrant.getCollection(config.collectionName)
+    const info = await bm25QdrantClient.getCollection(config.collectionName)
     return info.points_count ?? 0
   } catch {
     return 0
   }
 }
 
-async function isCacheValid(pointCount: number): Promise<boolean> {
+async function isCacheValid(pointCount: number, skipPointCountCheck = false): Promise<boolean> {
   try {
     const { existsSync, readFileSync } = await import("node:fs")
     const { resolve } = await import("node:path")
@@ -84,11 +88,25 @@ async function isCacheValid(pointCount: number): Promise<boolean> {
     if (!existsSync(metaPath) || !existsSync(cachePath)) return false
     const meta = JSON.parse(readFileSync(metaPath, "utf8")) as { builtAt: number; pointCount: number }
     if (Date.now() - meta.builtAt > CACHE_MAX_AGE_MS) return false
+    if (skipPointCountCheck) return true  // trust cache when recently built
     const delta = Math.abs(pointCount - (meta.pointCount ?? 0))
     if (delta / Math.max(pointCount, 1) > 0.01) return false
     return true
   } catch {
     return false
+  }
+}
+
+async function getCacheAge(): Promise<number> {
+  try {
+    const { existsSync, readFileSync } = await import("node:fs")
+    const { resolve } = await import("node:path")
+    const metaPath = resolve(".data/bm25-index-meta.json")
+    if (!existsSync(metaPath)) return Infinity
+    const meta = JSON.parse(readFileSync(metaPath, "utf8")) as { builtAt: number }
+    return Date.now() - meta.builtAt
+  } catch {
+    return Infinity
   }
 }
 
@@ -125,7 +143,7 @@ async function buildIndex(): Promise<MiniSearchInstance> {
   let offset: string | number | Record<string, unknown> | null | undefined
 
   do {
-    const page = await qdrant.scroll(config.collectionName, {
+    const page = await bm25QdrantClient.scroll(config.collectionName, {
       limit: 512,
       with_payload: true,
       with_vector: false,
@@ -161,9 +179,13 @@ export async function getBM25Index(): Promise<MiniSearchInstance> {
   const now = Date.now()
   if (_index && now - _indexedAt < INDEX_TTL_MS) return _index
 
-  const pointCount = await getQdrantPointCount()
+  // Check cache age first without hitting Qdrant — only validate point count if cache is old
+  const cacheAge = await getCacheAge()
+  const cacheIsRecent = cacheAge < CACHE_MAX_AGE_MS / 2  // < 3h: trust without point count check
 
-  if (await isCacheValid(pointCount)) {
+  const pointCount = cacheIsRecent ? 0 : await getQdrantPointCount()
+
+  if (await isCacheValid(pointCount, cacheIsRecent)) {
     const cached = await loadCached()
     if (cached) {
       _index = cached
@@ -172,9 +194,10 @@ export async function getBM25Index(): Promise<MiniSearchInstance> {
     }
   }
 
+  const fullPointCount = pointCount || await getQdrantPointCount()
   _index = await buildIndex()
   _indexedAt = now
-  await saveToDisk(_index, pointCount)
+  await saveToDisk(_index, fullPointCount)
   return _index
 }
 

@@ -281,7 +281,7 @@ function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): 
   for (const chunk of chunks) {
     const content = chunk.content ?? ""
 
-    if (!/accountTypes|accountTypesV2|type_name|platform_type|group_creation|GetAccountTypes/i.test(content)) continue
+    if (!/accountTypes|accountTypesV2|type_name|platform_type|group_creation|GetAccountTypes|"mindepo"/i.test(content)) continue
 
     const source = `${chunk.repoName}@${chunk.branchName ?? "unknown"} ${chunk.filePath}:${chunk.startLine}-${chunk.endLine}`
     parseUnits.set(`chunk:${source}`, { content, source })
@@ -292,7 +292,7 @@ function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): 
   for (const chunk of chunks) {
     const content = chunk.content ?? ""
 
-    if (!/accountTypes|accountTypesV2|type_name|platform_type|group_creation/i.test(content)) continue
+    if (!/accountTypes|accountTypesV2|type_name|platform_type|group_creation|"mindepo"/i.test(content)) continue
 
     const key = `${chunk.repoName ?? "unknown"}|${chunk.branchName ?? "unknown"}|${chunk.filePath ?? "unknown"}`
     candidateFileKeys.add(key)
@@ -343,7 +343,7 @@ function extractAccountTypeFacts(chunks: RetrievedPayload[], question: string): 
 
   for (const { content, source } of parseUnits.values()) {
     for (const fact of extractSimpleAccountTypeFactsFromContent(content, source)) {
-      if (wantedPlatform) continue
+      // Simple facts don't have platform info — only skip if broker filter mismatches
       if (wantedBroker && fact.broker !== "unknown" && fact.broker !== wantedBroker) continue
       facts.push(fact)
     }
@@ -554,7 +554,21 @@ export function buildAccountTypeGlossaryAnswer(
     : wantedBroker === "mrg" ? "MRG" : wantedBroker === "askap" ? "MMB/Askap" : "broker"
   const visible = facts.filter(fact => fact.show !== "0")
   const hidden = facts.filter(fact => fact.show === "0")
-  const primaryFacts = visible.length > 0 ? visible : facts
+  const allFacts = visible.length > 0 ? visible : facts
+  // Dedup: prefer complex facts (with platform_type/groupCreation) over simple ones with same name+id
+  // Sort complex first so they win dedup
+  const sortedFacts = [...allFacts].sort((a, b) => {
+    const aComplex = a.platformType || a.groupCreation ? 1 : 0
+    const bComplex = b.platformType || b.groupCreation ? 1 : 0
+    return bComplex - aComplex
+  })
+  const seenKeys = new Set<string>()
+  const primaryFacts = sortedFacts.filter(fact => {
+    const key = `${fact.name.toLowerCase()}|${fact.id ?? ""}`
+    if (seenKeys.has(key)) return false
+    seenKeys.add(key)
+    return true
+  })
 
   function describeFact(fact: AccountTypeFact): string {
     const details = [
