@@ -243,7 +243,24 @@ async function upsertChunk(chunk: CodeChunk): Promise<void> {
     chunk.content,
   ].join("\n")
 
-  const vector = await createEmbedding(embeddingInput)
+  // nomic-embed-text has an 8192 token context limit. Try progressively smaller
+  // slices until the embedding succeeds, to handle large PHP/generated files.
+  let vector: number[] = []
+  const caps = [8000, 4000, 2000]
+  let succeeded = false
+  for (const cap of caps) {
+    const input = embeddingInput.length > cap ? embeddingInput.slice(0, cap) : embeddingInput
+    try {
+      vector = await createEmbedding(input)
+      succeeded = true
+      break
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!msg.includes("context length") || cap === caps[caps.length - 1]) throw err
+      // else try next smaller cap
+    }
+  }
+  if (!succeeded) throw new Error("Failed to embed chunk at any truncation level")
 
   try {
     await qdrant.upsert(config.collectionName, {

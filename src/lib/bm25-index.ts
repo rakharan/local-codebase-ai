@@ -4,8 +4,8 @@
  * Builds an in-memory index from Qdrant payload fields that are useful for
  * exact identifier queries (symbol names, table names, queue names, file paths).
  *
- * Used by ask.ts to fast-path queries that contain exact identifiers before
- * falling back to vector search.
+ * Persists the index to disk (.data/bm25-index.json) so subsequent process
+ * starts load in <1s instead of scrolling 152k Qdrant points (~60s cold build).
  */
 
 import MiniSearch from "minisearch"
@@ -23,18 +23,30 @@ export type BM25IndexEntry = {
   filePath: string
   startLine: number
   endLine: number
-  symbolName: string   // symbolName from new chunker (may be empty)
-  symbols: string      // space-joined symbols from relationshipHints
-  tables: string       // space-joined dbTables
-  queues: string       // space-joined queueNames
-  routes: string       // space-joined routes
-  content: string      // first 500 chars of content (for term matching)
+  symbolName: string
+  symbols: string
+  tables: string
+  queues: string
+  routes: string
+  content: string
   chunkType: string
 }
 
+const CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000  // 6 hours
+
 let _index: MiniSearchInstance | null = null
 let _indexedAt: number = 0
-const INDEX_TTL_MS = 10 * 60 * 1000  // rebuild after 10 min
+const INDEX_TTL_MS = 10 * 60 * 1000
+
+const MINISEARCH_OPTS = {
+  fields: ["symbolName", "symbols", "tables", "queues", "routes", "filePath", "content"],
+  storeFields: ["id", "repoName", "branchName", "filePath", "startLine", "endLine", "chunkType", "symbolName"],
+  searchOptions: {
+    boost: { symbolName: 4, symbols: 3, tables: 3, queues: 3, routes: 2, filePath: 1.5, content: 1 },
+    fuzzy: 0.1,
+    prefix: true,
+  },
+}
 
 function makeEntry(id: string, payload: RetrievedPayload): BM25IndexEntry {
   return {
@@ -54,18 +66,62 @@ function makeEntry(id: string, payload: RetrievedPayload): BM25IndexEntry {
   }
 }
 
-async function buildIndex(): Promise<MiniSearchInstance> {
-  const index = new (MiniSearch as unknown as new (opts: object) => MiniSearchInstance)({
-    fields: ["symbolName", "symbols", "tables", "queues", "routes", "filePath", "content"],
-    storeFields: ["id", "repoName", "branchName", "filePath", "startLine", "endLine", "chunkType", "symbolName"],
-    searchOptions: {
-      boost: { symbolName: 4, symbols: 3, tables: 3, queues: 3, routes: 2, filePath: 1.5, content: 1 },
-      fuzzy: 0.1,
-      prefix: true,
-    },
-  })
+async function getQdrantPointCount(): Promise<number> {
+  try {
+    const info = await qdrant.getCollection(config.collectionName)
+    return info.points_count ?? 0
+  } catch {
+    return 0
+  }
+}
 
-  const docs: BM25IndexEntry[] = []
+async function isCacheValid(pointCount: number): Promise<boolean> {
+  try {
+    const { existsSync, readFileSync } = await import("node:fs")
+    const { resolve } = await import("node:path")
+    const metaPath = resolve(".data/bm25-index-meta.json")
+    const cachePath = resolve(".data/bm25-index.json")
+    if (!existsSync(metaPath) || !existsSync(cachePath)) return false
+    const meta = JSON.parse(readFileSync(metaPath, "utf8")) as { builtAt: number; pointCount: number }
+    if (Date.now() - meta.builtAt > CACHE_MAX_AGE_MS) return false
+    const delta = Math.abs(pointCount - (meta.pointCount ?? 0))
+    if (delta / Math.max(pointCount, 1) > 0.01) return false
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function loadCached(): Promise<MiniSearchInstance | null> {
+  try {
+    const { existsSync, readFileSync } = await import("node:fs")
+    const { resolve } = await import("node:path")
+    const cachePath = resolve(".data/bm25-index.json")
+    if (!existsSync(cachePath)) return null
+    const json = readFileSync(cachePath, "utf8")
+    return (MiniSearch as unknown as { loadJSON: (json: string, opts: object) => MiniSearchInstance }).loadJSON(json, MINISEARCH_OPTS)
+  } catch {
+    return null
+  }
+}
+
+async function saveToDisk(index: MiniSearchInstance, pointCount: number): Promise<void> {
+  try {
+    const { mkdirSync, writeFileSync } = await import("node:fs")
+    const { resolve, dirname } = await import("node:path")
+    const cachePath = resolve(".data/bm25-index.json")
+    const metaPath = resolve(".data/bm25-index-meta.json")
+    mkdirSync(dirname(cachePath), { recursive: true })
+    writeFileSync(cachePath, JSON.stringify(index.toJSON()), "utf8")
+    writeFileSync(metaPath, JSON.stringify({ builtAt: Date.now(), pointCount }), "utf8")
+  } catch {
+    // non-fatal
+  }
+}
+
+async function buildIndex(): Promise<MiniSearchInstance> {
+  const index = new (MiniSearch as unknown as new (opts: object) => MiniSearchInstance)(MINISEARCH_OPTS)
+  const seen = new Set<string>()
   let offset: string | number | Record<string, unknown> | null | undefined
 
   do {
@@ -79,13 +135,25 @@ async function buildIndex(): Promise<MiniSearchInstance> {
     for (const point of page.points) {
       const payload = point.payload as RetrievedPayload | null | undefined
       if (!payload?.content) continue
-      docs.push(makeEntry(String(point.id), payload))
+      const hasIdentifiers = (payload.symbols?.length ?? 0) > 0
+        || (payload.dbTables?.length ?? 0) > 0
+        || (payload.queueNames?.length ?? 0) > 0
+        || (payload.routes?.length ?? 0) > 0
+        || (payload as Record<string, unknown>).symbolName
+      if (!hasIdentifiers) continue
+      const id = String(point.id)
+      if (seen.has(id)) continue
+      seen.add(id)
+      try {
+        index.add(makeEntry(id, payload))
+      } catch {
+        // skip docs that cause MiniSearch to throw
+      }
     }
 
     offset = page.next_page_offset
   } while (offset)
 
-  index.addAll(docs)
   return index
 }
 
@@ -93,14 +161,25 @@ export async function getBM25Index(): Promise<MiniSearchInstance> {
   const now = Date.now()
   if (_index && now - _indexedAt < INDEX_TTL_MS) return _index
 
+  const pointCount = await getQdrantPointCount()
+
+  if (await isCacheValid(pointCount)) {
+    const cached = await loadCached()
+    if (cached) {
+      _index = cached
+      _indexedAt = now
+      return _index
+    }
+  }
+
   _index = await buildIndex()
   _indexedAt = now
+  await saveToDisk(_index, pointCount)
   return _index
 }
 
 /**
  * Search the BM25 index for exact/near-exact identifier matches.
- * Returns chunk IDs sorted by BM25 score, best first.
  */
 export async function bm25Search(
   query: string,
@@ -125,18 +204,12 @@ export async function bm25Search(
 }
 
 /**
- * Returns true if the query looks like an exact identifier query —
- * contains a camelCase symbol, snake_case table name, queue name, or route path.
+ * Returns true if the query looks like an exact identifier query.
  */
 export function isIdentifierQuery(query: string): boolean {
-  // camelCase symbol: e.g. UploadKYCAsync, getTradersAsync
   if (/[a-z][A-Z]/.test(query)) return true
-  // snake_case table: e.g. dsc_signals, traders_details
   if (/\b[a-z][a-z0-9]+_[a-z][a-z0-9_]+\b/.test(query)) return true
-  // queue name pattern: pubsub-*, queue.*, *.queue
   if (/pubsub-|\.queue|queue\.|\.exchange|exchange\./i.test(query)) return true
-  // route path
   if (/\/[a-z]/.test(query)) return true
-
   return false
 }

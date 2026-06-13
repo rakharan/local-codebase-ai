@@ -197,15 +197,20 @@ async function retrieve(queryText: string, resultLimit: number): Promise<Retriev
     // fetch Qdrant payloads for BM25 hits not already in vector results
     const missingIds = bm25Results.map(r => r.id).filter(id => !vectorIds.has(id))
     if (missingIds.length > 0) {
-      const extra = await qdrant.retrieve(config.collectionName, {
-        ids: missingIds,
-        with_payload: true,
-      })
-      for (const point of extra) {
-        const payload = point.payload as RetrievedPayload
-        if (payload?.content) {
-          chunks.push({ id: String(point.id), payload })
+      try {
+        const extra = await qdrant.retrieve(config.collectionName, {
+          ids: missingIds,
+          with_payload: true,
+        })
+        for (const point of extra) {
+          const payload = point.payload as RetrievedPayload
+          if (payload?.content) {
+            chunks.push({ id: String(point.id), payload })
+          }
         }
+      } catch (err) {
+        // BM25 retrieve failed (e.g. ECONNRESET during index warm-up) — degrade gracefully
+        console.error("BM25 retrieve failed, skipping BM25 boost:", err instanceof Error ? err.message : err)
       }
     }
 
@@ -5352,13 +5357,18 @@ async function main() {
     ? await (async () => {
         const bm25Results = await bm25Search(symbolIdentifiers.join(" "), 8)
         if (bm25Results.length === 0) return []
-        const points = await qdrant.retrieve(config.collectionName, {
-          ids: bm25Results.map(r => r.id),
-          with_payload: true,
-        })
-        return points
-          .map(p => ({ id: String(p.id), payload: p.payload as RetrievedPayload }))
-          .filter(c => c.payload.content)
+        try {
+          const points = await qdrant.retrieve(config.collectionName, {
+            ids: bm25Results.map(r => r.id),
+            with_payload: true,
+          })
+          return points
+            .map(p => ({ id: String(p.id), payload: p.payload as RetrievedPayload }))
+            .filter(c => c.payload.content)
+        } catch (err) {
+          console.error("BM25 symbol retrieve failed:", err instanceof Error ? err.message : err)
+          return []
+        }
       })()
     : []
   const questionHints = extractQuestionHints(question)
@@ -5835,10 +5845,15 @@ async function main() {
         if (routeSegments.length === 0) return []
         const bm25Hits = await bm25Search(routeSegments.join(" "), 16)
         if (bm25Hits.length === 0) return []
-        const points = await qdrant.retrieve(config.collectionName, { ids: bm25Hits.map(r => r.id), with_payload: true })
-        return points
-          .map(p => ({ id: String(p.id), payload: p.payload as RetrievedPayload }))
-          .filter(c => c.payload.content && c.payload.content.includes("Helper::requestAPI"))
+        try {
+          const points = await qdrant.retrieve(config.collectionName, { ids: bm25Hits.map(r => r.id), with_payload: true })
+          return points
+            .map(p => ({ id: String(p.id), payload: p.payload as RetrievedPayload }))
+            .filter(c => c.payload.content && c.payload.content.includes("Helper::requestAPI"))
+        } catch (err) {
+          console.error("BM25 PHP caller retrieve failed:", err instanceof Error ? err.message : err)
+          return []
+        }
       })()
     : []
   const upstreamFacts = extractUpstreamRouteCallerFacts(

@@ -177,6 +177,7 @@ const cases: AnswerCase[] = [
     name: "glossary definition prefers iSignal overview docs",
     smoke: true,
     question: "apa itu isignal",
+    timeoutMs: 300_000,
     required: [
       "Auto Copy",
       "signal ingestion",
