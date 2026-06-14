@@ -1468,6 +1468,36 @@ source: brain_dump
 </div>
 
 <script>
+// --- Auth helper ---
+// Stores APP_API_KEY in localStorage. All API calls go through apiFetch.
+function getApiKey() { return localStorage.getItem('app_api_key') || ''; }
+function setApiKey(key) { localStorage.setItem('app_api_key', key); }
+
+async function apiFetch(url, options = {}) {
+  const key = getApiKey();
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  if (key) headers['Authorization'] = `Bearer ${key}`;
+  const res = await fetch(url, { ...options, headers });
+  if (res.status === 401) {
+    const k = prompt('API key required. Enter your APP_API_KEY:');
+    if (k) { setApiKey(k); return apiFetch(url, options); }
+  }
+  return res;
+}
+
+// Check if auth is required on load and prompt if key not set
+async function checkAuth() {
+  try {
+    const res = await apiFetch('/api/auth-required');
+    const { required } = await res.json();
+    if (required && !getApiKey()) {
+      const k = prompt('This server requires an API key. Enter your APP_API_KEY:');
+      if (k) setApiKey(k);
+    }
+  } catch { /* ignore */ }
+}
+checkAuth();
+
 const questionInput = document.getElementById('questionInput');
 const sendBtn = document.getElementById('sendBtn');
 const chatMessages = document.getElementById('chatMessages');
@@ -1702,7 +1732,7 @@ async function loadIndexSummary() {
   indexSummaryRows.innerHTML = '<tr><td colspan="13" class="manager-muted">Loading...</td></tr>';
 
   try {
-    const res = await fetch('/api/index/summary');
+    const res = await apiFetch('/api/index/summary');
     const data = await res.json();
 
     if (!res.ok) throw new Error(data.error || 'Failed to load index summary');
@@ -1753,7 +1783,7 @@ async function deleteIndexScope(repoName, branchName) {
   managerStatus.textContent = `Deleting ${scope}...`;
 
   try {
-    const res = await fetch('/api/index/repo', {
+    const res = await apiFetch('/api/index/repo', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ repoName, branchName }),
@@ -1834,7 +1864,7 @@ async function runDoctorFromUi() {
   managerStatus.textContent = 'Doctor analysis started.';
 
   try {
-    const res = await fetch('/api/doctor/run', {
+    const res = await apiFetch('/api/doctor/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -1871,7 +1901,7 @@ async function runIndexRequest(url, body, label) {
   managerStatus.textContent = `${label} started. This can take a while; keep this tab open.`;
 
   try {
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -1993,7 +2023,7 @@ async function loadRegistry() {
   registryList.innerHTML = '<div class="manager-muted">Loading registry...</div>';
 
   try {
-    const res = await fetch('/api/registry');
+    const res = await apiFetch('/api/registry');
     const data = await res.json();
 
     if (!res.ok) throw new Error(data.error || 'Failed to load registry');
@@ -2145,7 +2175,7 @@ async function saveRegistryEntry() {
   registryStatus.textContent = editingRegistryEntryName ? 'Updating registry entry...' : 'Saving registry entry...';
 
   try {
-    const res = await fetch('/api/registry/entries', {
+    const res = await apiFetch('/api/registry/entries', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(entry),
@@ -2239,7 +2269,7 @@ async function loadKnowledgeNotes() {
   knowledgeNotesList.innerHTML = '<div class="manager-muted">Loading notes...</div>';
 
   try {
-    const res = await fetch('/api/knowledge/notes');
+    const res = await apiFetch('/api/knowledge/notes');
     const data = await res.json();
 
     if (!res.ok) throw new Error(data.error || 'Failed to load notes');
@@ -2367,7 +2397,7 @@ async function loadAnswerFeedback() {
   answerFeedbackList.innerHTML = '<div class="manager-muted">Loading feedback...</div>';
 
   try {
-    const res = await fetch('/api/feedback');
+    const res = await apiFetch('/api/feedback');
     const data = await res.json();
 
     if (!res.ok) throw new Error(data.error || 'Failed to load feedback');
@@ -2522,7 +2552,7 @@ async function runEvaluationSuite(suite) {
   evalOutput.textContent = 'Evaluation is running. This can take several minutes.';
 
   try {
-    const res = await fetch('/api/eval/run', {
+    const res = await apiFetch('/api/eval/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ suite }),
@@ -2763,7 +2793,7 @@ async function sendFeedback(messageIndex, rating) {
   renderMessages();
 
   try {
-    const res = await fetch('/api/feedback', {
+    const res = await apiFetch('/api/feedback', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2821,7 +2851,7 @@ async function ask() {
   }));
 
   try {
-    const res = await fetch('/api/ask', {
+    const res = await apiFetch('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question, repoName, project, branch, serviceType, chatModel, deep, history: historyForApi }),
@@ -2874,7 +2904,7 @@ async function loadAnalytics() {
   dashboard.innerHTML = '';
 
   try {
-    const res = await fetch('/api/decisions/analytics');
+    const res = await apiFetch('/api/decisions/analytics');
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to load analytics');
     status.textContent = '';
@@ -2967,7 +2997,7 @@ async function loadDrafts() {
   draftsList.innerHTML = '<div class="manager-muted">Loading...</div>';
 
   try {
-    const res = await fetch('/api/drafts');
+    const res = await apiFetch('/api/drafts');
     const data = await res.json();
 
     if (!res.ok) throw new Error(data.error || 'Failed to load drafts');
@@ -3031,7 +3061,7 @@ async function saveDraft() {
   draftsStatus.textContent = 'Saving draft...';
 
   try {
-    const res = await fetch('/api/drafts', {
+    const res = await apiFetch('/api/drafts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fileName, content }),
@@ -3518,7 +3548,7 @@ async function loadCoverage() {
   dashboard.innerHTML = '';
 
   try {
-    const res = await fetch('/api/index/coverage');
+    const res = await apiFetch('/api/index/coverage');
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to load coverage');
     status.textContent = '';

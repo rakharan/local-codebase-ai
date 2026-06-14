@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import express from "express"
+import rateLimit from "express-rate-limit"
 import { config } from "./lib/config.js"
 import { ensureCollection, qdrant } from "./lib/qdrant.js"
 import { deleteRelationshipGraphForScope, readRelationshipGraph } from "./lib/graph.js"
@@ -58,6 +59,35 @@ const publicDir = path.join(rootDir, "public")
 const app = express()
 app.use(express.json())
 app.use(express.static(publicDir))
+
+// --- Rate limiting ---
+// 60 requests per minute per IP on all /api/* routes
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests — please slow down." },
+})
+app.use("/api/", apiLimiter)
+
+// --- API key authentication ---
+// Set APP_API_KEY in .env to enable. Leave unset to allow all (dev mode).
+const APP_API_KEY = process.env.APP_API_KEY?.trim()
+if (APP_API_KEY) {
+  app.use("/api/", (request, response, next) => {
+    const authHeader = request.headers["authorization"] ?? ""
+    const provided = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader
+    if (provided !== APP_API_KEY) {
+      response.status(401).json({ error: "Unauthorized — provide a valid APP_API_KEY in Authorization header." })
+      return
+    }
+    next()
+  })
+  console.log("🔒 API key authentication enabled.")
+} else {
+  console.log("⚠️  No APP_API_KEY set — running in open mode (dev/internal only).")
+}
 
 type HistoryMessage = {
   role: "user" | "assistant"
@@ -1239,6 +1269,10 @@ app.post("/api/decisions/:filename/rollback/:versionId", async (request, respons
 
 app.get("/api/health", (_request, response) => {
   response.json({ status: "ok" })
+})
+
+app.get("/api/auth-required", (_request, response) => {
+  response.json({ required: Boolean(APP_API_KEY) })
 })
 
 const port = Number(process.env.PORT ?? 9191)
