@@ -451,6 +451,73 @@ app.post("/api/ask", async (request, response) => {
   }
 })
 
+// SSE streaming endpoint — sends progress events while ask.ts runs
+app.post("/api/ask/stream", (request, response) => {
+  const body = request.body as AskBody
+  const question = body.question?.trim()
+
+  if (!question) {
+    response.status(400).json({ error: "Missing required field: question" })
+    return
+  }
+
+  // Set up SSE headers
+  response.setHeader("Content-Type", "text/event-stream")
+  response.setHeader("Cache-Control", "no-cache")
+  response.setHeader("Connection", "keep-alive")
+  response.flushHeaders()
+
+  const sendEvent = (data: object) => {
+    response.write(`data: ${JSON.stringify(data)}\n\n`)
+  }
+
+  sendEvent({ type: "thinking" })
+
+  const args = ["--import", "./register-ts-node.mjs", "src/ask.ts", question]
+  if (body.limit) args.push("--limit", String(body.limit))
+  if (body.deep) args.push("--deep")
+  if (body.chatModel?.trim()) args.push("--chat-model", body.chatModel.trim())
+  if (body.repoName) args.push("--repo-name", body.repoName)
+  if (body.project) args.push("--project", body.project)
+  if (body.branch) args.push("--branch", body.branch)
+  if (body.serviceType) args.push("--service-type", body.serviceType)
+  if (body.history && body.history.length > 0) args.push("--history", JSON.stringify(body.history))
+
+  let stdout = ""
+  let stderr = ""
+
+  const child = execFile(process.execPath, args, {
+    cwd: rootDir,
+    timeout: body.deep ? 900_000 : 600_000,
+    maxBuffer: 10 * 1024 * 1024,
+    windowsHide: true,
+  }, (error, out, err) => {
+    stdout = out ?? ""
+    stderr = err ?? ""
+
+    if (error) {
+      sendEvent({ type: "error", error: error.message, raw: [out, err].filter(Boolean).join("\n") })
+    } else {
+      const result = parseAskOutput([stdout, stderr].filter(Boolean).join("\n"))
+      sendEvent({ type: "answer", ...result })
+    }
+    response.end()
+  })
+
+  // Stream stdout lines as progress events
+  child.stdout?.on("data", (chunk: Buffer) => {
+    const lines = chunk.toString().split("\n").filter(l => l.trim())
+    for (const line of lines) {
+      if (line.startsWith("BM25") || line.startsWith("◇")) continue // skip internal logs
+      sendEvent({ type: "progress", text: line })
+    }
+  })
+
+  request.on("close", () => {
+    if (!child.killed) child.kill()
+  })
+})
+
 // Coverage map — compares config/services.json repos against indexed source code repos
 app.get("/api/index/coverage", async (_request, response) => {
   try {
