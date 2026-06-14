@@ -936,6 +936,14 @@
     flex: 1;
     word-break: break-word;
   }
+  .source-link {
+    flex: 1;
+    word-break: break-word;
+    color: #58a6ff;
+    text-decoration: none;
+    font-size: inherit;
+  }
+  .source-link:hover { text-decoration: underline; }
   .feedback-row {
     display: flex;
     gap: 8px;
@@ -1530,8 +1538,18 @@ let answerFeedbackFilter = 'bad';
 let drafts = [];
 let decisions = [];
 
-// In-memory conversation history
+// In-memory conversation history — persisted to localStorage
 let messages = [];
+
+// Load saved messages on startup
+try {
+  const saved = localStorage.getItem('chat_messages');
+  if (saved) messages = JSON.parse(saved);
+} catch { messages = []; }
+
+function saveMessages() {
+  try { localStorage.setItem('chat_messages', JSON.stringify(messages.slice(-50))); } catch { }
+}
 
 if (window.mermaid) {
   mermaid.initialize({
@@ -1651,6 +1669,24 @@ function setQuestion(q) {
 function escapeHtml(text) {
   if (!text) return '';
   const div = document.createElement('div');
+
+function makeVsCodeLink(source) {
+  // Source format: "repoName@branch [serviceType] filePath:startLine-endLine (evidenceTypes)"
+  // Extract filePath and line number
+  try {
+    const match = source.match(/\]\s+([^\s:]+):(\d+)/);
+    if (!match) return null;
+    const filePath = match[1];
+    const line = match[2];
+    // Map known repos to local paths
+    const repoMatch = source.match(/^([^@]+)@/);
+    if (!repoMatch) return null;
+    const repoName = repoMatch[1];
+    const repoBase = `C:/GIT/work/${repoName}`;
+    const fullPath = `${repoBase}/${filePath}`;
+    return `vscode://file/${fullPath}:${line}`;
+  } catch { return null; }
+}
   div.textContent = text;
   return div.innerHTML;
 }
@@ -2683,6 +2719,7 @@ async function renderMermaidDiagrams() {
 function newChat() {
   showChat();
   messages = [];
+  saveMessages();
   questionInput.value = '';
   questionInput.style.height = 'auto';
   questionInput.focus();
@@ -2736,12 +2773,19 @@ function renderMessages() {
         sourcesHtml = `
           <div class="sources-section">
             <div class="sources-title">Sources (${msg.sources.length})</div>
-            ${msg.sources.map((s, i) => `
+            ${msg.sources.map((s, i) => {
+              // Try to make source clickable via VS Code
+              // Source format: "repoName@branch filePath:startLine-endLine"
+              const vsCodeLink = makeVsCodeLink(s);
+              const content = vsCodeLink
+                ? `<a href="${vsCodeLink}" class="source-link" title="Open in VS Code">${escapeHtml(s)}</a>`
+                : `<span class="source-item-content">${escapeHtml(s)}</span>`;
+              return `
               <div class="source-item">
                 <span class="source-item-index">${i + 1}.</span>
-                <span class="source-item-content">${escapeHtml(s)}</span>
-              </div>
-            `).join('')}
+                ${content}
+              </div>`;
+            }).join('')}
           </div>
         `;
       }
@@ -2832,6 +2876,7 @@ async function ask() {
 
   // Add user message
   messages.push({ role: 'user', content: question });
+  saveMessages();
   renderMessages();
 
   // Clear input
@@ -2875,6 +2920,7 @@ async function ask() {
         sources: data.sources || [],
       });
     }
+    saveMessages();
   } catch (err) {
     messages.push({
       role: 'assistant',
@@ -2882,6 +2928,7 @@ async function ask() {
       question,
       sources: [],
     });
+    saveMessages();
   } finally {
     sendBtn.disabled = false;
     loadingIndicator.classList.remove('active');
