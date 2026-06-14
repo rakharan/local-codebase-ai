@@ -10,3 +10,9 @@ repo-docs-*/
 
 # Temp test output
 .tmp-doctor-test
+
+# Personal/planning files
+9router.cmd
+local-codebase-ai-phase5.docx
+local-codebase-ai-plan-v2.md
+local-codebase-ai-plan.docx

@@ -44,6 +44,7 @@ async function testBasicRun(): Promise<void> {
   const files = await fs.readdir(TMP_OUT);
   assert(files.includes('overview.md'), 'Has overview.md');
   assert(files.includes('services.md'), 'Has services.md');
+  assert(files.includes('config.md'), 'Has config.md');
   assert(files.includes('api.md'), 'Has api.md');
   console.log('  ✓ passed');
 }
@@ -58,6 +59,7 @@ async function testJsonOutput(): Promise<void> {
   assert(report.summary.serviceCount === 1, 'JSON has correct service count');
   assert(Array.isArray(report.apiRoutes), 'JSON has apiRoutes array');
   assert(Array.isArray(report.envVars), 'JSON has envVars array');
+  assert(Array.isArray(report.configDefaults), 'JSON has configDefaults array');
   assert(Array.isArray(report.rabbitMq), 'JSON has rabbitMq array');
   assert(Array.isArray(report.database), 'JSON has database array');
 

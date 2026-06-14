@@ -19,7 +19,7 @@ It indexes source files and documentation from local repositories, embeds chunks
 Default models:
 
 - Embeddings: `nomic-embed-text`
-- Chat: `qwen2.5-coder:3b`
+- Chat: `qwen3:8b`
 
 ## Setup
 
@@ -27,7 +27,7 @@ Default models:
 npm install
 docker compose up -d
 ollama pull nomic-embed-text
-ollama pull qwen2.5-coder:3b
+ollama pull qwen3:8b
 ```
 
 Optional environment variables:
@@ -37,7 +37,7 @@ $env:QDRANT_URL="http://localhost:6333"
 $env:OLLAMA_URL="http://localhost:11434"
 $env:QDRANT_COLLECTION="code_chunks"
 $env:EMBEDDING_MODEL="nomic-embed-text"
-$env:CHAT_MODEL="qwen2.5-coder:3b"
+$env:CHAT_MODEL="qwen3:8b"
 $env:VECTOR_SIZE="768"
 ```
 
@@ -164,7 +164,16 @@ Limit retrieved chunks:
 npm run ask -- "What database tables are used by request account flow?" --limit 12
 ```
 
+Override the chat model for one CLI question:
+
+```powershell
+npm run ask -- "apa itu iSignal?" --chat-model qwen3:8b
+npm run ask -- "apa itu iSignal?" --chat-model qwen2.5-coder:3b
+```
+
 `ask` detects the preferred answer language with the local Ollama chat model and falls back to a small local heuristic if detection is unavailable. This only affects presentation; retrieval, source paths, identifiers, and evidence rules stay unchanged.
+
+The web UI also includes a chat model field in Filters. The value is passed per request, so you can compare models without editing source files or restarting the server.
 
 Start the local web UI:
 
@@ -186,6 +195,25 @@ After indexing the sample repos you care about, run:
 npm run test:answers
 ```
 
+By default this runs the smoke suite: a representative set of high-value cases that should finish quickly enough for normal development.
+
+The answer regression runner defaults to `qwen2.5-coder:3b` for speed even if the application default chat model is `qwen3:8b`. Set `ANSWER_TEST_CHAT_MODEL` or pass `--chat-model` to change it.
+
+Use a specific chat model for the regression run:
+
+```powershell
+npm run test:answers -- --chat-model qwen2.5-coder:3b
+npm run test:answers -- --chat-model qwen3:8b --grep "minimum equity"
+```
+
+Run the full suite intentionally when you have time:
+
+```powershell
+npm run test:answers:full -- --chat-model qwen2.5-coder:3b
+```
+
+`qwen3:8b` can be much slower than `qwen2.5-coder:3b` on the full suite. For day-to-day safety checks, run the smoke suite and use `--grep` for targeted qwen3 verification.
+
 This executes known CLI questions and checks that important evidence strings still appear in the answer. The current cases cover:
 
 - exact endpoint detail lookup for `/mrg/api/v1/deposit/demo/`
@@ -194,6 +222,14 @@ This executes known CLI questions and checks that important evidence strings sti
 - broad `ims-tf` request-account-demo flow discovery, including typo tolerance
 
 These tests require Ollama, Qdrant, and the relevant indexed repos/chunks to be available.
+
+To compare answer quality across local Ollama models, run:
+
+```powershell
+npm run eval:models -- --models qwen2.5-coder:3b,qwen3:8b
+```
+
+The report is saved to `.data/model-eval.json`.
 
 ## Incremental Indexing
 
@@ -339,11 +375,14 @@ npm run doctor -- ./services --output ./repo-docs
 | `overview.md` | Entry point with summary counts and links |
 | `services.md` | Package metadata and dependencies |
 | `env.md` | Environment variables detected in source |
+| `config.md` | Environment-backed configuration defaults and likely business-rule thresholds |
 | `api.md` | HTTP API routes (Express, Fastify) |
 | `rabbitmq.md` | Queues, exchanges, and messaging patterns |
 | `database.md` | SQL tables, TypeORM entities, repositories |
 | `architecture.md` | Mermaid architecture diagrams |
 | `report.json` | Machine-readable report (with `--json`) |
+
+When `report.json` is indexed with `npm run index-doctor`, Repo Doctor also creates direct fact chunks for config defaults such as `process.env.AUTO_COPY_MINIMUM_EQUITY || "1000"`. These facts are useful for questions about implicit business rules, thresholds, limits, and feature flags. Runtime environment values can still override the fallback values found in source.
 
 ### CLI Options
 

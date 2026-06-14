@@ -1,6 +1,7 @@
 import {
   buildServiceChunks,
   buildEnvChunks,
+  buildConfigDefaultChunks,
   buildApiRouteChunks,
   buildRabbitMqChunks,
   buildDatabaseChunks,
@@ -13,6 +14,7 @@ function runTests(): void {
 
   testServiceChunks();
   testEnvChunks();
+  testConfigDefaultChunks();
   testApiRouteChunks();
   testRabbitMqChunks();
   testDatabaseChunks();
@@ -21,6 +23,31 @@ function runTests(): void {
   testEmptyReport();
 
   console.log('✅ All doctor-report-chunks tests passed!');
+}
+
+function testConfigDefaultChunks(): void {
+  console.log('Test: config default chunks');
+  const report = makeReport({
+    configDefaults: [
+      {
+        envName: 'AUTO_COPY_MINIMUM_EQUITY',
+        defaultValue: '1000',
+        operator: '||',
+        sourcePath: 'models/ois.js',
+        line: 12,
+        expression: 'process.env.AUTO_COPY_MINIMUM_EQUITY || "1000"',
+        businessRuleCandidate: true,
+        confidence: 'high',
+      },
+    ],
+  });
+  const chunks = buildConfigDefaultChunks(report, 'tf2-ois');
+  assert(chunks.length === 1, `Expected 1, got ${chunks.length}`);
+  assert(chunks[0]!.content.includes('AUTO_COPY_MINIMUM_EQUITY'), 'Has config env name');
+  assert(chunks[0]!.content.includes('1000'), 'Has fallback value');
+  assert(chunks[0]!.content.includes('Business-rule candidate: yes'), 'Has business rule marker');
+  assert(chunks[0]!.filePath.includes('doctor-fact:config:'), 'filePath has fact prefix');
+  console.log('  âœ“ passed');
 }
 
 function testServiceChunks(): void {
@@ -111,12 +138,13 @@ function testFullReport(): void {
   const report = makeReport({
     services: [{ metadata: [{ value: 'Package name: svc', confidence: 'high' }], dependencies: [], scripts: [] }],
     envVars: [{ name: 'X', sourcePath: 'a.ts', line: 1, confidence: 'high' }],
+    configDefaults: [{ envName: 'CFG', defaultValue: 'x', operator: '??', sourcePath: 'a.ts', line: 1, expression: 'process.env.CFG ?? "x"', businessRuleCandidate: false, confidence: 'high' }],
     apiRoutes: [{ method: 'GET', path: '/', sourcePath: 'b.ts', line: 2, framework: 'express', confidence: 'high' }],
     rabbitMq: [{ name: 'q', messageType: 'queue', operation: 'assert', sourcePath: 'c.ts', line: 3, confidence: 'medium' }],
     database: [{ name: 't', kind: 'table', operation: 'insert', sourcePath: 'd.ts', line: 4, confidence: 'high' }],
   });
   const chunks = buildReportChunks(report, 'svc');
-  assert(chunks.length === 5, `Expected 5, got ${chunks.length}`);
+  assert(chunks.length === 6, `Expected 6, got ${chunks.length}`);
   console.log('  ✓ passed');
 }
 
@@ -143,10 +171,11 @@ function makeReport(partial: Partial<DoctorReport>): DoctorReport {
   return {
     services: [],
     envVars: [],
+    configDefaults: [],
     apiRoutes: [],
     rabbitMq: [],
     database: [],
-    summary: { serviceCount: 0, envVarCount: 0, apiRouteCount: 0, rabbitMqCount: 0, databaseCount: 0, filesScanned: 0 },
+    summary: { serviceCount: 0, envVarCount: 0, configDefaultCount: 0, apiRouteCount: 0, rabbitMqCount: 0, databaseCount: 0, filesScanned: 0 },
     ...partial,
   };
 }

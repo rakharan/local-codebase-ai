@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Local Codebase AI</title>
+<title>CodebaseAI — Internal Knowledge Base</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
@@ -287,6 +287,21 @@
   .manager-view[data-active-tab="quality"] [data-tab="quality"] {
     display: block;
   }
+  .manager-view[data-active-tab="coverage"] [data-tab="coverage"] {
+    display: block;
+  }
+  .coverage-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.72rem;
+    font-weight: 600;
+  }
+  .coverage-badge.covered { background: #0d2a0d; color: #3fb950; }
+  .coverage-badge.missing { background: #2d1010; color: #f85149; }
+  .coverage-badge.extra { background: #1a1a2e; color: #8b949e; }
+  .coverage-badge.migration-ok { background: #0d2a0d; color: #3fb950; }
+  .coverage-badge.migration-missing { background: #2d1a00; color: #e3b341; }
 
   .manager-actions {
     display: flex;
@@ -972,7 +987,10 @@
   <aside class="sidebar">
     <div class="sidebar-logo">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-      Codebase AI
+      <div>
+        <div>Codebase AI</div>
+        <div style="font-size:0.7rem;font-weight:400;color:#8b949e;margin-top:2px;">Your codebase, answerable</div>
+      </div>
     </div>
 
     <button class="new-chat-btn" onclick="newChat()">
@@ -986,11 +1004,11 @@
     </button>
 
     <div>
-      <div class="sidebar-section-title">Try these</div>
-      <button class="example-btn" onclick="setQuestion('jelasin flow request account demo dari ims-tf')">Flow: request account demo</button>
-      <button class="example-btn" onclick="setQuestion('jelasin SubmitDepositDemo')">Symbol: SubmitDepositDemo</button>
-      <button class="example-btn" onclick="setQuestion('validasi dan return dari endpoint /mrg/api/v1/deposit/demo/')">Endpoint: /deposit/demo/</button>
-      <button class="example-btn" onclick="setQuestion('what commits relate to graph flow')">Commits: graph flow</button>
+      <div class="sidebar-section-title">Quick Start</div>
+      <button class="example-btn" onclick="askExample('How isignal works?')">🗺️ How isignal works?</button>
+      <button class="example-btn" onclick="askExample('Berikan list tipe akun MT4 MMB')">📋 Tipe akun MT4 MMB</button>
+      <button class="example-btn" onclick="askExample('kenapa dsc_bot_copy.status harus 1?')">💡 dsc_bot_copy.status = 1?</button>
+      <button class="example-btn" onclick="askExample('how do we gain medal')">🏅 Gain medal?</button>
     </div>
 
     <div>
@@ -1020,7 +1038,7 @@
       <input id="project" type="text" placeholder="project (optional)" />
       <input id="branch" type="text" placeholder="branch (optional)" />
       <input id="serviceType" type="text" placeholder="service-type (optional)" />
-      <input id="chatModel" type="text" value="qwen3:8b" placeholder="chat model, e.g. qwen3:8b" />
+      <input id="chatModel" type="text" value="" placeholder="chat model, e.g. qwen2.5-coder:3b" />
       <label class="manager-checks" title="Runs extra read-only retrieval passes before answering. Slower, better for messy flow questions.">
         <input id="deepMode" type="checkbox" />
         Deep investigation
@@ -1052,6 +1070,9 @@
           </button>
           <button class="manager-tab" onclick="switchManagerTab('quality')">
             ✓ Quality
+          </button>
+          <button class="manager-tab" onclick="switchManagerTab('coverage')">
+            🗺️ Coverage
           </button>
         </div>
 
@@ -1101,6 +1122,24 @@
               </div>
               <button class="manager-btn primary wide" onclick="indexDocsFromUi()">Run Docs Index</button>
             </div>
+          </div>
+
+          <div class="manager-panel" data-tab="indexing">
+            <h2>🩺 Run Repo Doctor</h2>
+            <div class="manager-subtitle" style="margin-bottom:12px;">Auto-generates service health reports (routes, DB tables, queues, env vars) and indexes them for Q&A.</div>
+            <div class="manager-form">
+              <input class="wide" id="doctorRepoPath" placeholder="Repo path, e.g. C:/GIT/work/tf2-ois" />
+              <input id="doctorRepoName" placeholder="repo-name (optional, defaults to folder name)" />
+              <select id="doctorServiceType">
+                <option value="">auto-detect</option>
+                <option value="api">api</option>
+                <option value="worker">worker</option>
+                <option value="cron">cron</option>
+                <option value="library">library</option>
+              </select>
+              <button class="manager-btn primary wide" onclick="runDoctorFromUi()">Run Doctor + Index</button>
+            </div>
+            <div id="doctorOutput" class="manager-output" style="display:none;margin-top:12px;"></div>
           </div>
 
           <div class="manager-panel wide-panel" data-tab="configuration">
@@ -1339,6 +1378,17 @@ source: brain_dump
           </div>
         </div>
 
+        <div data-tab="coverage">
+          <div class="manager-panel wide-panel" data-tab="coverage">
+            <h2>Index Coverage Map</h2>
+            <div class="manager-actions">
+              <button class="manager-btn primary" onclick="loadCoverage()">Refresh</button>
+            </div>
+            <div class="manager-status" id="coverageStatus"></div>
+            <div id="coverageDashboard"></div>
+          </div>
+        </div>
+
         <div data-tab="indexing">
           <div class="manager-status" id="managerStatus"></div>
           <div class="manager-table-wrap">
@@ -1375,6 +1425,17 @@ source: brain_dump
         <div class="empty-state-icon">&#128270;</div>
         <div class="empty-state-title">Ask anything about your codebase</div>
         <div class="empty-state-desc">Search across code, documentation, commits, and comments. Ask in English or Bahasa Indonesia.</div>
+        <div style="margin-top:24px;width:100%;max-width:480px;text-align:left;">
+          <div style="font-size:0.7rem;font-weight:600;text-transform:uppercase;color:#8b949e;letter-spacing:0.5px;margin-bottom:10px;">Try asking...</div>
+          <button class="example-btn" onclick="askExample('How isignal works?')">🗺️ How isignal works?</button>
+          <button class="example-btn" onclick="askExample('Berikan list tipe akun MT4 MMB')">📋 Berikan list tipe akun MT4 MMB</button>
+          <button class="example-btn" onclick="askExample('jelasin flow request account demo dari ims-tf')">🔄 Flow request account demo dari ims-tf</button>
+          <button class="example-btn" onclick="askExample('kenapa dsc_bot_copy.status harus 1?')">💡 Kenapa dsc_bot_copy.status harus 1?</button>
+          <button class="example-btn" onclick="askExample('berapa minimal equity untuk bisa ikut isignal')">💰 Minimal equity untuk ikut iSignal</button>
+          <button class="example-btn" onclick="askExample('how do we gain medal')">🏅 How do we gain medal?</button>
+          <button class="example-btn" onclick="askExample('apa itu mmb')">🏦 Apa itu MMB?</button>
+          <button class="example-btn" onclick="askExample('request body endpoint /mrg/api/v1/deposit/demo/')">📡 Request body endpoint deposit demo</button>
+        </div>
       </div>
     </div>
 
@@ -1382,7 +1443,7 @@ source: brain_dump
     <div class="loading-indicator" id="loadingIndicator">
       <div class="loading-indicator-content">
         <div class="spinner"></div>
-        <span>Thinking... this may take up to 3 minutes.</span>
+        <span>Thinking...</span>
       </div>
     </div>
 
@@ -1538,6 +1599,9 @@ function refreshActiveTab() {
     case 'quality':
       loadKnowledgeNotes();
       loadAnswerFeedback();
+      break;
+    case 'coverage':
+      loadCoverage();
       break;
   }
 }
@@ -1748,6 +1812,59 @@ async function indexDocsFromUi() {
   };
 
   await runIndexRequest('/api/index/docs', body, 'Documentation indexing');
+}
+
+async function runDoctorFromUi() {
+  const repoPath = document.getElementById('doctorRepoPath').value.trim();
+
+  if (!repoPath) {
+    managerStatus.textContent = 'Repo path is required.';
+    return;
+  }
+
+  const body = {
+    repoPath,
+    repoName: document.getElementById('doctorRepoName').value.trim() || undefined,
+    serviceType: document.getElementById('doctorServiceType').value || undefined,
+  };
+
+  const outputEl = document.getElementById('doctorOutput');
+  outputEl.style.display = 'block';
+  outputEl.textContent = 'Running doctor analysis... this may take 1-2 minutes.';
+  managerStatus.textContent = 'Doctor analysis started.';
+
+  try {
+    const res = await fetch('/api/doctor/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      outputEl.textContent = `Error: ${data.error}\n\n${data.raw ?? ''}`;
+      managerStatus.textContent = 'Doctor failed.';
+      return;
+    }
+
+    const r = data.report;
+    outputEl.textContent = [
+      `✅ Doctor complete for: ${body.repoName ?? repoPath}`,
+      ``,
+      `  Services:   ${r.serviceCount}`,
+      `  API routes: ${r.apiRouteCount}`,
+      `  DB tables:  ${r.databaseCount}`,
+      `  Queues/MQ:  ${r.rabbitMqCount}`,
+      `  Env vars:   ${r.envVarCount}`,
+      `  Files scanned: ${r.filesScanned}`,
+      ``,
+      `Reports indexed into Qdrant. You can now ask questions about this service.`,
+    ].join('\n');
+    managerStatus.textContent = 'Doctor complete and indexed.';
+  } catch (err) {
+    outputEl.textContent = `Error: ${err.message}`;
+    managerStatus.textContent = 'Doctor failed.';
+  }
 }
 
 async function runIndexRequest(url, body, label) {
@@ -2542,6 +2659,13 @@ function newChat() {
   renderMessages();
 }
 
+function askExample(question) {
+  showChat();
+  messages = [];
+  questionInput.value = question;
+  ask();
+}
+
 function renderMessages() {
   if (messages.length === 0) {
     chatMessages.innerHTML = `
@@ -2549,6 +2673,17 @@ function renderMessages() {
         <div class="empty-state-icon">&#128270;</div>
         <div class="empty-state-title">Ask anything about your codebase</div>
         <div class="empty-state-desc">Search across code, documentation, commits, and comments. Ask in English or Bahasa Indonesia.</div>
+        <div style="margin-top:24px;width:100%;max-width:480px;text-align:left;">
+          <div style="font-size:0.7rem;font-weight:600;text-transform:uppercase;color:#8b949e;letter-spacing:0.5px;margin-bottom:10px;">Try asking...</div>
+          <button class="example-btn" onclick="askExample('How isignal works?')">🗺️ How isignal works?</button>
+          <button class="example-btn" onclick="askExample('Berikan list tipe akun MT4 MMB')">📋 Berikan list tipe akun MT4 MMB</button>
+          <button class="example-btn" onclick="askExample('jelasin flow request account demo dari ims-tf')">🔄 Flow request account demo dari ims-tf</button>
+          <button class="example-btn" onclick="askExample('kenapa dsc_bot_copy.status harus 1?')">💡 Kenapa dsc_bot_copy.status harus 1?</button>
+          <button class="example-btn" onclick="askExample('berapa minimal equity untuk bisa ikut isignal')">💰 Minimal equity untuk ikut iSignal</button>
+          <button class="example-btn" onclick="askExample('how do we gain medal')">🏅 How do we gain medal?</button>
+          <button class="example-btn" onclick="askExample('apa itu mmb')">🏦 Apa itu MMB?</button>
+          <button class="example-btn" onclick="askExample('request body endpoint /mrg/api/v1/deposit/demo/')">📡 Request body endpoint deposit demo</button>
+        </div>
       </div>
     `;
     return;
@@ -3370,6 +3505,102 @@ async function rollbackToVersion(fileName, versionId) {
   } catch (err) {
     decisionsStatus.textContent = `Rollback failed: ${err.message}`;
   }
+}
+
+// ========================================
+// Coverage Map Functions
+// ========================================
+
+async function loadCoverage() {
+  const status = document.getElementById('coverageStatus');
+  const dashboard = document.getElementById('coverageDashboard');
+  status.textContent = 'Loading coverage map...';
+  dashboard.innerHTML = '';
+
+  try {
+    const res = await fetch('/api/index/coverage');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load coverage');
+    status.textContent = '';
+    renderCoverage(data);
+  } catch (err) {
+    status.textContent = `Could not load coverage: ${err.message}`;
+  }
+}
+
+function renderCoverage(data) {
+  const dashboard = document.getElementById('coverageDashboard');
+  const pct = data.summary.coveragePercent;
+  const pctColor = pct >= 80 ? '#3fb950' : pct >= 50 ? '#e3b341' : '#f85149';
+
+  // Summary stats
+  const summaryHtml = `
+    <div class="analytics-stats" style="margin-bottom:16px;">
+      <div class="stat-card"><div class="stat-card-value" style="color:${pctColor}">${pct}%</div><div class="stat-card-label">Coverage</div></div>
+      <div class="stat-card"><div class="stat-card-value" style="color:#3fb950">${data.summary.coveredRepos}</div><div class="stat-card-label">Indexed</div></div>
+      <div class="stat-card"><div class="stat-card-value" style="color:#f85149">${data.summary.missingRepos}</div><div class="stat-card-label">Not Indexed</div></div>
+      <div class="stat-card"><div class="stat-card-value">${data.summary.totalRegistryRepos}</div><div class="stat-card-label">In Registry</div></div>
+    </div>`;
+
+  // Migration repos status
+  const migrationHtml = data.migrationStatus.map(m => `
+    <div class="bar-row">
+      <div class="bar-label" title="${escapeHtml(m.repo)}">${escapeHtml(m.repo)}</div>
+      <span class="coverage-badge ${m.indexed ? 'migration-ok' : 'migration-missing'}">
+        ${m.indexed ? '✓ source indexed' : '⚠ source NOT indexed'}
+      </span>
+      <span class="coverage-badge ${m.doctorIndexed ? 'covered' : 'missing'}" style="margin-left:4px;">
+        ${m.doctorIndexed ? '✓ doctor' : '✗ doctor'}
+      </span>
+    </div>`).join('');
+
+  // Missing repos
+  const missingHtml = data.missing.length === 0
+    ? '<div class="manager-muted">All registry repos are indexed.</div>'
+    : data.missing.map(m => `
+        <div class="bar-row" style="align-items:flex-start;flex-direction:column;padding:6px 0;border-bottom:1px solid #21262d;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="coverage-badge missing">NOT INDEXED</span>
+            <span style="font-size:0.82rem;color:#f0f6fc;">${escapeHtml(m.repo)}</span>
+          </div>
+          <div style="font-size:0.72rem;color:#8b949e;margin-top:3px;">
+            Registry entries: ${m.registryEntries.map(e => `<code>${escapeHtml(e)}</code>`).join(', ')}
+          </div>
+        </div>`).join('');
+
+  // Covered repos (deduplicated by repo name)
+  const coveredByRepo = new Map();
+  for (const c of data.covered) {
+    if (!coveredByRepo.has(c.repo)) coveredByRepo.set(c.repo, []);
+    coveredByRepo.get(c.repo).push(c);
+  }
+  const coveredHtml = [...coveredByRepo.entries()].map(([repo, items]) => `
+    <div style="padding:4px 0;border-bottom:1px solid #21262d;">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <span class="coverage-badge covered">✓</span>
+        <span style="font-size:0.82rem;color:#f0f6fc;">${escapeHtml(repo)}</span>
+        ${items.map(i => `<code style="font-size:0.72rem;color:#8b949e;">${escapeHtml(i.branch)} · ${i.chunks} chunks · ${escapeHtml(i.serviceType)}</code>`).join(' ')}
+      </div>
+    </div>`).join('');
+
+  dashboard.innerHTML = `
+    ${summaryHtml}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+      <div>
+        <div class="analytics-section-title" style="margin-bottom:8px;">❌ Not Indexed (${data.missing.length})</div>
+        ${missingHtml}
+        ${data.extra.length > 0 ? `
+          <div class="analytics-section-title" style="margin:12px 0 8px;">⚠️ Indexed but not in registry (${data.extra.length})</div>
+          ${data.extra.map(r => `<div style="font-size:0.8rem;color:#8b949e;padding:2px 0;"><code>${escapeHtml(r)}</code></div>`).join('')}
+        ` : ''}
+      </div>
+      <div>
+        <div class="analytics-section-title" style="margin-bottom:8px;">⚠️ Migration Repos</div>
+        ${migrationHtml}
+        <div class="analytics-section-title" style="margin:12px 0 8px;">✅ Indexed (${coveredByRepo.size})</div>
+        ${coveredHtml}
+      </div>
+    </div>`;
 }
 </script>
 </body>

@@ -296,6 +296,25 @@ export async function approveDraft(fileName: string): Promise<ApproveResult> {
   }
 }
 
+// Re-index an already-approved decision (e.g. after editing it directly in approved/).
+export async function reindexApprovedDecision(fileName: string): Promise<ApproveResult> {
+  const approvedPath = path.join(approvedDir, fileName)
+  const content = await fs.readFile(approvedPath, "utf8")
+  const frontmatter = parseDraftFrontmatter(content)
+
+  await indexApprovedDecision(fileName, content, frontmatter)
+  const documentedEdges = await writeDocumentsDecisionEdges(fileName, content, frontmatter)
+  await saveVersion(fileName, content).catch(() => undefined)
+
+  return {
+    fileName,
+    approvedPath,
+    chunkType: frontmatter.type,
+    affectedServices: frontmatter.affectedServices,
+    documentedEdges,
+  }
+}
+
 export async function approveAllDrafts(): Promise<ApproveResult[]> {
   const drafts = await listDrafts()
   const results: ApproveResult[] = []

@@ -1,8 +1,9 @@
-import type { PackageFacts, EnvVarFact, ApiRouteFact, RabbitMqFact, DatabaseFact } from '../types.js';
+import type { PackageFacts, EnvVarFact, ConfigDefaultFact, ApiRouteFact, RabbitMqFact, DatabaseFact } from '../types.js';
 
 export interface OverviewInput {
   packageFacts: PackageFacts[];
   envFacts: EnvVarFact[];
+  configDefaultFacts?: ConfigDefaultFact[];
   apiRouteFacts: ApiRouteFact[];
   rabbitMqFacts: RabbitMqFact[];
   databaseFacts: DatabaseFact[];
@@ -29,6 +30,7 @@ export function generateOverviewMarkdown(input: OverviewInput): string {
   // Counts
   const serviceCount = input.packageFacts.length;
   const envCount = input.envFacts.length;
+  const configDefaultCount = input.configDefaultFacts?.length ?? 0;
   const apiCount = input.apiRouteFacts.length;
   const mqCount = input.rabbitMqFacts.length;
   const dbCount = input.databaseFacts.length;
@@ -39,6 +41,7 @@ export function generateOverviewMarkdown(input: OverviewInput): string {
   lines.push(`|--------|-------|`);
   lines.push(`| Services (package.json) | ${serviceCount} |`);
   lines.push(`| Environment variables | ${envCount} |`);
+  lines.push(`| Configuration defaults | ${configDefaultCount} |`);
   lines.push(`| API routes | ${apiCount} |`);
   lines.push(`| RabbitMQ usages | ${mqCount} |`);
   lines.push(`| Database usages | ${dbCount} |`);
@@ -47,6 +50,7 @@ export function generateOverviewMarkdown(input: OverviewInput): string {
   // Links
   lines.push('## Generated Documents');
   lines.push('');
+  lines.push('- [config.md](./config.md) - Environment-backed configuration defaults');
   lines.push('- [services.md](./services.md) — Package metadata and dependencies');
   lines.push('- [env.md](./env.md) — Environment variables detected in source');
   lines.push('- [api.md](./api.md) — HTTP API routes');

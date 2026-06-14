@@ -25,6 +25,9 @@ export const config = {
   openAIBaseUrl: process.env.OPENAI_BASE_URL ?? "",
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
   anthropicBaseUrl: process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com",
+
+  // Max tokens in LLM response. Default 2048 is fine for most answers.
+  maxTokens: Number(process.env.MAX_TOKENS ?? 2048),
 }
 
 export function setChatModel(model: string): void {

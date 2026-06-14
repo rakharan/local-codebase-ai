@@ -9,7 +9,10 @@
       "Bash(npm run test:answers *)",
       "Bash(npx tsc *)",
       "Bash(curl -s -X POST http://localhost:*)",
-      "Bash(npx tsx *)"
+      "Bash(npx tsx *)",
+      "Bash(git rm --cached *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   }
 }

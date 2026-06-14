@@ -12,6 +12,7 @@ export type RelationshipType =
   | "CALLS_SYMBOL"
   | "DEFINES_SYMBOL"
   | "TOUCHES_TABLE"
+  | "DOCUMENTS_DECISION"
 
 export type RelationshipEdge = {
   id: string
@@ -413,6 +414,22 @@ export async function writeRelationshipGraphForRepo(
   const content = next.map(edge => JSON.stringify(edge)).join("\n")
 
   await fs.writeFile(graphPath, content.length > 0 ? `${content}\n` : "", "utf8")
+}
+
+export async function appendRelationshipEdges(edges: RelationshipEdge[]): Promise<void> {
+  if (edges.length === 0) return
+
+  await fs.mkdir(path.dirname(graphPath), { recursive: true })
+
+  const existing = await readRelationshipGraph()
+  const merged = [...new Map([...existing, ...edges].map(edge => [edge.id, edge])).values()]
+  const content = merged.map(edge => JSON.stringify(edge)).join("\n")
+
+  await fs.writeFile(graphPath, content.length > 0 ? `${content}\n` : "", "utf8")
+}
+
+export function createDecisionEdge(edge: Omit<RelationshipEdge, "id">): RelationshipEdge {
+  return createEdge(edge)
 }
 
 export async function deleteRelationshipGraphForScope(repoName: string, branchName?: string): Promise<number> {

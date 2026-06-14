@@ -34,6 +34,7 @@ import {
   approvedDirectory,
   parseDraftFrontmatter,
   extractDecisionTitle,
+  reindexApprovedDecision,
   type DraftSummary,
 } from "./lib/draft-manager.js"
 import fs from "node:fs/promises"
@@ -315,7 +316,7 @@ async function summarizeIndex(): Promise<IndexSummaryItem[]> {
   })
 }
 
-async function runIndexer(script: "src/index-repo.ts" | "src/index-docs.ts", args: string[]): Promise<{ raw: string }> {
+async function runIndexer(script: "src/index-repo.ts" | "src/index-docs.ts" | "src/index-doctor.ts", args: string[]): Promise<{ raw: string }> {
   const { stdout, stderr } = await execFileAsync(process.execPath, ["--import", "./register-ts-node.mjs", script, ...args], {
     cwd: rootDir,
     timeout: 30 * 60_000,
@@ -388,7 +389,7 @@ app.post("/api/ask", async (request, response) => {
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, args, {
       cwd: rootDir,
-      timeout: body.deep ? 360_000 : 180_000,
+      timeout: body.deep ? 900_000 : 600_000,
       maxBuffer: 10 * 1024 * 1024,
       windowsHide: true,
     })
@@ -408,6 +409,88 @@ app.post("/api/ask", async (request, response) => {
       error: message,
       raw: [stdout, stderr].filter(Boolean).join("\n"),
     })
+  }
+})
+
+// Coverage map — compares config/services.json repos against indexed source code repos
+app.get("/api/index/coverage", async (_request, response) => {
+  try {
+    const registry = await readServiceRegistryFile()
+    const allRegistryRepos = new Set(
+      registry.entries.flatMap(entry => affectedReposForRegistryEntry(entry))
+    )
+
+    const indexItems = await summarizeIndex()
+    // Only count branches that represent real source code (not docs, doctor, decisions, git-history)
+    const indexedSourceRepos = new Set(
+      indexItems
+        .filter(item =>
+          !item.branchName.startsWith("docs") &&
+          !["doctor", "decisions", "git-history"].includes(item.branchName)
+        )
+        .map(item => item.repoName)
+    )
+
+    const covered: Array<{ repo: string; chunks: number; branch: string; serviceType: string; evidenceTypes: Record<string, number> }> = []
+    const missing: Array<{ repo: string; registryEntries: string[] }> = []
+    const extra: string[] = []
+
+    // Repos in registry — check if indexed
+    for (const repo of [...allRegistryRepos].sort()) {
+      const repoItems = indexItems.filter(
+        item => item.repoName === repo &&
+          !item.branchName.startsWith("docs") &&
+          !["doctor", "decisions", "git-history"].includes(item.branchName)
+      )
+
+      if (repoItems.length > 0) {
+        for (const item of repoItems) {
+          covered.push({
+            repo: item.repoName,
+            chunks: item.chunkCount,
+            branch: item.branchName,
+            serviceType: item.serviceType,
+            evidenceTypes: item.evidenceTypes,
+          })
+        }
+      } else {
+        const registryEntries = registry.entries
+          .filter(entry => affectedReposForRegistryEntry(entry).includes(repo))
+          .map(entry => entry.name)
+        missing.push({ repo, registryEntries })
+      }
+    }
+
+    // Indexed repos not in registry
+    for (const repo of indexedSourceRepos) {
+      if (!allRegistryRepos.has(repo) && repo !== "local-codebase-ai") {
+        extra.push(repo)
+      }
+    }
+
+    // Migration repos specifically
+    const migrationRepos = ["mrg-migrations", "tf2-migrations"]
+    const migrationStatus = migrationRepos.map(repo => ({
+      repo,
+      indexed: indexedSourceRepos.has(repo),
+      doctorIndexed: indexItems.some(item => item.repoName === `${repo}-docs` && item.branchName === "doctor"),
+    }))
+
+    response.json({
+      summary: {
+        totalRegistryRepos: allRegistryRepos.size,
+        coveredRepos: new Set(covered.map(c => c.repo)).size,
+        missingRepos: missing.length,
+        coveragePercent: Math.round(new Set(covered.map(c => c.repo)).size / allRegistryRepos.size * 100),
+      },
+      covered,
+      missing,
+      extra,
+      migrationStatus,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
   }
 })
 
@@ -523,6 +606,60 @@ app.post("/api/index/docs", async (request, response) => {
     const result = await runIndexer("src/index-docs.ts", args)
 
     response.json(result)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const stdout = (error as { stdout?: string }).stdout ?? ""
+    const stderr = (error as { stderr?: string }).stderr ?? ""
+
+    response.status(500).json({
+      error: message,
+      raw: [stdout, stderr].filter(Boolean).join("\n"),
+    })
+  }
+})
+
+app.post("/api/doctor/run", async (request, response) => {
+  const body = request.body as { repoPath?: string; repoName?: string; serviceType?: string }
+  const repoPath = body.repoPath?.trim()
+
+  if (!repoPath) {
+    response.status(400).json({ error: "Missing required field: repoPath" })
+    return
+  }
+
+  const repoName = body.repoName?.trim() ?? path.basename(repoPath)
+  const outputPath = path.resolve(`./repo-docs-work/${repoName}`)
+
+  try {
+    // Step 1: Run doctor to generate markdown reports
+    const { runDoctor } = await import("./doctor/doctor.js")
+    const report = await runDoctor({
+      rootFolder: repoPath,
+      outputFolder: outputPath,
+      json: true,
+      maxFiles: 5000,
+      silent: false,
+      repoName,
+      ...(body.serviceType ? { serviceType: body.serviceType } : {}),
+    })
+
+    // Step 2: Index the generated doctor reports into Qdrant
+    const indexArgs = [outputPath, "--repo-name", repoName]
+    if (body.serviceType) indexArgs.push("--service-type", body.serviceType)
+    const indexResult = await runIndexer("src/index-doctor.ts", indexArgs)
+
+    response.json({
+      report: {
+        serviceCount: report.summary.serviceCount,
+        apiRouteCount: report.summary.apiRouteCount,
+        databaseCount: report.summary.databaseCount,
+        rabbitMqCount: report.summary.rabbitMqCount,
+        envVarCount: report.summary.envVarCount,
+        filesScanned: report.summary.filesScanned,
+      },
+      indexResult,
+      outputPath,
+    })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     const stdout = (error as { stdout?: string }).stdout ?? ""
@@ -1056,6 +1193,18 @@ app.post("/api/decisions/:filename/snapshot", async (request, response) => {
     const content = await fs.readFile(path.join(approvedDir, request.params.filename), "utf8")
     const version = await saveVersion(request.params.filename, content)
     response.json({ version })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const status = message.includes("ENOENT") ? 404 : 500
+    response.status(status).json({ error: message })
+  }
+})
+
+// Reindex an already-approved decision after editing it directly in approved/
+app.post("/api/decisions/:filename/reindex", async (request, response) => {
+  try {
+    const result = await reindexApprovedDecision(request.params.filename)
+    response.json(result)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     const status = message.includes("ENOENT") ? 404 : 500

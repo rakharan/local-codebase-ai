@@ -27,6 +27,19 @@ export interface EnvVarFact {
   confidence: ConfidenceLabel;
 }
 
+export type ConfigDefaultOperator = '||' | '??';
+
+export interface ConfigDefaultFact {
+  envName: string;
+  defaultValue: string;
+  operator: ConfigDefaultOperator;
+  sourcePath: string;
+  line: number;
+  expression: string;
+  businessRuleCandidate: boolean;
+  confidence: ConfidenceLabel;
+}
+
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 export type ApiFramework = 'express' | 'fastify' | 'unknown';
 

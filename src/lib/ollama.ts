@@ -28,6 +28,10 @@ type AnthropicChatResponse = {
 
 export type AnswerLanguage = "id" | "en" | "unknown"
 
+// Cloud models have smaller context windows than local Ollama.
+// Truncate prompts that exceed this limit to avoid 400 errors.
+const MAX_CLOUD_PROMPT_CHARS = 60_000
+
 const MAX_ATTEMPTS = 4
 const MAX_EMBED_INPUT_CHARS = 3_500
 
@@ -94,6 +98,10 @@ function getOpenAIApiKey(): string {
 
 async function chatAnthropic(system: string, userContent: string): Promise<string> {
     const baseUrl = config.anthropicBaseUrl.replace(/\/$/, "")
+    // Truncate if exceeds cloud model context limit
+    const truncatedContent = userContent.length > MAX_CLOUD_PROMPT_CHARS
+        ? userContent.slice(0, MAX_CLOUD_PROMPT_CHARS) + "\n\n[...context truncated to fit model limit...]"
+        : userContent
     const res = await fetchWithRetry(`${baseUrl}/messages`, {
         method: "POST",
         headers: {
@@ -103,9 +111,9 @@ async function chatAnthropic(system: string, userContent: string): Promise<strin
         },
         body: JSON.stringify({
             model: config.chatModel,
-            max_tokens: 2048,
+            max_tokens: config.maxTokens,
             system,
-            messages: [{ role: "user", content: userContent }],
+            messages: [{ role: "user", content: truncatedContent }],
         }),
     })
 
@@ -121,10 +129,18 @@ async function chatOpenAI(messages: Array<{ role: string; content: string }>, js
     const baseUrl = getOpenAIBaseUrl()
     const apiKey = getOpenAIApiKey()
 
+    // Truncate user message if it exceeds cloud model context limits
+    const truncatedMessages = messages.map(m => {
+        if (m.role === "user" && m.content.length > MAX_CLOUD_PROMPT_CHARS) {
+            return { ...m, content: m.content.slice(0, MAX_CLOUD_PROMPT_CHARS) + "\n\n[...context truncated to fit model limit...]" }
+        }
+        return m
+    })
+
     const body: Record<string, unknown> = {
         model: config.chatModel,
-        messages,
-        max_tokens: 2048,
+        messages: truncatedMessages,
+        max_tokens: config.maxTokens,
         stream: false,
     }
 
