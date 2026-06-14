@@ -3,7 +3,6 @@ import { fileURLToPath } from "node:url"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import express from "express"
-import rateLimit from "express-rate-limit"
 import { config } from "./lib/config.js"
 import { ensureCollection, qdrant } from "./lib/qdrant.js"
 import { deleteRelationshipGraphForScope, readRelationshipGraph } from "./lib/graph.js"
@@ -60,16 +59,26 @@ const app = express()
 app.use(express.json())
 app.use(express.static(publicDir))
 
-// --- Rate limiting ---
+// --- Rate limiting (simple in-memory, no external package) ---
 // 60 requests per minute per IP on all /api/* routes
-const apiLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 60,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: "Too many requests — please slow down." },
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>()
+app.use("/api/", (request, response, next) => {
+  const ip = request.ip ?? "unknown"
+  const now = Date.now()
+  const window = 60_000
+  const max = 60
+  let entry = rateLimitMap.get(ip)
+  if (!entry || now > entry.resetAt) {
+    entry = { count: 0, resetAt: now + window }
+    rateLimitMap.set(ip, entry)
+  }
+  entry.count++
+  if (entry.count > max) {
+    response.status(429).json({ error: "Too many requests — please slow down." })
+    return
+  }
+  next()
 })
-app.use("/api/", apiLimiter)
 
 // --- API key authentication ---
 // Set APP_API_KEY in .env to enable. Leave unset to allow all (dev mode).
