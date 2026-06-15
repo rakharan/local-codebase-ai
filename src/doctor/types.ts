@@ -75,3 +75,25 @@ export interface DatabaseFact {
   line: number;
   confidence: ConfidenceLabel;
 }
+
+export type HttpClientMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'unknown';
+export type HttpClientLib = 'axios' | 'fetch' | 'got' | 'curl' | 'guzzle' | 'unknown';
+
+export interface HttpClientFact {
+  method: HttpClientMethod;
+  urlHint: string;        // raw URL or base-URL expression captured from source
+  lib: HttpClientLib;
+  sourcePath: string;
+  line: number;
+  confidence: ConfidenceLabel;
+}
+
+export type CronScheduleKind = 'node-cron' | 'setInterval' | 'nestjs' | 'laravel' | 'unknown';
+
+export interface CronFact {
+  expression: string;     // cron expression or interval ms
+  kind: CronScheduleKind;
+  sourcePath: string;
+  line: number;
+  confidence: ConfidenceLabel;
+}
