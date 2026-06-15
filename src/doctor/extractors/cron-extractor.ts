@@ -27,6 +27,8 @@ function isIgnoredFile(sourcePath: string): boolean {
   // skip well-known frontend libraries
   const base = lower.split('/').pop() ?? '';
   if (base.startsWith('jquery') || base.startsWith('bootstrap') || base.startsWith('lazysizes')) return true;
+  // PHP files don't use setInterval/node-cron for scheduling
+  if (lower.endsWith('.php')) return true;
   return false;
 }
 
