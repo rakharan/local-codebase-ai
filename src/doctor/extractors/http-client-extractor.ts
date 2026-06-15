@@ -26,6 +26,15 @@ const NODE_PATTERNS: PatternDef[] = [
 const PHP_CURL_INLINE = /\bcurl_init\(\s*['"]([^'"]+)['"]\s*\)/g;
 const PHP_CURL_SETOPT_URL = /\bcurl_setopt\s*\(\s*\$\w+\s*,\s*CURLOPT_URL\s*,\s*['"]([^'"]+)['"]/g;
 
+// PHP NodeAPI bridge pattern — NodeAPI::methodName() calls map to ims-tf2 endpoints
+const PHP_NODE_API = /\bNodeAPI::(\w+)\s*\(/g;
+const NODE_API_ENDPOINT_MAP: Record<string, { method: HttpClientMethod; path: string }> = {
+  getJwtServer:      { method: 'POST', path: '/traders/api/v2/jwt-server/' },
+  getToken:          { method: 'POST', path: '/traders/api/v1/login/' },
+  validateIdToken:   { method: 'POST', path: '/traders/api/v1/login/social/' },
+  loginWithMT4:      { method: 'POST', path: '/traders/api/v1/login-with-mt4/' },
+};
+
 function extractMethod(line: string): HttpClientMethod {
   const m = line.match(/\.(get|post|put|patch|delete)\(/i);
   if (!m) return 'unknown';
@@ -94,6 +103,19 @@ export function extractHttpClients(content: string, sourcePath: string): HttpCli
         if (seen.has(key)) continue;
         seen.add(key);
         facts.push({ method: 'unknown', urlHint, lib: 'curl', sourcePath, line: lineNumber, confidence: 'high' });
+      }
+
+      // NodeAPI::method() — PHP→ims-tf2 bridge calls
+      PHP_NODE_API.lastIndex = 0;
+      while ((match = PHP_NODE_API.exec(line)) !== null) {
+        const methodName = match[1]!;
+        const mapped = NODE_API_ENDPOINT_MAP[methodName];
+        const urlHint = mapped ? `APIURL${mapped.path}` : `APIURL/[${methodName}]`;
+        const httpMethod = mapped?.method ?? 'POST';
+        const key = `${urlHint}|curl|${lineNumber}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        facts.push({ method: httpMethod, urlHint, lib: 'curl', sourcePath, line: lineNumber, confidence: mapped ? 'high' : 'medium' });
       }
     } else {
       for (const pattern of NODE_PATTERNS) {
