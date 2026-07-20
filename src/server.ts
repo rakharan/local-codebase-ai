@@ -5,6 +5,7 @@ import { promisify } from "node:util"
 import express from "express"
 import { config } from "./lib/config.js"
 import { ensureCollection, qdrant } from "./lib/qdrant.js"
+import { prewarmBM25Index } from "./lib/bm25-index.js"
 import { deleteRelationshipGraphForScope, readRelationshipGraph } from "./lib/graph.js"
 import {
   saveVersion,
@@ -391,6 +392,10 @@ app.post("/api/ask", async (request, response) => {
     return
   }
 
+  const requestId = Math.random().toString(36).slice(2, 10)
+  const reqStart = Date.now()
+  console.log(`[ask][${requestId}] start q=${question.slice(0, 80)}${question.length > 80 ? "…" : ""} deep=${!!body.deep} limit=${body.limit ?? "-"}`)
+
   const args = ["--import", "./register-ts-node.mjs", "src/ask.ts", question]
 
   if (body.limit) {
@@ -431,18 +436,20 @@ app.post("/api/ask", async (request, response) => {
       timeout: body.deep ? 900_000 : 600_000,
       maxBuffer: 10 * 1024 * 1024,
       windowsHide: true,
+      env: { ...process.env, ASK_REQUEST_ID: requestId, ASK_DEBUG: process.env.ASK_DEBUG ?? "1" },
     })
 
     const output = [stdout, stderr].filter(Boolean).join("\n")
     const result = parseAskOutput(output)
 
+    console.log(`[ask][${requestId}] done ms=${Date.now() - reqStart}`)
     response.json(result)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     const stdout = (error as { stdout?: string }).stdout ?? ""
     const stderr = (error as { stderr?: string }).stderr ?? ""
 
-    console.error("Ask process failed:", message)
+    console.error(`[ask][${requestId}] failed ms=${Date.now() - reqStart}:`, message)
 
     response.status(500).json({
       error: message,
@@ -460,6 +467,10 @@ app.post("/api/ask/stream", (request, response) => {
     response.status(400).json({ error: "Missing required field: question" })
     return
   }
+
+  const requestId = Math.random().toString(36).slice(2, 10)
+  const reqStart = Date.now()
+  console.log(`[ask][${requestId}] stream-start q=${question.slice(0, 80)}${question.length > 80 ? "…" : ""} deep=${!!body.deep} limit=${body.limit ?? "-"}`)
 
   // Set up SSE headers
   response.setHeader("Content-Type", "text/event-stream")
@@ -491,9 +502,12 @@ app.post("/api/ask/stream", (request, response) => {
     timeout: body.deep ? 900_000 : 600_000,
     maxBuffer: 10 * 1024 * 1024,
     windowsHide: true,
+    env: { ...process.env, ASK_REQUEST_ID: requestId, ASK_DEBUG: process.env.ASK_DEBUG ?? "1" },
   }, (error, out, err) => {
     stdout = out ?? ""
     stderr = err ?? ""
+
+    console.log(`[ask][${requestId}] stream-done ms=${Date.now() - reqStart}`)
 
     if (error) {
       sendEvent({ type: "error", error: error.message, raw: [out, err].filter(Boolean).join("\n") })
@@ -1347,10 +1361,15 @@ app.post("/api/decisions/:filename/rollback/:versionId", async (request, respons
 // Liveness (/api/health): process is alive. Always 200 if the server can respond.
 // Readiness (/api/ready): upstream dependencies (Qdrant + Ollama) are reachable.
 // Readiness is cached briefly so a flood of probes does not hammer the upstreams.
+// BM25 prewarm status is included for observability but does not affect the HTTP
+// status code — queries degrade gracefully without BM25 (vector-only results).
+
+let bm25PrewarmStatus: "warming" | "ready" | "failed" | "skipped" = "skipped"
 
 type ReadinessState = {
   qdrant: "ok" | "down"
   ollama: "ok" | "down"
+  bm25: "warming" | "ready" | "failed" | "skipped"
   qdrantDetail: string | undefined
   ollamaDetail: string | undefined
 }
@@ -1398,7 +1417,7 @@ async function probeReadiness(): Promise<ReadinessState> {
     ollamaDetail = err instanceof Error ? err.message : String(err)
   }
 
-  return { qdrant: qdrantStatus, ollama: ollamaStatus, qdrantDetail, ollamaDetail }
+  return { qdrant: qdrantStatus, ollama: ollamaStatus, bm25: bm25PrewarmStatus, qdrantDetail, ollamaDetail }
 }
 
 async function getReadiness(): Promise<CachedReadiness> {
@@ -1433,4 +1452,11 @@ const port = Number(process.env.PORT ?? 9191)
 
 app.listen(port, () => {
   console.log(`Local Codebase AI server running at http://localhost:${port}`)
+
+  // Prewarm BM25 disk cache in the background so the first /api/ask request
+  // does not pay the ~2-3 min cold-build cost. Non-blocking — errors are logged.
+  bm25PrewarmStatus = "warming"
+  prewarmBM25Index()
+    .then(() => { bm25PrewarmStatus = "ready" })
+    .catch(() => { bm25PrewarmStatus = "failed" })
 })

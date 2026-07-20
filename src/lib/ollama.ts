@@ -1,4 +1,47 @@
 import { config } from "./config.js"
+import { dlog, nowMs, elapsedMs, isDebugEnabled } from "./debug-log.js"
+
+export type ChatProvider =
+  | "anthropic"
+  | "9router"
+  | "openai"
+  | "groq"
+  | "gemini"
+  | "ollama"
+
+/**
+ * Resolves the chat provider that will be used for the next chat/chatJson call.
+ * Embeddings always use local Ollama regardless of this setting.
+ */
+export function resolveChatProvider(): ChatProvider {
+  if (isAnthropicCompatible()) {
+    const baseUrl = config.anthropicBaseUrl.toLowerCase()
+    if (baseUrl.includes(":20128") || baseUrl.includes("9router")) return "9router"
+    return "anthropic"
+  }
+  if (config.geminiApiKey) return "gemini"
+  if (config.groqApiKey) return "groq"
+  if (config.openAIApiKey) return "openai"
+  return "ollama"
+}
+
+/**
+ * Returns the base URL host for the resolved provider (no API key, no path).
+ * For diagnostics only — safe to log.
+ */
+export function resolveChatBaseUrlHost(): string {
+  try {
+    if (isAnthropicCompatible()) {
+      return new URL(config.anthropicBaseUrl).host
+    }
+    if (isOpenAICompatible()) {
+      return new URL(getOpenAIBaseUrl()).host
+    }
+    return new URL(config.ollamaUrl).host
+  } catch {
+    return config.ollamaUrl
+  }
+}
 
 type OllamaEmbedResponse = {
     embeddings: number[][]
@@ -166,6 +209,7 @@ async function chatOpenAI(messages: Array<{ role: string; content: string }>, js
 }
 
 export async function createEmbedding(input: string): Promise<number[]> {
+    const start = nowMs()
     let res
     const embeddingInput = input.length <= MAX_EMBED_INPUT_CHARS
         ? input
@@ -189,12 +233,27 @@ export async function createEmbedding(input: string): Promise<number[]> {
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
 
+        dlog("embed", {
+            ok: false,
+            ms: elapsedMs(start),
+            model: config.embeddingModel,
+            inputChars: embeddingInput.length,
+            error: message,
+        })
+
         throw new Error(
             `Ollama is not reachable at ${config.ollamaUrl}. Start Ollama and run: ollama pull ${config.embeddingModel}\n${message}`,
         )
     }
 
     if (!res.ok) {
+        dlog("embed", {
+            ok: false,
+            ms: elapsedMs(start),
+            model: config.embeddingModel,
+            inputChars: embeddingInput.length,
+            httpStatus: res.status,
+        })
         throw new Error(`OLLAMA_EMBED_FAILED: ${res.status} ${await res.text()}`)
     }
 
@@ -202,75 +261,141 @@ export async function createEmbedding(input: string): Promise<number[]> {
     const embedding = data.embeddings?.[0]
 
     if (!embedding) {
+        dlog("embed", {
+            ok: false,
+            ms: elapsedMs(start),
+            model: config.embeddingModel,
+            inputChars: embeddingInput.length,
+            error: "empty_response",
+        })
         throw new Error("OLLAMA_EMBED_EMPTY_RESPONSE")
     }
+
+    dlog("embed", {
+        ok: true,
+        ms: elapsedMs(start),
+        model: config.embeddingModel,
+        inputChars: embeddingInput.length,
+        dims: embedding.length,
+    })
 
     return embedding
 }
 
 export async function chat(prompt: string): Promise<string> {
+    const start = nowMs()
+    const provider = resolveChatProvider()
+    const callTag = "chat"
+
+    if (isDebugEnabled()) {
+        dlog("llm-start", {
+            call: callTag,
+            provider,
+            model: config.chatModel,
+            promptChars: prompt.length,
+            numCtx: config.numCtx,
+        })
+    }
+
     const messages = [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: prompt },
     ]
 
-    if (isAnthropicCompatible()) {
-        const raw = await chatAnthropic(SYSTEM_PROMPT, prompt)
-        const notFoundIdx = raw.indexOf("NOT_FOUND_IN_INDEXED_CODEBASE")
-        if (notFoundIdx >= 0) {
-            return raw.slice(0, notFoundIdx + "NOT_FOUND_IN_INDEXED_CODEBASE".length).trim()
-        }
-        return raw
-    }
-
-    if (isOpenAICompatible()) {
-        const raw = await chatOpenAI(messages)
-        const notFoundIdx = raw.indexOf("NOT_FOUND_IN_INDEXED_CODEBASE")
-        if (notFoundIdx >= 0) {
-            return raw.slice(0, notFoundIdx + "NOT_FOUND_IN_INDEXED_CODEBASE".length).trim()
-        }
-        return raw
-    }
-
-    // Ollama path
-    let res
-    const isQwen3 = config.chatModel.startsWith("qwen3")
-
     try {
-        res = await fetchWithRetry(`${config.ollamaUrl}/api/chat`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                model: config.chatModel,
-                stream: false,
-                options: { num_ctx: config.numCtx },
-                messages: [
-                    {
-                        role: "system",
-                        content: [isQwen3 ? "/no_think" : undefined, SYSTEM_PROMPT].filter(Boolean).join("\n"),
-                    },
-                    { role: "user", content: prompt },
-                ],
-            }),
+        let result: string
+
+        if (isAnthropicCompatible()) {
+            const raw = await chatAnthropic(SYSTEM_PROMPT, prompt)
+            const notFoundIdx = raw.indexOf("NOT_FOUND_IN_INDEXED_CODEBASE")
+            result = notFoundIdx >= 0
+                ? raw.slice(0, notFoundIdx + "NOT_FOUND_IN_INDEXED_CODEBASE".length).trim()
+                : raw
+        } else if (isOpenAICompatible()) {
+            const raw = await chatOpenAI(messages)
+            const notFoundIdx = raw.indexOf("NOT_FOUND_IN_INDEXED_CODEBASE")
+            result = notFoundIdx >= 0
+                ? raw.slice(0, notFoundIdx + "NOT_FOUND_IN_INDEXED_CODEBASE".length).trim()
+                : raw
+        } else {
+            // Ollama path
+            const isQwen3 = config.chatModel.startsWith("qwen3")
+
+            const res = await fetchWithRetry(`${config.ollamaUrl}/api/chat`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    model: config.chatModel,
+                    stream: false,
+                    options: { num_ctx: config.numCtx },
+                    messages: [
+                        {
+                            role: "system",
+                            content: [isQwen3 ? "/no_think" : undefined, SYSTEM_PROMPT].filter(Boolean).join("\n"),
+                        },
+                        { role: "user", content: prompt },
+                    ],
+                }),
+            })
+
+            if (!res.ok) {
+                const errText = await res.text()
+                dlog("llm-fail", {
+                    call: callTag,
+                    provider,
+                    model: config.chatModel,
+                    ms: elapsedMs(start),
+                    httpStatus: res.status,
+                })
+                throw new Error(`OLLAMA_CHAT_FAILED: ${res.status} ${errText}`)
+            }
+
+            const data = (await res.json()) as OllamaChatResponse
+            const raw = data.message?.content ?? ""
+            const cleaned = raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "").replace(/^[\s\S]*?<\/think>\s*/g, "")
+            const notFoundIdx = cleaned.indexOf("NOT_FOUND_IN_INDEXED_CODEBASE")
+            result = notFoundIdx >= 0
+                ? cleaned.slice(0, notFoundIdx + "NOT_FOUND_IN_INDEXED_CODEBASE".length).trim()
+                : cleaned.trim()
+        }
+
+        dlog("llm-done", {
+            call: callTag,
+            provider,
+            model: config.chatModel,
+            ms: elapsedMs(start),
+            ok: true,
+            outChars: result.length,
         })
-    } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        throw new Error(`Ollama is not reachable at ${config.ollamaUrl}. Start Ollama and run: ollama pull ${config.chatModel}\n${message}`)
+        return result
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        dlog("llm-fail", {
+            call: callTag,
+            provider,
+            model: config.chatModel,
+            ms: elapsedMs(start),
+            ok: false,
+            error: message,
+        })
+        throw err
     }
-
-    if (!res.ok) throw new Error(`OLLAMA_CHAT_FAILED: ${res.status} ${await res.text()}`)
-
-    const data = (await res.json()) as OllamaChatResponse
-    const raw = data.message?.content ?? ""
-    const cleaned = raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "").replace(/^[\s\S]*?<\/think>\s*/g, "")
-    const notFoundIdx = cleaned.indexOf("NOT_FOUND_IN_INDEXED_CODEBASE")
-    if (notFoundIdx >= 0) {
-        return cleaned.slice(0, notFoundIdx + "NOT_FOUND_IN_INDEXED_CODEBASE".length).trim()
-    }
-    return cleaned.trim()
 }
 
 export async function detectPreferredLanguage(input: string): Promise<AnswerLanguage> {
+    const start = nowMs()
+    const provider = resolveChatProvider()
+    const callTag = "language"
+
+    if (isDebugEnabled()) {
+        dlog("llm-start", {
+            call: callTag,
+            provider,
+            model: config.chatModel,
+            inputChars: input.length,
+        })
+    }
+
     const messages = [
         {
             role: "system",
@@ -313,62 +438,130 @@ export async function detectPreferredLanguage(input: string): Promise<AnswerLang
                     messages,
                 }),
             })
-            if (!res.ok) return "unknown"
+            if (!res.ok) {
+                dlog("llm-fail", {
+                    call: callTag,
+                    provider,
+                    model: config.chatModel,
+                    ms: elapsedMs(start),
+                    httpStatus: res.status,
+                })
+                return "unknown"
+            }
             const data = (await res.json()) as OllamaChatResponse
             content = data.message?.content ?? ""
         }
 
         const parsed = JSON.parse(content) as { language?: unknown }
-        return parsed.language === "id" || parsed.language === "en" ? parsed.language : "unknown"
-    } catch {
+        const lang = parsed.language === "id" || parsed.language === "en" ? parsed.language : "unknown"
+        dlog("llm-done", {
+            call: callTag,
+            provider,
+            model: config.chatModel,
+            ms: elapsedMs(start),
+            ok: true,
+            lang,
+        })
+        return lang
+    } catch (err) {
+        dlog("llm-fail", {
+            call: callTag,
+            provider,
+            model: config.chatModel,
+            ms: elapsedMs(start),
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+        })
         return "unknown"
     }
 }
 
 export async function chatJson(systemPrompt: string, userPrompt: string): Promise<string> {
+    const start = nowMs()
+    const provider = resolveChatProvider()
+    const callTag = "chatJson"
+
+    if (isDebugEnabled()) {
+        dlog("llm-start", {
+            call: callTag,
+            provider,
+            model: config.chatModel,
+            systemChars: systemPrompt.length,
+            userChars: userPrompt.length,
+            numCtx: config.numCtx,
+        })
+    }
+
     const messages = [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
     ]
 
-    if (isAnthropicCompatible()) {
-        return await chatAnthropic(systemPrompt, userPrompt)
-    }
-
-    if (isOpenAICompatible()) {
-        return await chatOpenAI(messages, true)
-    }
-
-    // Ollama path
-    let res
-    const isQwen3 = config.chatModel.startsWith("qwen3")
-
     try {
-        res = await fetchWithRetry(`${config.ollamaUrl}/api/chat`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                model: config.chatModel,
-                stream: false,
-                format: "json",
-                options: { temperature: 0, num_ctx: config.numCtx },
-                messages: [
-                    {
-                        role: "system",
-                        content: [isQwen3 ? "/no_think" : undefined, systemPrompt].filter(Boolean).join("\n"),
-                    },
-                    { role: "user", content: userPrompt },
-                ],
-            }),
+        let result: string
+
+        if (isAnthropicCompatible()) {
+            result = await chatAnthropic(systemPrompt, userPrompt)
+        } else if (isOpenAICompatible()) {
+            result = await chatOpenAI(messages, true)
+        } else {
+            // Ollama path
+            const isQwen3 = config.chatModel.startsWith("qwen3")
+
+            const res = await fetchWithRetry(`${config.ollamaUrl}/api/chat`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    model: config.chatModel,
+                    stream: false,
+                    format: "json",
+                    options: { temperature: 0, num_ctx: config.numCtx },
+                    messages: [
+                        {
+                            role: "system",
+                            content: [isQwen3 ? "/no_think" : undefined, systemPrompt].filter(Boolean).join("\n"),
+                        },
+                        { role: "user", content: userPrompt },
+                    ],
+                }),
+            })
+
+            if (!res.ok) {
+                const errText = await res.text()
+                dlog("llm-fail", {
+                    call: callTag,
+                    provider,
+                    model: config.chatModel,
+                    ms: elapsedMs(start),
+                    httpStatus: res.status,
+                })
+                throw new Error(`OLLAMA_CHAT_FAILED: ${res.status} ${errText}`)
+            }
+
+            const data = (await res.json()) as OllamaChatResponse
+            const raw = data.message?.content ?? ""
+            result = raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "").replace(/^[\s\S]*?<\/think>\s*/g, "").trim()
+        }
+
+        dlog("llm-done", {
+            call: callTag,
+            provider,
+            model: config.chatModel,
+            ms: elapsedMs(start),
+            ok: true,
+            outChars: result.length,
         })
-    } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        throw new Error(`Ollama is not reachable at ${config.ollamaUrl}. Start Ollama and run: ollama pull ${config.chatModel}\n${message}`)
+        return result
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        dlog("llm-fail", {
+            call: callTag,
+            provider,
+            model: config.chatModel,
+            ms: elapsedMs(start),
+            ok: false,
+            error: message,
+        })
+        throw err
     }
-
-    if (!res.ok) throw new Error(`OLLAMA_CHAT_FAILED: ${res.status} ${await res.text()}`)
-
-    const data = (await res.json()) as OllamaChatResponse
-    const raw = data.message?.content ?? ""
-    return raw.replace(/<think>[\s\S]*?<\/think>\s*/g, "").replace(/^[\s\S]*?<\/think>\s*/g, "").trim()
 }
