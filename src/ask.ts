@@ -109,6 +109,12 @@ const projectFilterIds = normalizeProjectIds(options.project ? [options.project]
 const projectFilterRepos = new Set(reposForProjectIds(projectFilterIds))
 let answerLanguage: AnswerLanguage = "unknown"
 
+// Per-query retrieval degradation flags. Reset at the start of each query in
+// main() so a degraded state from a previous question does not leak forward.
+// Surfaced in the answer output so the user/ops knows keyword search was
+// unavailable and the answer is based on vector results only.
+const retrievalDegradation = { bm25Unavailable: false }
+
 function buildFilter() {
   const must = []
   const should = []
@@ -210,8 +216,21 @@ async function retrieve(queryText: string, resultLimit: number): Promise<Retriev
           }
         }
       } catch (err) {
-        // BM25 retrieve failed (e.g. ECONNRESET during index warm-up) — degrade gracefully
-        console.error("BM25 retrieve failed, skipping BM25 boost:", err instanceof Error ? err.message : err)
+        // BM25 payload retrieval failed (e.g. ECONNRESET during index warm-up).
+        // Degrade to vector-only results, but record + surface the degradation
+        // so it is alertable and the answer does not silently claim keyword
+        // evidence was consulted.
+        retrievalDegradation.bm25Unavailable = true
+        const reason = err instanceof Error ? err.message : String(err)
+        console.error(
+          JSON.stringify({
+            level: "warn",
+            component: "retrieve",
+            event: "bm25_payload_unavailable",
+            reason,
+            missingIds: missingIds.length,
+          }),
+        )
       }
     }
 
@@ -280,20 +299,32 @@ async function retrieveDocumentationSubjectMatches(subjectTerms: string[], resul
   const matches: Array<RetrievedChunk & { score: number }> = []
   let offset: string | number | Record<string, unknown> | null | undefined
 
+  // Push the evidence-type filter into Qdrant (server-side) instead of scrolling
+  // all ~152k points and filtering client-side. Requires the "evidenceTypes"
+  // payload index declared in qdrant.ts.
+  const documentationEvidenceFilter = {
+    key: "evidenceTypes",
+    match: { value: "documentation" },
+  }
+
   do {
-    const filter = buildFilter()
+    const baseFilter = buildFilter()
+    const filter = {
+      ...(baseFilter ?? {}),
+      must: [...(baseFilter?.must ?? []), documentationEvidenceFilter],
+    }
     const page = await qdrant.scroll(config.collectionName, {
       limit: 256,
       with_payload: true,
       with_vector: false,
-      ...(filter ? { filter } : {}),
+      filter,
       ...(offset ? { offset } : {}),
     })
 
     for (const point of page.points) {
       const payload = point.payload as RetrievedPayload | null | undefined
 
-      if (!payload?.content || !payload.evidenceTypes?.includes("documentation")) continue
+      if (!payload?.content) continue
 
       const filePath = payload.filePath?.toLowerCase() ?? ""
       const content = payload.content.toLowerCase()
@@ -380,13 +411,26 @@ async function retrieveExactVocabularyMatches(terms: string[], resultLimit: numb
   const matches: Array<RetrievedChunk & { score: number }> = []
   let offset: string | number | Record<string, unknown> | null | undefined
 
+  // Vocabulary chunks carry evidenceTypes=["documentation"], so narrow the scan
+  // server-side to documentation evidence (much smaller than the full ~152k set)
+  // and keep the filePath "vocabulary://" prefix check client-side. A full
+  // server-side switch is possible after reindexing with source_type="vocabulary".
+  const documentationEvidenceFilter = {
+    key: "evidenceTypes",
+    match: { value: "documentation" },
+  }
+
   do {
-    const filter = buildFilter()
+    const baseFilter = buildFilter()
+    const filter = {
+      ...(baseFilter ?? {}),
+      must: [...(baseFilter?.must ?? []), documentationEvidenceFilter],
+    }
     const page = await qdrant.scroll(config.collectionName, {
       limit: 256,
       with_payload: true,
       with_vector: false,
-      ...(filter ? { filter } : {}),
+      filter,
       ...(offset ? { offset } : {}),
     })
 
@@ -5242,6 +5286,7 @@ function buildExactSymbolAnswer(symbolNames: string[], chunks: RetrievedChunk[])
 }
 
 async function main() {
+  retrievalDegradation.bm25Unavailable = false
   answerLanguage = await detectAnswerLanguage(question)
 
   const questionRoutes = extractQuestionRoutes(question)
@@ -6305,7 +6350,27 @@ async function main() {
       "Do not invent information not present in the decisions above.",
     ].join("\n")
 
-    const decisionAnswer = await chat(decisionPrompt).catch(() => "")
+    // Distinguish "LLM returned nothing" from "LLM call failed". Previously
+    // both collapsed to "" via .catch(() => ""), making a down Ollama/network
+    // error indistinguishable from "no matching decision" and silently falling
+    // through to general retrieval. Now the failure is logged + flagged so it
+    // is alertable, while still degrading safely.
+    let decisionAnswer = ""
+    let decisionLlmFailed = false
+    try {
+      decisionAnswer = await chat(decisionPrompt)
+    } catch (err) {
+      decisionLlmFailed = true
+      const reason = err instanceof Error ? err.message : String(err)
+      console.error(
+        JSON.stringify({
+          level: "warn",
+          component: "decision-answer",
+          event: "llm_call_failed",
+          reason,
+        }),
+      )
+    }
 
     if (decisionAnswer && !/^\s*$/.test(decisionAnswer)) {
       const sourceChunks = compactPayloadSources(decisionPayloads, 8)
@@ -6317,6 +6382,19 @@ async function main() {
         console.log(`- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`)
       }
       return
+    }
+
+    if (decisionLlmFailed) {
+      // The decision LLM call failed (not merely empty) — record that we are
+      // degrading to the general retrieval path instead of answering from decisions.
+      console.error(
+        JSON.stringify({
+          level: "info",
+          component: "decision-answer",
+          event: "degrade_to_general_retrieval",
+          reason: "decision LLM call failed",
+        }),
+      )
     }
   }
 
@@ -6449,6 +6527,10 @@ async function main() {
 
   console.log("\nANSWER\n")
   console.log(localizeAnswer(displayAnswer, question))
+
+  if (retrievalDegradation.bm25Unavailable) {
+    console.log("\n[degraded] keyword (BM25) search was unavailable for this query — answer based on vector results only.")
+  }
 
   console.log("\nSOURCES\n")
 

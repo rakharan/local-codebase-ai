@@ -11,13 +11,27 @@ function delay(ms: number): Promise<void> {
 
 // Bidang yang dipakai sebagai filter di scroll/query — harus diindeks agar tidak full-scan.
 const PAYLOAD_INDEXES: Array<{ field: string; schema: "keyword" | "integer" }> = [
-  { field: "repoName",    schema: "keyword" },
-  { field: "branchName",  schema: "keyword" },
-  { field: "filePath",    schema: "keyword" },
-  { field: "serviceType", schema: "keyword" },
-  { field: "projectIds",  schema: "keyword" },
-  { field: "source_type", schema: "keyword" },
+  { field: "repoName",       schema: "keyword" },
+  { field: "branchName",     schema: "keyword" },
+  { field: "filePath",       schema: "keyword" },
+  { field: "serviceType",    schema: "keyword" },
+  { field: "projectIds",     schema: "keyword" },
+  { field: "source_type",    schema: "keyword" },
+  { field: "evidenceTypes",  schema: "keyword" },
 ]
+
+// Qdrant returns HTTP 409 (or a body containing "Index already exists for field")
+// when a payload index already exists. Only that case is safe to swallow — every
+// other error (connection refused, auth, schema mismatch, server error) must
+// propagate so startup fails loudly instead of silently running unindexed.
+function isIndexAlreadyExistsError(error: unknown): boolean {
+  if (error && typeof error === "object") {
+    const status = (error as { status?: unknown }).status
+    if (status === 409) return true
+  }
+  const message = error instanceof Error ? error.message : String(error)
+  return /already exists/i.test(message)
+}
 
 async function ensurePayloadIndexes(): Promise<void> {
   for (const { field, schema } of PAYLOAD_INDEXES) {
@@ -26,8 +40,14 @@ async function ensurePayloadIndexes(): Promise<void> {
         field_name: field,
         field_schema: schema,
       })
-    } catch {
-      // Index already exists — ignore.
+    } catch (error) {
+      if (isIndexAlreadyExistsError(error)) {
+        // Idempotent: index already created. Safe to ignore.
+        continue
+      }
+      // Unexpected error — propagate so it is visible, not silently unindexed.
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`Failed to ensure payload index for "${field}": ${message}`)
     }
   }
 }

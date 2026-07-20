@@ -40,7 +40,8 @@ const CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000  // 6 hours
 
 let _index: MiniSearchInstance | null = null
 let _indexedAt: number = 0
-const INDEX_TTL_MS = 10 * 60 * 1000
+let _indexedPointCount: number = 0
+const INDEX_TTL_MS = config.bm25IndexTtlMs
 
 const MINISEARCH_OPTS = {
   fields: ["symbolName", "symbols", "tables", "queues", "routes", "filePath", "content"],
@@ -118,7 +119,11 @@ async function loadCached(): Promise<MiniSearchInstance | null> {
     if (!existsSync(cachePath)) return null
     const json = readFileSync(cachePath, "utf8")
     return (MiniSearch as unknown as { loadJSON: (json: string, opts: object) => MiniSearchInstance }).loadJSON(json, MINISEARCH_OPTS)
-  } catch {
+  } catch (error) {
+    // Corrupted/unreadable cache → fall back to cold rebuild, but surface it
+    // so a persistently broken cache does not force a ~60s rebuild silently.
+    const message = error instanceof Error ? error.message : String(error)
+    console.warn(`[bm25] loadCached failed, will cold-rebuild: ${message}`)
     return null
   }
 }
@@ -132,8 +137,11 @@ async function saveToDisk(index: MiniSearchInstance, pointCount: number): Promis
     mkdirSync(dirname(cachePath), { recursive: true })
     writeFileSync(cachePath, JSON.stringify(index.toJSON()), "utf8")
     writeFileSync(metaPath, JSON.stringify({ builtAt: Date.now(), pointCount }), "utf8")
-  } catch {
-    // non-fatal
+  } catch (error) {
+    // Non-fatal: in-memory index still serves queries. But a broken disk cache
+    // would force a ~60s cold rebuild on every restart, so surface the failure.
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(`[bm25] saveToDisk failed (non-fatal): ${message}`)
   }
 }
 
@@ -175,9 +183,35 @@ async function buildIndex(): Promise<MiniSearchInstance> {
   return index
 }
 
+async function getCachedPointCount(): Promise<number> {
+  try {
+    const { existsSync, readFileSync } = await import("node:fs")
+    const { resolve } = await import("node:path")
+    const metaPath = resolve(".data/bm25-index-meta.json")
+    if (!existsSync(metaPath)) return 0
+    const meta = JSON.parse(readFileSync(metaPath, "utf8")) as { pointCount?: number }
+    return meta.pointCount ?? 0
+  } catch {
+    return 0
+  }
+}
+
 export async function getBM25Index(): Promise<MiniSearchInstance> {
   const now = Date.now()
   if (_index && now - _indexedAt < INDEX_TTL_MS) return _index
+
+  // In-process TTL elapsed. Before reloading from disk (a JSON parse over
+  // ~152k points), check whether Qdrant's point count changed since the index
+  // was last built. If unchanged, the in-memory index is still valid — bump
+  // the timestamp and skip the disk reload entirely.
+  if (_index) {
+    const currentPointCount = await getQdrantPointCount()
+    if (currentPointCount > 0 && currentPointCount === _indexedPointCount) {
+      _indexedAt = now
+      console.log(`[bm25] TTL elapsed but point count unchanged (${currentPointCount}) — keeping in-memory index`)
+      return _index
+    }
+  }
 
   // Check cache age first without hitting Qdrant — only validate point count if cache is old
   const cacheAge = await getCacheAge()
@@ -190,13 +224,17 @@ export async function getBM25Index(): Promise<MiniSearchInstance> {
     if (cached) {
       _index = cached
       _indexedAt = now
+      _indexedPointCount = pointCount || await getCachedPointCount()
+      console.log(`[bm25] loaded index from disk (pointCount=${_indexedPointCount}, cacheAgeMs=${cacheAge})`)
       return _index
     }
   }
 
   const fullPointCount = pointCount || await getQdrantPointCount()
+  console.log(`[bm25] cold-building index (pointCount=${fullPointCount})`)
   _index = await buildIndex()
   _indexedAt = now
+  _indexedPointCount = fullPointCount
   await saveToDisk(_index, fullPointCount)
   return _index
 }

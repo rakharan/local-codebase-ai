@@ -1343,8 +1343,86 @@ app.post("/api/decisions/:filename/rollback/:versionId", async (request, respons
   }
 })
 
+// --- Health checks ---
+// Liveness (/api/health): process is alive. Always 200 if the server can respond.
+// Readiness (/api/ready): upstream dependencies (Qdrant + Ollama) are reachable.
+// Readiness is cached briefly so a flood of probes does not hammer the upstreams.
+
+type ReadinessState = {
+  qdrant: "ok" | "down"
+  ollama: "ok" | "down"
+  qdrantDetail: string | undefined
+  ollamaDetail: string | undefined
+}
+
+type CachedReadiness = {
+  checkedAt: number
+  ready: boolean
+  state: ReadinessState
+}
+
+const READINESS_CACHE_TTL_MS = 5_000
+let cachedReadiness: CachedReadiness | null = null
+
+async function fetchWithTimeout(url: string, ms: number): Promise<Response> {
+  const controller = new AbortController()
+  const id = setTimeout(() => controller.abort(), ms)
+  try {
+    return await fetch(url, { signal: controller.signal })
+  } finally {
+    clearTimeout(id)
+  }
+}
+
+async function probeReadiness(): Promise<ReadinessState> {
+  let qdrantStatus: ReadinessState["qdrant"] = "ok"
+  let ollamaStatus: ReadinessState["ollama"] = "ok"
+  let qdrantDetail: string | undefined
+  let ollamaDetail: string | undefined
+
+  try {
+    await qdrant.getCollections()
+  } catch (err) {
+    qdrantStatus = "down"
+    qdrantDetail = err instanceof Error ? err.message : String(err)
+  }
+
+  try {
+    const res = await fetchWithTimeout(`${config.ollamaUrl}/api/tags`, 2_000)
+    if (!res.ok) {
+      ollamaStatus = "down"
+      ollamaDetail = `HTTP ${res.status}`
+    }
+  } catch (err) {
+    ollamaStatus = "down"
+    ollamaDetail = err instanceof Error ? err.message : String(err)
+  }
+
+  return { qdrant: qdrantStatus, ollama: ollamaStatus, qdrantDetail, ollamaDetail }
+}
+
+async function getReadiness(): Promise<CachedReadiness> {
+  if (cachedReadiness && Date.now() - cachedReadiness.checkedAt < READINESS_CACHE_TTL_MS) {
+    return cachedReadiness
+  }
+  const state = await probeReadiness()
+  const ready = state.qdrant === "ok" && state.ollama === "ok"
+  cachedReadiness = { checkedAt: Date.now(), ready, state }
+  return cachedReadiness
+}
+
 app.get("/api/health", (_request, response) => {
+  // Liveness: process is up.
   response.json({ status: "ok" })
+})
+
+app.get("/api/ready", async (_request, response) => {
+  const result = await getReadiness()
+  response.status(result.ready ? 200 : 503).json({
+    ready: result.ready,
+    checkedAt: new Date(result.checkedAt).toISOString(),
+    dependencies: result.state,
+  })
 })
 
 app.get("/api/auth-required", (_request, response) => {
