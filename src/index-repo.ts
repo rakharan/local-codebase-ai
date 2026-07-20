@@ -18,6 +18,29 @@ import { inferProjectIdsForRepo, inferProjectTagForChunk, normalizeProjectIds } 
 
 const serviceTypes = new Set<ServiceType>(["api", "worker", "cron", "library", "unknown"])
 
+// Run async tasks over items with a bounded concurrency limit. Preserves input
+// order in the returned results. Errors propagate (fail-fast) like a plain loop.
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  task: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const limit = Math.max(1, Math.floor(concurrency))
+  const results: R[] = new Array(items.length)
+  let cursor = 0
+
+  async function worker(): Promise<void> {
+    while (cursor < items.length) {
+      const i = cursor++
+      results[i] = await task(items[i]!, i)
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker())
+  await Promise.all(workers)
+  return results
+}
+
 const program = new Command()
 
 function collectOption(value: string, previous: string[] = []): string[] {
@@ -516,7 +539,7 @@ async function main() {
 
   skipped = allChunks.length - chunksToIndex.length
 
-  for (const chunk of chunksToIndex) {
+  await mapWithConcurrency(chunksToIndex, config.indexConcurrency, async (chunk) => {
     await upsertChunk(chunk)
 
     indexed++
@@ -524,7 +547,7 @@ async function main() {
     if (indexed % 10 === 0) {
       console.log(`Indexed ${indexed} chunks...`)
     }
-  }
+  })
 
   await writeRelationshipGraphForRepo(repoName, gitInfo.branchName, relationshipEdges, options.replaceRepo)
 
@@ -547,14 +570,14 @@ async function main() {
 
     let commitIndexed = 0
 
-    for (const chunk of commitsToIndex) {
+    await mapWithConcurrency(commitsToIndex, config.indexConcurrency, async (chunk) => {
       await upsertChunk(chunk)
       commitIndexed++
 
       if (commitIndexed % 10 === 0) {
         console.log(`Indexed ${commitIndexed} commits...`)
       }
-    }
+    })
 
     console.log(`Done indexing commits. Indexed ${commitIndexed}, skipped ${commitChunks.length - commitsToIndex.length}.`)
   }
