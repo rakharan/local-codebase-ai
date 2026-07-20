@@ -34,6 +34,31 @@ export const config = {
 
   // Enable/disable quality gate retry. Set to "false" to disable.
   qualityRetryEnabled: process.env.QUALITY_RETRY !== "false",
+
+  // BM25 in-process index TTL. When this elapses, getBM25Index re-validates
+  // against Qdrant point count and reloads from disk only if data changed.
+  // Default 60 min balances freshness with avoiding repeated disk JSON parses.
+  bm25IndexTtlMs: Number(process.env.BM25_INDEX_TTL_MS ?? 60 * 60 * 1000),
+
+  // Concurrency for embedding + upsert during indexing. Each task hits Ollama
+  // (embedding) and Qdrant (upsert). Local Ollama on CPU is largely serial, so
+  // keep this modest. Raise only on GPU/remote Ollama.
+  indexConcurrency: Number(process.env.INDEX_CONCURRENCY ?? 4),
+
+  // Chunker tuning. Changing these after indexing affects NEW chunks only —
+  // existing indexed chunks keep their original boundaries until reindexed.
+  chunkMinLines: Number(process.env.CHUNK_MIN_LINES ?? 5),
+  chunkMaxLines: Number(process.env.CHUNK_MAX_LINES ?? 120),
+  chunkMinChars: Number(process.env.CHUNK_MIN_CHARS ?? 100),
+  chunkMaxChars: Number(process.env.CHUNK_MAX_CHARS ?? 2_000),
+  chunkOverlapLines: Number(process.env.CHUNK_OVERLAP_LINES ?? 3),
+
+  // LLM call tuning.
+  maxCloudPromptChars: Number(process.env.MAX_CLOUD_PROMPT_CHARS ?? 60_000),
+  chatMaxAttempts: Number(process.env.CHAT_MAX_ATTEMPTS ?? 4),
+
+  // Documentation chunking.
+  maxDocChunkChars: Number(process.env.MAX_DOC_CHUNK_CHARS ?? 1_500),
 }
 
 export function setChatModel(model: string): void {
