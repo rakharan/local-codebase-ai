@@ -15,6 +15,7 @@ import {
 } from "./ask/account-types.js"
 import { compactPayloadSources, compactRetrievedChunks } from "./ask/compaction.js"
 import { buildDoctorInventoryAnswer } from "./ask/doctor.js"
+import { evaluateAnswerQuality, logQualityEvaluation } from "./ask/answer-evaluation.js"
 import {
   answerLanguageLabel as answerLanguageLabelFor,
   detectAnswerLanguage,
@@ -6424,7 +6425,24 @@ async function main() {
     history.length > 0 ? "- This question may be a follow-up. Use the previous conversation to resolve pronouns like 'it', 'that', or 'the endpoint', but still ground your answer in the retrieved context above." : undefined,
   ].filter((line): line is string => typeof line === "string").join("\n")
 
-  const answer = await chat(prompt)
+  let answer = await chat(prompt)
+
+  // Quality gate: evaluate and retry if needed
+  if (config.qualityRetryEnabled && fallbackContextChunks.length > 0) {
+    const evaluation = await evaluateAnswerQuality(question, answer, fallbackContextChunks)
+    await logQualityEvaluation(question, evaluation, false, answer)
+
+    if (evaluation.score < config.qualityThreshold) {
+      console.log(`\n⚠ Answer quality low (${evaluation.score.toFixed(2)}), retrying with refinement...\n`)
+
+      const retryPrompt = `${prompt}\n\nPrevious answer had quality issues:\n${evaluation.issues.join("\n")}\n\nPlease improve the answer based on this feedback.`
+      answer = await chat(retryPrompt)
+
+      const retryEval = await evaluateAnswerQuality(question, answer, fallbackContextChunks)
+      await logQualityEvaluation(question, retryEval, true, answer)
+    }
+  }
+
   const displayAnswer = /\bNOT_FOUND_IN_INDEXED_CODEBASE\b/.test(answer) && !/\bI do not have\b/i.test(answer)
     ? `I do not have enough indexed evidence for the requested topic.\n\n${answer}`
     : answer

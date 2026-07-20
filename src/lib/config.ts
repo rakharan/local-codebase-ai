@@ -28,6 +28,12 @@ export const config = {
 
   // Max tokens in LLM response. Default 2048 is fine for most answers.
   maxTokens: Number(process.env.MAX_TOKENS ?? 2048),
+
+  // Quality gate threshold. Answers scoring below this trigger retry.
+  qualityThreshold: Number(process.env.QUALITY_THRESHOLD ?? 0.5),
+
+  // Enable/disable quality gate retry. Set to "false" to disable.
+  qualityRetryEnabled: process.env.QUALITY_RETRY !== "false",
 }
 
 export function setChatModel(model: string): void {
