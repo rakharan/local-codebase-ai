@@ -30,9 +30,9 @@ export type AnswerLanguage = "id" | "en" | "unknown"
 
 // Cloud models have smaller context windows than local Ollama.
 // Truncate prompts that exceed this limit to avoid 400 errors.
-const MAX_CLOUD_PROMPT_CHARS = 60_000
+const MAX_CLOUD_PROMPT_CHARS = config.maxCloudPromptChars
 
-const MAX_ATTEMPTS = 4
+const MAX_ATTEMPTS = config.chatMaxAttempts
 const MAX_EMBED_INPUT_CHARS = 3_500
 
 const SYSTEM_PROMPT = [

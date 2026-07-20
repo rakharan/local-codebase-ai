@@ -61,22 +61,42 @@ function normalizeRepoName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9_-]/g, "")
 }
 
-function mapDocFolderToRepoNames(folderName: string): string[] {
-  const mapping: Record<string, string[]> = {
-    "ims-docs": ["ims-mrg", "ims-askap", "ims-tf2"],
-    "isignal-docs": ["tf2-ois", "fa-trade-publisher", "ims-tf2"],
-    "wallet-docs": ["tf2-ois"],
-    "fa-porto-docs": ["tf2-porto-service"],
-    "analyst-docs": ["tf2-ois"],
-    "channel-subs-docs": ["tf2-ois"],
-    "keteng-docs": ["tf2-ois"],
-    "devops-docs": ["tf2-ois", "ims-tf2", "mrg-accounts", "tf2-porto-service", "tf2-sinyo"],
-    "product-knowledge": ["tf2-ois", "ims-tf2", "mrg-accounts"],
-  }
+// Doc-folder → repo mapping. Override at runtime via the DOC_FOLDER_REPO_MAP
+// env var (a JSON object of the same shape) without changing code.
+const DEFAULT_DOC_FOLDER_REPO_MAP: Record<string, string[]> = {
+  "ims-docs": ["ims-mrg", "ims-askap", "ims-tf2"],
+  "isignal-docs": ["tf2-ois", "fa-trade-publisher", "ims-tf2"],
+  "wallet-docs": ["tf2-ois"],
+  "fa-porto-docs": ["tf2-porto-service"],
+  "analyst-docs": ["tf2-ois"],
+  "channel-subs-docs": ["tf2-ois"],
+  "keteng-docs": ["tf2-ois"],
+  "devops-docs": ["tf2-ois", "ims-tf2", "mrg-accounts", "tf2-porto-service", "tf2-sinyo"],
+  "product-knowledge": ["tf2-ois", "ims-tf2", "mrg-accounts"],
+}
 
+function loadDocFolderRepoMap(): Record<string, string[]> {
+  const envValue = process.env.DOC_FOLDER_REPO_MAP
+  if (envValue && envValue.trim()) {
+    try {
+      const parsed = JSON.parse(envValue)
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, string[]>
+      }
+      console.warn("[index-docs] DOC_FOLDER_REPO_MAP is not a JSON object — using defaults")
+    } catch (err) {
+      console.warn(`[index-docs] DOC_FOLDER_REPO_MAP is invalid JSON — using defaults: ${err instanceof Error ? err.message : err}`)
+    }
+  }
+  return DEFAULT_DOC_FOLDER_REPO_MAP
+}
+
+const DOC_FOLDER_REPO_MAP = loadDocFolderRepoMap()
+
+function mapDocFolderToRepoNames(folderName: string): string[] {
   const normalized = normalizeRepoName(folderName)
 
-  for (const [key, repos] of Object.entries(mapping)) {
+  for (const [key, repos] of Object.entries(DOC_FOLDER_REPO_MAP)) {
     if (normalized === normalizeRepoName(key)) {
       return repos
     }
@@ -155,7 +175,7 @@ function extractReposFromFrontmatter(frontmatter: Record<string, string>): strin
   return [raw]
 }
 
-const MAX_DOC_CHUNK_CHARS = 1_500
+const MAX_DOC_CHUNK_CHARS = config.maxDocChunkChars
 
 function projectHashKey(projectIds: string[]): string {
   return projectIds.length > 0 ? projectIds.join(",") : "unassigned"

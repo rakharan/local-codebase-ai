@@ -2,6 +2,7 @@ import { sha256, uuidFromHash } from "./hash.js"
 import { inferEvidenceTypes } from "./evidence.js"
 import { inferRelationshipHints } from "./relationships.js"
 import { extractStructuredFacts, type StructuredFact } from "./facts.js"
+import { config } from "./config.js"
 import type { EvidenceType } from "./evidence.js"
 import type { RelationshipHints } from "./relationships.js"
 import type { SourceFile } from "./files.js"
@@ -39,11 +40,11 @@ export type CodeChunk = {
 
 export type ServiceType = "api" | "worker" | "cron" | "library" | "unknown"
 
-const MIN_LINES = 5
-const MIN_CHARS = 100
-const MAX_LINES = 120
-const MAX_CHARS = 2_000
-const OVERLAP_LINES = 3
+const MIN_LINES = config.chunkMinLines
+const MIN_CHARS = config.chunkMinChars
+const MAX_LINES = config.chunkMaxLines
+const MAX_CHARS = config.chunkMaxChars
+const OVERLAP_LINES = config.chunkOverlapLines
 export const INDEX_SCHEMA_VERSION = "branches-v2"
 
 // ---------------------------------------------------------------------------
