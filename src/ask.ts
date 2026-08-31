@@ -367,68 +367,50 @@ async function retrieveDocumentationSubjectMatches(subjectTerms: string[], resul
 
   if (terms.length === 0) return []
 
+  // BM25 candidate retrieval — replaces 100+ scroll calls with a single
+  // index search. Documentation chunks are now indexed in BM25 (schema v3).
+  const bm25Results = await bm25Search(terms.join(" "), Math.max(resultLimit * 6, 300))
+
+  if (bm25Results.length === 0) return []
+
+  const candidates = await retrieveChunksByIds(bm25Results.map(r => r.id))
+
   const matches: Array<RetrievedChunk & { score: number }> = []
-  let offset: string | number | Record<string, unknown> | null | undefined
 
-  // Push the evidence-type filter into Qdrant (server-side) instead of scrolling
-  // all ~152k points and filtering client-side. Requires the "evidenceTypes"
-  // payload index declared in qdrant.ts.
-  const documentationEvidenceFilter = {
-    key: "evidenceTypes",
-    match: { value: "documentation" },
-  }
+  for (const chunk of candidates) {
+    const payload = chunk.payload
+    if (!payload?.content) continue
+    if (!payload.evidenceTypes?.includes("documentation")) continue
 
-  do {
-    const baseFilter = buildFilter()
-    const filter = {
-      ...(baseFilter ?? {}),
-      must: [...(baseFilter?.must ?? []), documentationEvidenceFilter],
-    }
-    const page = await qdrant.scroll(config.collectionName, {
-      limit: 256,
-      with_payload: true,
-      with_vector: false,
-      filter,
-      ...(offset ? { offset } : {}),
-    })
+    const filePath = payload.filePath?.toLowerCase() ?? ""
+    const content = payload.content.toLowerCase()
+    const text = `${filePath}\n${content}`
+    let score = 0
 
-    for (const point of page.points) {
-      const payload = point.payload as RetrievedPayload | null | undefined
+    for (const term of terms) {
+      const termPattern = new RegExp(`\\b${escapeRegExp(term)}\\b`, "i")
 
-      if (!payload?.content) continue
-
-      const filePath = payload.filePath?.toLowerCase() ?? ""
-      const content = payload.content.toLowerCase()
-      const text = `${filePath}\n${content}`
-      let score = 0
-
-      for (const term of terms) {
-        const termPattern = new RegExp(`\\b${escapeRegExp(term)}\\b`, "i")
-
-        if (term.length <= 3) {
-          if (termPattern.test(text)) score += 12
-          if (new RegExp(`[\\\\/]${escapeRegExp(term)}[-_][a-z0-9_-]*docs?[\\\\/]`, "i").test(filePath)) score += 70
-          if (new RegExp(`\\(${escapeRegExp(term.toUpperCase())}\\)`).test(payload.content ?? "")) score += 45
-        } else if (text.includes(term)) {
-          score += 12
-          // Extra boost when the term appears in the file path (doc is *about* this term)
-          if (new RegExp(`[\\\\/]${escapeRegExp(term)}[-_][a-z0-9_-]*docs?[\\\\/]`, "i").test(filePath)) score += 70
-          if (filePath.includes(term)) score += 30
-        }
+      if (term.length <= 3) {
+        if (termPattern.test(text)) score += 12
+        if (new RegExp(`[\\\\/]${escapeRegExp(term)}[-_][a-z0-9_-]*docs?[\\\\/]`, "i").test(filePath)) score += 70
+        if (new RegExp(`\\(${escapeRegExp(term.toUpperCase())}\\)`).test(payload.content ?? "")) score += 45
+      } else if (text.includes(term)) {
+        score += 12
+        // Extra boost when the term appears in the file path (doc is *about* this term)
+        if (new RegExp(`[\\\\/]${escapeRegExp(term)}[-_][a-z0-9_-]*docs?[\\\\/]`, "i").test(filePath)) score += 70
+        if (filePath.includes(term)) score += 30
       }
-
-      if (/docs:[^/\\]+[/\\]index\.mdx?$/i.test(payload.filePath ?? "")) score += 55
-      if (score <= 0) continue
-
-      matches.push({
-        id: String(point.id),
-        payload,
-        score: score + scoreDocLocalePreference(payload),
-      })
     }
 
-    offset = page.next_page_offset
-  } while (offset)
+    if (/docs:[^/\\]+[/\\]index\.mdx?$/i.test(payload.filePath ?? "")) score += 55
+    if (score <= 0) continue
+
+    matches.push({
+      id: chunk.id,
+      payload,
+      score: score + scoreDocLocalePreference(payload),
+    })
+  }
 
   return matches
     .sort((left, right) => right.score - left.score)
@@ -479,104 +461,199 @@ async function retrieveExactVocabularyMatches(terms: string[], resultLimit: numb
 
   if (exactTerms.length === 0) return []
 
+  // BM25 candidate retrieval — vocabulary chunks are now indexed (schema v3).
+  const bm25Results = await bm25Search(exactTerms.join(" "), Math.max(resultLimit * 6, 200))
+
+  if (bm25Results.length === 0) return []
+
+  const candidates = await retrieveChunksByIds(bm25Results.map(r => r.id))
   const matches: Array<RetrievedChunk & { score: number }> = []
-  let offset: string | number | Record<string, unknown> | null | undefined
 
-  // Vocabulary chunks carry evidenceTypes=["documentation"], so narrow the scan
-  // server-side to documentation evidence (much smaller than the full ~152k set)
-  // and keep the filePath "vocabulary://" prefix check client-side. A full
-  // server-side switch is possible after reindexing with source_type="vocabulary".
-  const documentationEvidenceFilter = {
-    key: "evidenceTypes",
-    match: { value: "documentation" },
+  for (const chunk of candidates) {
+    const payload = chunk.payload
+    if (!payload?.content || !payload.filePath?.startsWith("vocabulary://")) continue
+
+    const score = scoreExactTermMatch(payload, exactTerms)
+
+    if (score <= 0) continue
+
+    matches.push({ id: chunk.id, payload, score })
   }
-
-  do {
-    const baseFilter = buildFilter()
-    const filter = {
-      ...(baseFilter ?? {}),
-      must: [...(baseFilter?.must ?? []), documentationEvidenceFilter],
-    }
-    const page = await qdrant.scroll(config.collectionName, {
-      limit: 256,
-      with_payload: true,
-      with_vector: false,
-      filter,
-      ...(offset ? { offset } : {}),
-    })
-
-    for (const point of page.points) {
-      const payload = point.payload as RetrievedPayload | null | undefined
-
-      if (!payload?.content || !payload.filePath?.startsWith("vocabulary://")) continue
-
-      const score = scoreExactTermMatch(payload, exactTerms)
-
-      if (score <= 0) continue
-
-      matches.push({
-        id: String(point.id),
-        payload,
-        score,
-      })
-    }
-
-    offset = page.next_page_offset
-  } while (offset)
 
   return matches
     .sort((left, right) => right.score - left.score)
     .slice(0, resultLimit)
 }
 
+// Extract code identifiers from documentation chunks and retrieve matching code chunks.
+// Bridges the vocabulary gap: docs use prose ("Auto Copy system") while code uses
+// identifiers (dsc_bot_copy, AMQPPubSubSignalCopy, CronCheckAutoCopyTrade).
+async function retrieveCodeFromDocReferences(docChunks: RetrievedChunk[], resultLimit: number): Promise<RetrievedChunk[]> {
+  if (docChunks.length === 0) return []
+
+  // Collect all doc content + file paths
+  const docText = docChunks
+    .map(c => `${c.payload.filePath ?? ""}\n${c.payload.content ?? ""}`)
+    .join("\n")
+
+  // Extract repo names mentioned in the docs — used to filter results so
+  // unrelated repos (e.g. ea-service matching "signal") are excluded.
+  // Match hyphenated lowercase identifiers like fa-trade-publisher, tf2-ois.
+  const docRepoNames = new Set<string>()
+  for (const m of docText.matchAll(/\b([a-z][a-z0-9]*(?:-[a-z0-9]+){1,})\b/g)) {
+    const repo = m[1]
+    if (repo && repo.length >= 5 && !["auto-copy", "end-to-end", "fa-trade", "tf-documentation"].includes(repo)) {
+      docRepoNames.add(repo)
+    }
+  }
+
+  // Extract code-like identifiers that appear in documentation
+  const identifiers = new Set<string>()
+
+  // SCREAMING_CASE constants (AUTO_COPY_MINIMUM_EQUITY, POINT_LEVELS)
+  for (const m of docText.matchAll(/\b[A-Z][A-Z0-9_]{3,}\b/g)) {
+    const term = m[0]
+    if (term && !["TODO", "FIXME", "NOTE", "WARN", "HTTP", "HTTPS", "URL", "API", "JSON", "SQL", "PHP", "MT4", "MT5", "RPC", "AMQP", "CSS", "HTML", "SMTP", "UUID"].includes(term)) {
+      identifiers.add(term)
+    }
+  }
+
+  // CamelCase class/function names (AMQPPubSubSignalCopy, CronCheckDeals, SignalBroadcast)
+  for (const m of docText.matchAll(/\b[A-Z][a-zA-Z0-9]{5,}\b/g)) {
+    const term = m[0]
+    if (term && !["AutoCopy", "MetaTrader", "WebSocket", "Docusaurus", "Dockerfile", "Jenkins", "GitHub", "JavaScript", "TypeScript", "Mongoose", "ECONNRESET"].includes(term)) {
+      identifiers.add(term)
+    }
+  }
+
+  // snake_case identifiers (dsc_bot_copy, signal_settled, platform_type)
+  for (const m of docText.matchAll(/\b(?:dsc|mrg|tf|fa|ois)_[a-z][a-z0-9_]{2,}\b/g)) {
+    if (m[0]) identifiers.add(m[0])
+  }
+
+  // PHP class::method (Helper::requestAPI, Schema::create)
+  for (const m of docText.matchAll(/\b([A-Z][a-zA-Z]+)::([a-zA-Z]+)\b/g)) {
+    if (m[0]) identifiers.add(m[0])
+    if (m[1]) identifiers.add(m[1])
+  }
+
+  // Known repo names from registry — these go FIRST in search terms so they
+  // aren't cut off by the 32-term limit.
+  const repoSearchTerms: string[] = []
+  for (const repo of registryExpansion.terms) {
+    if (repo.length >= 3) {
+      identifiers.add(repo)
+      repoSearchTerms.push(repo)
+    }
+  }
+
+  if (identifiers.size === 0) return []
+
+  // Prioritize repo names first, then fill with other identifiers
+  const searchTerms = unique([
+    ...repoSearchTerms,
+    ...[...docRepoNames],
+    ...[...identifiers].filter(t => !repoSearchTerms.includes(t)),
+  ], 48)
+  const bm25Results = await bm25Search(searchTerms.join(" "), Math.max(resultLimit * 4, 200))
+
+  if (bm25Results.length === 0) return []
+
+  // Fetch payloads for BM25 hits
+  const candidates = await retrieveChunksByIds(bm25Results.map(r => r.id))
+
+  // Only keep code chunks (exclude documentation — docs are already in the pool).
+  // Filter to repos mentioned in the docs to avoid false positives (e.g.
+  // ea-service matching "signal" but unrelated to iSignal).
+  return candidates
+    .filter(chunk => chunk.payload.content)
+    .filter(chunk => !chunk.payload.evidenceTypes?.includes("documentation"))
+    .filter(chunk => {
+      if (docRepoNames.size === 0) return true
+      const repoName = chunk.payload.repoName?.toLowerCase() ?? ""
+      return docRepoNames.has(repoName)
+    })
+    .slice(0, resultLimit)
+}
+
+// Retrieve sibling docs from the same documentation section.
+// When we find isignal-docs/edge-cases.md, also fetch cron-jobs/index.md,
+// features/edit.md, etc. — these contain specific identifiers (CronCheckDeals,
+// dsc_bot_copy) that feed into doc-ref-code-retrieval.
+async function retrieveDocSectionSiblings(docChunks: RetrievedChunk[], maxResults: number): Promise<RetrievedChunk[]> {
+  const sectionPaths = new Set<string>()
+
+  for (const chunk of docChunks) {
+    const filePath = chunk.payload.filePath ?? ""
+    // Extract doc section: "isignal-docs" from "my-website/docs/isignal-docs/features/edge-cases.md"
+    // or from "docs:isignal-docs\index.mdx"
+    const match = filePath.match(/([a-z][-a-z0-9]*-docs?)\b/i)
+    if (match && match[1]) {
+      sectionPaths.add(match[1].toLowerCase())
+    }
+  }
+
+  if (sectionPaths.size === 0) return []
+
+  // Search BM25 for docs containing the section path in their filePath
+  const searchTerms = [...sectionPaths].slice(0, 5)
+  const bm25Results = await bm25Search(searchTerms.join(" "), Math.max(maxResults * 3, 72))
+
+  if (bm25Results.length === 0) return []
+
+  const candidates = await retrieveChunksByIds(bm25Results.map(r => r.id))
+
+  // Deduplicate against already-retrieved doc chunks
+  const existingIds = new Set(docChunks.map(c => c.id))
+
+  return candidates
+    .filter(chunk => chunk.payload.content)
+    .filter(chunk => chunk.payload.evidenceTypes?.includes("documentation"))
+    .filter(chunk => {
+      const filePath = chunk.payload.filePath?.toLowerCase() ?? ""
+      return [...sectionPaths].some(path => filePath.includes(path))
+    })
+    .filter(chunk => !existingIds.has(chunk.id))
+    .slice(0, maxResults)
+}
+
 async function retrieveMetaTraderTermMatches(term: "MT4" | "MT5", resultLimit: number): Promise<RetrievedChunk[]> {
+  // BM25 candidate retrieval — MetaTrader config chunks have identifiers (symbols,
+  // routes) so they're already in the BM25 index.
+  const searchTerms = [term, "MetaTrader", "platform_type", "metaserver", "ServerPlatform", "VOLUME_MULTIPLIER"]
+  const bm25Results = await bm25Search(searchTerms.join(" "), Math.max(resultLimit * 6, 300))
+
+  if (bm25Results.length === 0) return []
+
+  const candidates = await retrieveChunksByIds(bm25Results.map(r => r.id))
   const matches: Array<RetrievedChunk & { score: number }> = []
   const termPattern = new RegExp(`(?:^|[^a-zA-Z0-9])${term}(?:[^a-zA-Z0-9]|$)`, "i")
-  let offset: string | number | Record<string, unknown> | null | undefined
 
-  do {
-    const filter = buildFilter()
-    const page = await qdrant.scroll(config.collectionName, {
-      limit: 256,
-      with_payload: true,
-      with_vector: false,
-      ...(filter ? { filter } : {}),
-      ...(offset ? { offset } : {}),
-    })
+  for (const chunk of candidates) {
+    const payload = chunk.payload
+    if (!payload?.content) continue
+    if (/devops-docs/i.test(payload.filePath ?? "")) continue
 
-    for (const point of page.points) {
-      const payload = point.payload as RetrievedPayload | null | undefined
+    const text = `${payload.filePath ?? ""}\n${payload.content}`
 
-      if (!payload?.content) continue
-      if (/devops-docs/i.test(payload.filePath ?? "")) continue
+    if (!termPattern.test(text)) continue
+    if (!/metatrader|platform_type|metaserver|serverplatform|tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier|akun metatrader/i.test(text)) continue
 
-      const text = `${payload.filePath ?? ""}\n${payload.content}`
+    let score = 0
+    const filePath = payload.filePath?.toLowerCase() ?? ""
 
-      if (!termPattern.test(text)) continue
-      if (!/metatrader|platform_type|metaserver|serverplatform|tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier|akun metatrader/i.test(text)) continue
+    if (/tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier/i.test(text)) score += 80
+    if (/platform_type|metaserver_id|ServerPlatform/i.test(text)) score += 45
+    if (/MetaTrader|metatrader/i.test(text)) score += 30
+    if (filePath.includes("libs/config")) score += 35
+    if (filePath.includes("models/user") || filePath.includes("models/demo") || filePath.includes("models/real")) score += 18
+    if (payload.evidenceTypes?.includes("documentation")) score -= 12
+    if (term === "MT4" && (/platform_type\s*==\s*0\b/.test(text) || /["']?platform_type["']?\s*:\s*0\b/.test(text))) score += 60
+    if (term === "MT5" && (/platform_type\s*==\s*3\b/.test(text) || /["']?platform_type["']?\s*:\s*3\b/.test(text))) score += 60
+    if (term === "MT5" && (/platform_type\s*==\s*5\b/.test(text) || /["']?platform_type["']?\s*:\s*5\b/.test(text))) score += 60
 
-      let score = 0
-      const filePath = payload.filePath?.toLowerCase() ?? ""
-
-      if (/tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier/i.test(text)) score += 80
-      if (/platform_type|metaserver_id|ServerPlatform/i.test(text)) score += 45
-      if (/MetaTrader|metatrader/i.test(text)) score += 30
-      if (filePath.includes("libs/config")) score += 35
-      if (filePath.includes("models/user") || filePath.includes("models/demo") || filePath.includes("models/real")) score += 18
-      if (payload.evidenceTypes?.includes("documentation")) score -= 12
-      if (term === "MT4" && (/platform_type\s*==\s*0\b/.test(text) || /["']?platform_type["']?\s*:\s*0\b/.test(text))) score += 60
-      if (term === "MT5" && (/platform_type\s*==\s*3\b/.test(text) || /["']?platform_type["']?\s*:\s*3\b/.test(text))) score += 60
-      if (term === "MT5" && (/platform_type\s*==\s*5\b/.test(text) || /["']?platform_type["']?\s*:\s*5\b/.test(text))) score += 60
-
-      matches.push({
-        id: String(point.id),
-        payload,
-        score,
-      })
-    }
-
-    offset = page.next_page_offset
-  } while (offset)
+    matches.push({ id: chunk.id, payload, score })
+  }
 
   return matches
     .sort((left, right) => right.score - left.score)
@@ -2789,6 +2866,7 @@ function mergeChunks(chunks: RetrievedChunk[], maxResults = Math.max(limit, 12))
 
 function chunkHasStrongQuestionEvidence(chunk: RetrievedPayload, questionText: string): boolean {
   const text = [
+    chunk.repoName ?? "",
     chunk.filePath ?? "",
     chunk.content ?? "",
     ...(chunk.routes ?? []),
@@ -2814,6 +2892,7 @@ function chunkHasStrongQuestionEvidence(chunk: RetrievedPayload, questionText: s
 function scoreFallbackContextChunk(chunk: RetrievedPayload, questionText: string): number {
   const lowerQuestion = questionText.toLowerCase()
   const text = [
+    chunk.repoName ?? "",
     chunk.filePath ?? "",
     chunk.content ?? "",
     ...(chunk.routes ?? []),
@@ -2832,7 +2911,7 @@ function scoreFallbackContextChunk(chunk: RetrievedPayload, questionText: string
   }
   if (chunk.filePath?.startsWith("vocabulary://")) score += questionAsksAboutGlossary(questionText) ? 50 : 8
   if (chunk.filePath?.startsWith("doctor:") || chunk.filePath?.startsWith("doctor-fact:")) score += questionAsksInventory(questionText) ? 80 : 20
-  if (chunk.evidenceTypes?.includes("documentation")) score += questionAsksAboutGlossary(questionText) || questionAsksHowWorks(questionText) || questionAsksInventory(questionText) ? 45 : -12
+  if (chunk.evidenceTypes?.includes("documentation")) score += questionAsksAboutGlossary(questionText) || questionAsksHowWorks(questionText) || questionAsksInventory(questionText) ? 25 : -12
   // Boost comment chunks for rationale/meaning questions — comments often explain WHY
   if (chunk.evidenceTypes?.includes("comment")) {
     score += /\b(why|kenapa|mengapa|what does|apa itu|artinya|maksud|mean|means|meaning|rationale|reason|alasan|explain|jelasin|jelaskan)\b/i.test(questionText) ? 35 : 8
@@ -2840,6 +2919,13 @@ function scoreFallbackContextChunk(chunk: RetrievedPayload, questionText: string
   // Boost migration chunks for "what does X mean" questions about DB columns/values
   if (chunk.evidenceTypes?.includes("migration")) {
     score += /\b(status|value|nilai|arti|mean|means|apa itu|what does|column|kolom)\b/i.test(questionText) ? 25 : 0
+  }
+  // For "how works" questions, boost implementation code over docs —
+  // code chunks with routes/queues/tables show the actual implementation.
+  if (questionAsksHowWorks(questionText) && !chunk.evidenceTypes?.includes("documentation")) {
+    if ((chunk.routes?.length ?? 0) > 0 || (chunk.queueNames?.length ?? 0) > 0 || (chunk.exchangeNames?.length ?? 0) > 0 || (chunk.dbTables?.length ?? 0) > 0 || (chunk.symbols?.length ?? 0) > 0) {
+      score += 35
+    }
   }
   if ((chunk.routes?.length ?? 0) > 0) score += 28
   if ((chunk.symbols?.length ?? 0) > 0) score += 18
@@ -6090,6 +6176,28 @@ async function main() {
     dlog("stage", { name: "expansion-retrieval", ms: elapsedMs(expansionStart), queries: expansionQueries.length, chunks: expandedChunks.length })
   }
 
+  // Bridge vocabulary gap: extract code identifiers from retrieved documentation
+  // chunks and find the actual implementation code they reference.
+  // First, expand to sibling docs from the same doc section — e.g., if we found
+  // isignal-docs/edge-cases.md, also fetch cron-jobs/index.md which contains
+  // specific identifiers (CronCheckDeals, etc.) that lead to implementation code.
+  const docChunksForExpansion = [...preferredLocaleDocChunks, ...exactDocumentationSubjectChunks, ...isignalDocChunks, ...preferredLocaleDocNeighborChunks, ...exactDocumentationSubjectNeighborChunks]
+  const docSectionStart = nowMs()
+  const docSectionSiblings = docChunksForExpansion.length > 0
+    ? await retrieveDocSectionSiblings(docChunksForExpansion, 24)
+    : []
+  if (docSectionSiblings.length > 0) {
+    dlog("stage", { name: "doc-section-expansion", ms: elapsedMs(docSectionStart), siblingDocs: docSectionSiblings.length })
+  }
+  const docChunksForCodeRef = [...docChunksForExpansion, ...docSectionSiblings]
+  const docRefStart = nowMs()
+  const docRefCodeChunks = docChunksForCodeRef.length > 0
+    ? await retrieveCodeFromDocReferences(docChunksForCodeRef, Math.max(retrievalLimit, 24))
+    : []
+  if (docRefCodeChunks.length > 0) {
+    dlog("stage", { name: "doc-ref-code-retrieval", ms: elapsedMs(docRefStart), codeChunks: docRefCodeChunks.length })
+  }
+
   // For decision-intent questions, always fetch approved decision chunks directly
   // and prepend them — they must not compete for slots against code chunks.
   const decisionChunks: RetrievedChunk[] = isDecisionIntentQuestion
@@ -6113,6 +6221,9 @@ async function main() {
       ...exactChunks,
       ...symbolChunks,
       ...exactDetailChunks,
+      // Code chunks from doc-ref retrieval go early — compactRetrievedChunks is
+      // first-come-first-served, so code must be ahead of docs to survive the limit.
+      ...docRefCodeChunks,
       // isignalDocChunks first — they are explicitly scrolled for timeline/eligibility
       // questions and must not be crowded out by docs:id chunks from other repos
       ...isignalDocChunks,
@@ -6120,6 +6231,7 @@ async function main() {
       ...preferredLocaleDocNeighborChunks,
       ...exactDocumentationSubjectChunks,
       ...exactDocumentationSubjectNeighborChunks,
+      ...docSectionSiblings,
       ...exactTermChunks,
       ...exactVocabularyChunks,
       ...exactMetaTraderChunks,
@@ -6242,6 +6354,11 @@ async function main() {
   const deterministicEndpointAnswer = exactEndpointInspection
     ? buildExactEndpointDetailAnswer(routeDefinitions, endpointFacts, genericDownstreamFacts, chunks, upstreamFacts)
     : undefined
+
+  // In deep mode, skip ALL deterministic fast paths — let the LLM synthesize
+  // from the full retrieved context for richer, more nuanced answers.
+  fastPaths: {
+    if (deepMode) break fastPaths
 
   if (deterministicExactAnswer || deterministicEndpointAnswer) {
     // Build source list from precise evidence chunks used in the answer.
@@ -6513,7 +6630,11 @@ async function main() {
     return
   }
 
-  const mermaidDiagramAnswer = await buildMermaidDiagramAnswer(chunks, question)
+  // In deep mode, skip the deterministic mermaid fast path — let the LLM synthesize
+  // a richer answer using the diagram + surrounding retrieved context.
+  const mermaidDiagramAnswer = !deepMode
+    ? await buildMermaidDiagramAnswer(chunks, question)
+    : undefined
 
   if (mermaidDiagramAnswer) {
     console.log("\nANSWER\n")
@@ -6617,6 +6738,7 @@ async function main() {
 
     return
   }
+  } // end fastPaths
 
   // Fast path for decision-intent questions when approved decisions are available.
   // Send only decision chunks with a focused prompt — avoids noise from code chunks

@@ -3131,35 +3131,42 @@ async function ask() {
     const decoder = new TextDecoder();
     let buffer = '';
 
+    const handleEvent = (line) => {
+      if (!line.startsWith('data: ')) return;
+      let event;
+      try { event = JSON.parse(line.slice(6)); } catch { return; }
+      if (event.type === 'thinking') {
+        messages[msgIndex].content = '💭 Thinking...▌';
+        renderMessages();
+      } else if (event.type === 'progress') {
+        if (messages[msgIndex].streaming) {
+          if (messages[msgIndex].content === '▌' || messages[msgIndex].content === '💭 Thinking...▌') messages[msgIndex].content = '';
+          messages[msgIndex].content += event.text + '\n';
+          renderMessages();
+        }
+      } else if (event.type === 'answer') {
+        messages[msgIndex] = { role: 'assistant', content: event.answer, question, sources: event.sources || [] };
+        saveRecent(question);
+        saveMessages();
+        renderMessages();
+      } else if (event.type === 'error') {
+        const details = event.raw ? `\n\n\`\`\`text\n${event.raw}\n\`\`\`` : '';
+        messages[msgIndex] = { role: 'assistant', content: `**Error:** ${event.error}${details}`, question, sources: [] };
+        saveMessages();
+        renderMessages();
+      }
+    };
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const event = JSON.parse(line.slice(6));
-          if (event.type === 'thinking') {
-            messages[msgIndex].content = '💭 Thinking...▌';
-            renderMessages();
-          } else if (event.type === 'answer') {
-            saveRecent(question);
-            messages[msgIndex] = { role: 'assistant', content: event.answer, question, sources: event.sources || [] };
-            saveMessages();
-            renderMessages();
-          } else if (event.type === 'error') {
-            const details = event.raw ? `\n\n\`\`\`text\n${event.raw}\n\`\`\`` : '';
-            messages[msgIndex] = { role: 'assistant', content: `**Error:** ${event.error}${details}`, question, sources: [] };
-            saveMessages();
-            renderMessages();
-          }
-        } catch { /* ignore parse errors */ }
-      }
+      for (const line of lines) handleEvent(line);
     }
+    // Flush final buffered event (answer often arrives without trailing newline)
+    if (buffer.trim()) handleEvent(buffer);
   } catch (err) {
     messages.push({ role: 'assistant', content: `**Network error:** ${err.message}`, question, sources: [] });
     saveMessages();

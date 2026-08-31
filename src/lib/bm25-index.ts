@@ -64,7 +64,7 @@ const BUILD_LOCK_TIMEOUT_MS = config.bm25WaitTimeoutMs  // env-configurable; def
 const BUILD_LOCK_POLL_MS = 2_000               // poll interval when waiting for another process
 
 // Bump when the cache format changes to invalidate old caches.
-const CACHE_SCHEMA_VERSION = 2
+const CACHE_SCHEMA_VERSION = 4
 
 type CacheMeta = {
   schemaVersion: number
@@ -79,10 +79,10 @@ let _indexedPointCount: number = 0
 const INDEX_TTL_MS = config.bm25IndexTtlMs
 
 const MINISEARCH_OPTS = {
-  fields: ["symbolName", "symbols", "tables", "queues", "routes", "filePath", "content"],
+  fields: ["symbolName", "symbols", "tables", "queues", "routes", "filePath", "content", "repoName"],
   storeFields: ["id", "repoName", "branchName", "filePath", "startLine", "endLine", "chunkType", "symbolName"],
   searchOptions: {
-    boost: { symbolName: 4, symbols: 3, tables: 3, queues: 3, routes: 2, filePath: 1.5, content: 1 },
+    boost: { symbolName: 4, symbols: 3, tables: 3, queues: 3, routes: 2, filePath: 1.5, repoName: 2, content: 1 },
     fuzzy: 0.1,
     prefix: true,
   },
@@ -326,6 +326,7 @@ async function buildIndex(): Promise<MiniSearchInstance> {
         || (payload.queueNames?.length ?? 0) > 0
         || (payload.routes?.length ?? 0) > 0
         || (payload as Record<string, unknown>).symbolName
+        || (payload.evidenceTypes?.includes("documentation") ?? false)
       if (!hasIdentifiers) { skipped++; continue }
       const id = String(point.id)
       if (seen.has(id)) continue

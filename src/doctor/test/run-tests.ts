@@ -14,6 +14,7 @@ import { runTests as runPhase8Tests } from './phase8-integration.test.js';
 import { runTests as runIndexDoctorTests } from './index-doctor.test.js';
 import { runTests as runDoctorReportChunksTests } from './doctor-report-chunks.test.js';
 import { runTests as runLanguageHeuristicTests } from '../../ask/language.test.js';
+import { runTests as runChunkerTests } from '../../lib/chunker.test.js';
 
 console.log('🧪 Running Repo Doctor tests...\n');
 
@@ -49,6 +50,8 @@ async function main(): Promise<void> {
   runDoctorReportChunksTests();
   console.log('');
   runLanguageHeuristicTests();
+  console.log('');
+  runChunkerTests();
   console.log('');
   console.log('🎉 All tests passed successfully!');
 }
