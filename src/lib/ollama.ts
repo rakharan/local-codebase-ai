@@ -139,7 +139,7 @@ function getOpenAIApiKey(): string {
     return config.geminiApiKey ?? config.groqApiKey ?? config.openAIApiKey ?? ""
 }
 
-async function chatAnthropic(system: string, userContent: string): Promise<string> {
+async function chatAnthropic(system: string, userContent: string, maxTokens?: number): Promise<string> {
     const baseUrl = config.anthropicBaseUrl.replace(/\/$/, "")
     // Truncate if exceeds cloud model context limit
     const truncatedContent = userContent.length > MAX_CLOUD_PROMPT_CHARS
@@ -154,7 +154,7 @@ async function chatAnthropic(system: string, userContent: string): Promise<strin
         },
         body: JSON.stringify({
             model: config.chatModel,
-            max_tokens: config.maxTokens,
+            max_tokens: maxTokens ?? config.maxTokens,
             system,
             messages: [{ role: "user", content: truncatedContent }],
         }),
@@ -168,7 +168,7 @@ async function chatAnthropic(system: string, userContent: string): Promise<strin
     return data.content?.find(b => b.type === "text")?.text?.trim() ?? ""
 }
 
-async function chatOpenAI(messages: Array<{ role: string; content: string }>, jsonMode = false): Promise<string> {
+async function chatOpenAI(messages: Array<{ role: string; content: string }>, jsonMode = false, maxTokens?: number): Promise<string> {
     const baseUrl = getOpenAIBaseUrl()
     const apiKey = getOpenAIApiKey()
 
@@ -183,7 +183,7 @@ async function chatOpenAI(messages: Array<{ role: string; content: string }>, js
     const body: Record<string, unknown> = {
         model: config.chatModel,
         messages: truncatedMessages,
-        max_tokens: config.maxTokens,
+        max_tokens: maxTokens ?? config.maxTokens,
         stream: false,
     }
 
@@ -282,7 +282,7 @@ export async function createEmbedding(input: string): Promise<number[]> {
     return embedding
 }
 
-export async function chat(prompt: string): Promise<string> {
+export async function chat(prompt: string, maxTokens?: number): Promise<string> {
     const start = nowMs()
     const provider = resolveChatProvider()
     const callTag = "chat"
@@ -294,6 +294,7 @@ export async function chat(prompt: string): Promise<string> {
             model: config.chatModel,
             promptChars: prompt.length,
             numCtx: config.numCtx,
+            maxTokens: maxTokens ?? config.maxTokens,
         })
     }
 
@@ -306,13 +307,13 @@ export async function chat(prompt: string): Promise<string> {
         let result: string
 
         if (isAnthropicCompatible()) {
-            const raw = await chatAnthropic(SYSTEM_PROMPT, prompt)
+            const raw = await chatAnthropic(SYSTEM_PROMPT, prompt, maxTokens)
             const notFoundIdx = raw.indexOf("NOT_FOUND_IN_INDEXED_CODEBASE")
             result = notFoundIdx >= 0
                 ? raw.slice(0, notFoundIdx + "NOT_FOUND_IN_INDEXED_CODEBASE".length).trim()
                 : raw
         } else if (isOpenAICompatible()) {
-            const raw = await chatOpenAI(messages)
+            const raw = await chatOpenAI(messages, false, maxTokens)
             const notFoundIdx = raw.indexOf("NOT_FOUND_IN_INDEXED_CODEBASE")
             result = notFoundIdx >= 0
                 ? raw.slice(0, notFoundIdx + "NOT_FOUND_IN_INDEXED_CODEBASE".length).trim()

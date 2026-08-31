@@ -6945,7 +6945,7 @@ async function main() {
   dlog("prompt-built", { promptChars: prompt.length, fallbackChunks: fallbackContextChunks.length })
 
   const answerStart = nowMs()
-  let answer = await chat(prompt)
+  let answer = await chat(prompt, deepMode ? config.deepMaxTokens : undefined)
   dlog("stage", { name: "answer-llm", ms: elapsedMs(answerStart), outChars: answer.length })
 
   // Quality gate: evaluate and retry if needed
@@ -6960,7 +6960,7 @@ async function main() {
 
       const retryPrompt = `${prompt}\n\nPrevious answer had quality issues:\n${evaluation.issues.join("\n")}\n\nPlease improve the answer based on this feedback.`
       const retryStart = nowMs()
-      answer = await chat(retryPrompt)
+      answer = await chat(retryPrompt, deepMode ? config.deepMaxTokens : undefined)
       dlog("stage", { name: "answer-llm-retry", ms: elapsedMs(retryStart), outChars: answer.length })
 
       const retryEval = await evaluateAnswerQuality(question, answer, fallbackContextChunks)
