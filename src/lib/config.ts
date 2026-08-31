@@ -40,6 +40,13 @@ export const config = {
   // Default 60 min balances freshness with avoiding repeated disk JSON parses.
   bm25IndexTtlMs: Number(process.env.BM25_INDEX_TTL_MS ?? 60 * 60 * 1000),
 
+  // BM25 cross-process build lock wait timeout. When another process is
+  // cold-building the index, others wait this long for the cache to appear
+  // before stealing the lock and building themselves. Default 5 min covers
+  // the slowest expected cold build. Set lower (e.g. 10000) in test runners
+  // to fail-fast instead of hanging on a contended build.
+  bm25WaitTimeoutMs: Number(process.env.BM25_WAIT_TIMEOUT_MS ?? 5 * 60 * 1000),
+
   // Concurrency for embedding + upsert during indexing. Each task hits Ollama
   // (embedding) and Qdrant (upsert). Local Ollama on CPU is largely serial, so
   // keep this modest. Raise only on GPU/remote Ollama.

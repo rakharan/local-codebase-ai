@@ -60,7 +60,7 @@ const META_PATH = resolve(CACHE_DIR, "bm25-index-meta.json")
 const BUILD_LOCK_PATH = resolve(CACHE_DIR, "bm25-build.lock")
 
 const CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000  // 6 hours
-const BUILD_LOCK_TIMEOUT_MS = 5 * 60 * 1000   // 5 min — longer than any expected cold build
+const BUILD_LOCK_TIMEOUT_MS = config.bm25WaitTimeoutMs  // env-configurable; default 5 min
 const BUILD_LOCK_POLL_MS = 2_000               // poll interval when waiting for another process
 
 // Bump when the cache format changes to invalidate old caches.

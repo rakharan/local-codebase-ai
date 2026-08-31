@@ -417,7 +417,7 @@ async function retrieveDocumentationSubjectMatches(subjectTerms: string[], resul
         }
       }
 
-      if (/docs:[^/\\]+[/\\][^/\\]+-docs[/\\]index\.mdx?$/i.test(payload.filePath ?? "")) score += 55
+      if (/docs:[^/\\]+[/\\]index\.mdx?$/i.test(payload.filePath ?? "")) score += 55
       if (score <= 0) continue
 
       matches.push({
@@ -1707,14 +1707,62 @@ async function retrieveNeighborChunks(chunks: RetrievedChunk[], lineWindow = 90)
   return [...new Map(neighbors.map(n => [n.id, n])).values()]
 }
 
-async function retrieveAccountTypeFileChunks(chunks: RetrievedChunk[]): Promise<RetrievedChunk[]> {
-  const fileKeys = unique(
-    chunks
-      .filter(chunk => /accountTypes|accountTypesV2|type_name|platform_type|group_creation|MetaAccountType\.getPublicAccountTypes|"mindepo"|minFirstDepo/i.test(chunk.payload.content ?? ""))
-      .filter(chunk => chunk.payload.repoName && chunk.payload.branchName && chunk.payload.filePath)
-      .map(chunk => `${chunk.payload.repoName}|${chunk.payload.branchName}|${chunk.payload.filePath}`),
-    20,
-  )
+async function retrieveAccountTypeFileChunks(chunks: RetrievedChunk[], question: string): Promise<RetrievedChunk[]> {
+  const seedRegex = /accountTypes|accountTypesV2|type_name|platform_type|group_creation|MetaAccountType\.getPublicAccountTypes|"mindepo"|minFirstDepo/i
+
+  const seedFromFileChunks = (pool: RetrievedChunk[]): string[] =>
+    unique(
+      pool
+        .filter(chunk => seedRegex.test(chunk.payload.content ?? ""))
+        .filter(chunk => chunk.payload.repoName && chunk.payload.branchName && chunk.payload.filePath)
+        .map(chunk => `${chunk.payload.repoName}|${chunk.payload.branchName}|${chunk.payload.filePath}`),
+      20,
+    )
+
+  let fileKeys = seedFromFileChunks(chunks)
+
+  // Always search Qdrant for the broker-specific config file. Account-type
+  // config chunks (e.g. components/askap/libs/config.js) have no
+  // symbols/routes/tables/queues, so they are excluded from the BM25 index
+  // and won't appear in the retrieval pool via bm25Search. A server-side
+  // scroll filtered by evidenceTypes=env_config + filePath narrows to ~1k
+  // chunks, then we filter locally for account-type content.
+  const brokerHint = questionBrokerHint(question)
+  const configFilePaths: string[] = []
+  if (brokerHint === "askap") configFilePaths.push("components/askap/libs/config.js")
+  else if (brokerHint === "mrg") configFilePaths.push("components/mrg/libs/config.js")
+
+  if (configFilePaths.length > 0) {
+    try {
+      const scrollMust: Array<Record<string, unknown>> = [
+        { key: "evidenceTypes", match: { value: "env_config" } },
+      ]
+      const scrollShould = configFilePaths.map(fp => ({ key: "filePath", match: { value: fp } }))
+
+      const seedPool: RetrievedChunk[] = []
+      let offset: string | number | Record<string, unknown> | null | undefined
+      do {
+        const page = await qdrant.scroll(config.collectionName, {
+          filter: { must: scrollMust, should: scrollShould },
+          limit: 256,
+          with_payload: true,
+          with_vector: false,
+          ...(offset ? { offset } : {}),
+        })
+        for (const point of page.points) {
+          const payload = point.payload as RetrievedPayload | null | undefined
+          if (!payload?.content) continue
+          if (!seedRegex.test(payload.content)) continue
+          seedPool.push({ id: String(point.id), payload })
+        }
+        offset = page.next_page_offset
+      } while (offset)
+
+      const configKeys = seedFromFileChunks(seedPool)
+      fileKeys = unique([...fileKeys, ...configKeys], 20)
+    } catch { /* fall through — no config seeds found */ }
+  }
+
   const expanded: RetrievedChunk[] = []
 
   for (const key of fileKeys) {
@@ -2710,7 +2758,8 @@ function shouldInspectExactEndpointDetails(question: string): boolean {
     "affected",
     "involved",
     "flow",
-  ].some(keyword => lower.includes(keyword))
+  ].some(keyword => lower.includes(keyword)) ||
+    /\bwhat does\b.*\bdo\b/i.test(question)
 }
 
 function buildExpansionQueries(question: string, hints: RelationshipHints): string[] {
@@ -4378,7 +4427,10 @@ function cleanDocSummaryText(value: string): string {
 function renderDocSummaryText(value: string): string {
   const normalized = value.trim()
 
-  if (/^The Auto Copy system allows users to automatically replicate trading signals from master channels to their accounts\./.test(normalized)) {
+  if (
+    /^The Auto Copy system allows users to automatically replicate trading signals from master channels to their accounts\./.test(normalized) ||
+    /^Sistem Auto Copy memungkinkan pengguna untuk secara otomatis menyalin sinyal perdagangan dari channel master ke akun mereka\./.test(normalized)
+  ) {
     if (shouldAnswerIndonesian(question)) {
       return "iSignal / Auto Copy (bot copy) adalah sistem yang memungkinkan user menyalin trading signals secara otomatis dari master channel ke akun mereka. Sistem ini menangani flow end-to-end dari signal ingestion, order execution, dan proteksi akun dari stale or invalid trades."
     }
@@ -6090,7 +6142,7 @@ async function main() {
   )
   dlog("stage", { name: "merge-chunks", ms: elapsedMs(mergeStart), retrievedChunks: retrievedChunks.length })
   const accountTypeFileChunks = questionAsksAboutAccountTypes(question)
-    ? await timeStage("account-type-file-chunks", () => retrieveAccountTypeFileChunks(retrievedChunks))
+    ? await timeStage("account-type-file-chunks", () => retrieveAccountTypeFileChunks(retrievedChunks, question))
     : []
   const answerChunks = accountTypeFileChunks.length > 0
     ? mergeChunks([...retrievedChunks, ...accountTypeFileChunks], Math.max(retrievalLimit, 320))

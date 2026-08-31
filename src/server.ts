@@ -84,8 +84,17 @@ app.use("/api/", (request, response, next) => {
 // --- API key authentication ---
 // Set APP_API_KEY in .env to enable. Leave unset to allow all (dev mode).
 const APP_API_KEY = process.env.APP_API_KEY?.trim()
+// Public probe endpoints that must remain reachable without credentials so
+// the UI can detect auth requirements and service health before login.
+// NOTE: middleware is mounted at "/api/" so Express strips that prefix from
+// request.path — compare against the stripped paths.
+const PUBLIC_API_PATHS = new Set(["/health", "/ready", "/auth-required"])
 if (APP_API_KEY) {
   app.use("/api/", (request, response, next) => {
+    if (PUBLIC_API_PATHS.has(request.path)) {
+      next()
+      return
+    }
     const authHeader = request.headers["authorization"] ?? ""
     const provided = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader
     if (provided !== APP_API_KEY) {
@@ -496,6 +505,7 @@ app.post("/api/ask/stream", (request, response) => {
 
   let stdout = ""
   let stderr = ""
+  let completed = false
 
   const child = execFile(process.execPath, args, {
     cwd: rootDir,
@@ -504,6 +514,7 @@ app.post("/api/ask/stream", (request, response) => {
     windowsHide: true,
     env: { ...process.env, ASK_REQUEST_ID: requestId, ASK_DEBUG: process.env.ASK_DEBUG ?? "1" },
   }, (error, out, err) => {
+    completed = true
     stdout = out ?? ""
     stderr = err ?? ""
 
@@ -527,8 +538,8 @@ app.post("/api/ask/stream", (request, response) => {
     }
   })
 
-  request.on("close", () => {
-    if (!child.killed) child.kill()
+  response.on("close", () => {
+    if (!completed && !child.killed) child.kill()
   })
 })
 

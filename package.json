@@ -13,6 +13,8 @@
     "drafts": "node --import ./register-ts-node.mjs src/commands/drafts.ts",
     "test:answers": "node --import ./register-ts-node.mjs src/answer-regression.ts",
     "test:answers:full": "node --import ./register-ts-node.mjs src/answer-regression.ts --suite full",
+    "test:api": "node --import ./register-ts-node.mjs scripts/api-regression.ts",
+    "test:language": "node --import ./register-ts-node.mjs -e \"import('./src/ask/language.test.ts').then(m => m.runTests())\"",
     "start": "node --import ./register-ts-node.mjs src/server.ts",
     "dev": "node --watch --import ./register-ts-node.mjs src/server.ts",
     "doctor": "node --import ./register-ts-node.mjs src/doctor-cli.ts",
