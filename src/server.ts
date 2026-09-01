@@ -27,6 +27,11 @@ import {
   type AnswerFeedbackInput,
 } from "./lib/answer-feedback.js"
 import {
+  createLearningRule,
+  loadAllLearningRules,
+  rollbackRule,
+} from "./lib/learning-rules.js"
+import {
   listDrafts,
   readDraft,
   saveDraft,
@@ -1036,6 +1041,64 @@ app.delete("/api/feedback/:id", async (request, response) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
 
+    response.status(500).json({ error: message })
+  }
+})
+
+// ── Learning rules ──
+app.get("/api/learning/rules", async (_request, response) => {
+  try {
+    const rules = await loadAllLearningRules()
+    response.json({ rules })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
+app.post("/api/learning/rules", async (request, response) => {
+  try {
+    const body = request.body as {
+      type?: string
+      trigger?: string
+      content?: string
+      rationale?: string
+      source?: string
+    }
+
+    if (!body.trigger || !body.content) {
+      response.status(400).json({ error: "Missing required fields: trigger, content" })
+      return
+    }
+
+    const rule = await createLearningRule({
+      type: (body.type as "prompt_directive" | "retrieval_boost" | "query_rewrite") ?? "prompt_directive",
+      trigger: body.trigger,
+      content: body.content,
+      rationale: body.rationale ?? "",
+      source: (body.source as "manual" | "meta_eval" | "feedback") ?? "manual",
+    })
+
+    response.json(rule)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
+app.post("/api/learning/rules/:id/rollback", async (request, response) => {
+  try {
+    const reason = (request.body as { reason?: string })?.reason ?? ""
+    const ok = await rollbackRule(request.params.id, reason)
+
+    if (!ok) {
+      response.status(404).json({ error: `Rule not found: ${request.params.id}` })
+      return
+    }
+
+    response.json({ ok: true })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
     response.status(500).json({ error: message })
   }
 })

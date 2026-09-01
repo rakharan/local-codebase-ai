@@ -17,6 +17,7 @@ import {
 import { compactPayloadSources, compactRetrievedChunks } from "./ask/compaction.js"
 import { buildDoctorInventoryAnswer } from "./ask/doctor.js"
 import { evaluateAnswerQuality, logQualityEvaluation } from "./ask/answer-evaluation.js"
+import { loadActiveLearningRules, formatRulesForPrompt } from "./lib/learning-rules.js"
 import {
   answerLanguageLabel as answerLanguageLabelFor,
   detectAnswerLanguage,
@@ -5421,7 +5422,7 @@ async function buildMermaidDiagramAnswer(chunks: RetrievedPayload[], question: s
   const isChannelSubsQuestion = /\b(channel.?subs|channel subscription)\b/i.test(question)
   const proactiveDiagramKeys: string[] = []
   if (questionAsksHowWorks(question)) {
-    if (isIsignalQuestion || (!isChannelSubsQuestion)) {
+    if (isIsignalQuestion) {
       proactiveDiagramKeys.push("isignal|docs|docs:isignal-docs\\architecture\\diagrams.mdx")
     }
     if (isChannelSubsQuestion) {
@@ -6197,6 +6198,14 @@ async function main() {
     }
   }
 
+  // Apply retrieval boost from learning rules — append boost terms to BM25 queries
+  const activeRules = await loadActiveLearningRules()
+  const boostTerms = activeRules
+    .filter(r => r.type === "retrieval_boost" && question.toLowerCase().includes(r.trigger.toLowerCase()))
+    .map(r => r.content)
+    .join(" ")
+  const boostedRetrievalQuestion = boostTerms ? `${retrievalQuestion} ${boostTerms}` : retrievalQuestion
+
   // Run independent retrieval calls in parallel to avoid sequential Qdrant round-trips.
   const isGlossaryNotAccountTypes = exactRoutes.length === 0 && questionAsksAboutGlossary(question) && !questionAsksAboutAccountTypes(question)
   const vectorParallelStart = nowMs()
@@ -6205,7 +6214,7 @@ async function main() {
     preferredLocaleDocChunksRaw,
     exactDocumentationSubjectChunksRaw,
   ] = await Promise.all([
-    exactRoutes.length > 0 ? Promise.resolve([]) : retrieve(retrievalQuestion, retrievalLimit),
+    exactRoutes.length > 0 ? Promise.resolve([]) : retrieve(boostedRetrievalQuestion, retrievalLimit),
     isGlossaryNotAccountTypes
       ? retrievePreferredLocaleDocChunks(retrievalQuestion, Math.max(retrievalLimit, 16))
       : Promise.resolve([]),
@@ -6229,6 +6238,30 @@ async function main() {
       preferredLocaleDoc: (preferredLocaleDocChunksRaw as RetrievedChunk[]).length,
       docSubject: (exactDocumentationSubjectChunksRaw as RetrievedChunk[]).length,
     })
+  }
+
+  // Learning rules: BM25 boost search — find chunks containing boost terms that
+  // vector search missed. Merge into initialChunks before reranking.
+  if (boostTerms) {
+    const boostStart = nowMs()
+    const bm25BoostResults = await bm25Search(boostTerms, Math.max(retrievalLimit * 4, 48))
+    const existingIds = new Set(initialChunks.map(c => c.id))
+    const missingBoostIds = bm25BoostResults.map(r => r.id).filter(id => !existingIds.has(id))
+    if (missingBoostIds.length > 0) {
+      try {
+        const boostPoints = await qdrant.retrieve(config.collectionName, {
+          ids: missingBoostIds.slice(0, 24),
+          with_payload: true,
+        })
+        for (const point of boostPoints) {
+          const payload = point.payload as RetrievedPayload
+          if (payload?.content) {
+            initialChunks.push({ id: String(point.id), payload })
+          }
+        }
+      } catch { /* fall through */ }
+    }
+    dlog("stage", { name: "bm25-boost", ms: elapsedMs(boostStart), boostResults: bm25BoostResults.length, merged: missingBoostIds.length })
   }
   const preferredLocaleDocChunks = (preferredLocaleDocChunksRaw as RetrievedChunk[]).filter(chunk => {
     // When the question is about a specific product (isignal, FA, etc.), exclude unrelated repos
@@ -6770,7 +6803,8 @@ async function main() {
   // Decision fast path must run before glossary/documentation paths — decision-intent
   // questions like "what is the rule about X" match questionAsksAboutGlossary() but
   // should be answered from approved decisions, not documentation summaries.
-  const documentationGlossaryAnswer = isDecisionIntentQuestion && decisionChunks.length > 0
+  const hasLearningRuleMatch = activeRules.some(r => question.toLowerCase().includes(r.trigger.toLowerCase()))
+  const documentationGlossaryAnswer = (isDecisionIntentQuestion && decisionChunks.length > 0) || hasLearningRuleMatch
     ? undefined
     : await buildDocumentationGlossaryAnswer(chunks, question)
 
@@ -6979,8 +7013,12 @@ async function main() {
       ]
     : []
 
+  const activeLearningRules = await loadActiveLearningRules()
+  const learningRulesBlock = formatRulesForPrompt(activeLearningRules)
+
   const prompt = [
     ...historyLines,
+    learningRulesBlock,
     `Question: ${question}`,
     `Answer language: ${answerLanguageLabel(question)}`,
     "",

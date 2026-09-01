@@ -19,7 +19,8 @@
     "start": "node --import ./register-ts-node.mjs src/server.ts",
     "dev": "node --watch --import ./register-ts-node.mjs src/server.ts",
     "doctor": "node --import ./register-ts-node.mjs src/doctor-cli.ts",
-    "test:doctor": "node --import ./register-ts-node.mjs src/doctor/test/run-tests.ts"
+    "test:doctor": "node --import ./register-ts-node.mjs src/doctor/test/run-tests.ts",
+    "eval:feedback": "node --import ./register-ts-node.mjs scripts/eval-feedback.ts"
   },
   "dependencies": {
     "@qdrant/js-client-rest": "^1.18.0",
