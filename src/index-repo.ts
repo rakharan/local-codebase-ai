@@ -245,7 +245,7 @@ async function deleteRepoChunks(repoName: string): Promise<void> {
   })
 }
 
-async function upsertChunk(chunk: CodeChunk): Promise<void> {
+async function buildPoint(chunk: CodeChunk): Promise<{ id: string; vector: number[]; payload: Record<string, unknown> }> {
   const embeddingInput = [
     `Repository: ${chunk.repoName}`,
     `Projects: ${chunk.projectIds.join(", ") || "unassigned"}`,
@@ -280,47 +280,38 @@ async function upsertChunk(chunk: CodeChunk): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (!msg.includes("context length") || cap === caps[caps.length - 1]) throw err
-      // else try next smaller cap
     }
   }
   if (!succeeded) throw new Error("Failed to embed chunk at any truncation level")
 
-  try {
-    await qdrant.upsert(config.collectionName, {
-      points: [
-        {
-          id: chunk.id,
-          vector,
-          payload: {
-            repoName: chunk.repoName,
-            projectIds: chunk.projectIds,
-            projectTagSources: chunk.projectTagSources,
-            serviceType: chunk.serviceType,
-            branchName: chunk.branchName,
-            commitSha: chunk.commitSha,
-            evidenceTypes: chunk.evidenceTypes,
-            routes: chunk.relationshipHints.routes,
-            symbols: chunk.relationshipHints.symbols,
-            messageNames: chunk.relationshipHints.messageNames,
-            queueNames: chunk.relationshipHints.queueNames,
-            exchangeNames: chunk.relationshipHints.exchangeNames,
-            dbTables: chunk.relationshipHints.dbTables,
-            structuredFacts: chunk.structuredFacts,
-            filePath: chunk.filePath,
-            startLine: chunk.startLine,
-            endLine: chunk.endLine,
-            content: chunk.content,
-            contentHash: chunk.contentHash,
-            chunkType: chunk.chunkType,
-            symbolName: chunk.symbolName,
-            parentSymbol: chunk.parentSymbol,
-            hasOverlap: chunk.hasOverlap,
-          },
-        },
-      ],
-    })
-  } catch (error) {
-    throw withUpsertHint(error)
+  return {
+    id: chunk.id,
+    vector,
+    payload: {
+      repoName: chunk.repoName,
+      projectIds: chunk.projectIds,
+      projectTagSources: chunk.projectTagSources,
+      serviceType: chunk.serviceType,
+      branchName: chunk.branchName,
+      commitSha: chunk.commitSha,
+      evidenceTypes: chunk.evidenceTypes,
+      routes: chunk.relationshipHints.routes,
+      symbols: chunk.relationshipHints.symbols,
+      messageNames: chunk.relationshipHints.messageNames,
+      queueNames: chunk.relationshipHints.queueNames,
+      exchangeNames: chunk.relationshipHints.exchangeNames,
+      dbTables: chunk.relationshipHints.dbTables,
+      structuredFacts: chunk.structuredFacts,
+      filePath: chunk.filePath,
+      startLine: chunk.startLine,
+      endLine: chunk.endLine,
+      content: chunk.content,
+      contentHash: chunk.contentHash,
+      chunkType: chunk.chunkType,
+      symbolName: chunk.symbolName,
+      parentSymbol: chunk.parentSymbol,
+      hasOverlap: chunk.hasOverlap,
+    },
   }
 }
 
@@ -540,12 +531,21 @@ async function main() {
   skipped = allChunks.length - chunksToIndex.length
 
   await mapWithConcurrency(chunksToIndex, config.indexConcurrency, async (chunk) => {
-    await upsertChunk(chunk)
-
+    const point = await buildPoint(chunk)
     indexed++
-
-    if (indexed % 10 === 0) {
-      console.log(`Indexed ${indexed} chunks...`)
+    if (indexed % 10 === 0) console.log(`Indexed ${indexed} chunks...`)
+    return point
+  }).then(async points => {
+    // Batch upsert to Qdrant (64 points per call)
+    const UPSERT_BATCH = 64
+    for (let i = 0; i < points.length; i += UPSERT_BATCH) {
+      try {
+        await qdrant.upsert(config.collectionName, {
+          points: points.slice(i, i + UPSERT_BATCH),
+        })
+      } catch (error) {
+        throw withUpsertHint(error)
+      }
     }
   })
 
@@ -571,11 +571,14 @@ async function main() {
     let commitIndexed = 0
 
     await mapWithConcurrency(commitsToIndex, config.indexConcurrency, async (chunk) => {
-      await upsertChunk(chunk)
+      const point = await buildPoint(chunk)
       commitIndexed++
-
-      if (commitIndexed % 10 === 0) {
-        console.log(`Indexed ${commitIndexed} commits...`)
+      if (commitIndexed % 10 === 0) console.log(`Indexed ${commitIndexed} commits...`)
+      return point
+    }).then(async points => {
+      const UPSERT_BATCH = 64
+      for (let i = 0; i < points.length; i += UPSERT_BATCH) {
+        await qdrant.upsert(config.collectionName, { points: points.slice(i, i + UPSERT_BATCH) })
       }
     })
 

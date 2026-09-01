@@ -104,7 +104,8 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         try {
-            return await fetch(url, init)
+            // 60s timeout — prevents hanging forever if Ollama is unresponsive
+            return await fetch(url, { ...init, signal: AbortSignal.timeout(60_000) })
         } catch (error) {
             lastError = error
 

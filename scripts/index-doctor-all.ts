@@ -15,6 +15,16 @@ import type { CodeChunk } from '../src/lib/chunker.js';
 
 const OUTPUT_BASE = path.resolve('./repo-docs-work');
 const BRANCH = 'doctor';
+const UPSERT_BATCH = 64;
+
+async function mapWithConcurrency<T, R>(items: readonly T[], concurrency: number, task: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const limit = Math.max(1, Math.floor(concurrency))
+  const results: R[] = new Array(items.length)
+  let cursor = 0
+  async function worker() { while (cursor < items.length) { const i = cursor++; results[i] = await task(items[i]!, i) } }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()))
+  return results
+}
 
 type ExistingPoint = { id: string | number; payload?: { contentHash?: string } | null };
 
@@ -101,10 +111,37 @@ async function main() {
     }
 
     let indexed = 0;
-    for (const chunk of toIndex) {
-      await upsertChunk(chunk);
+    // Phase 1: compute embeddings concurrently
+    const points = await mapWithConcurrency(toIndex, config.indexConcurrency, async (chunk) => {
+      const embeddingInput = [
+        `Repository: ${chunk.repoName}`, `Branch: ${chunk.branchName}`,
+        `Evidence types: ${chunk.evidenceTypes.join(', ')}`,
+        `Routes: ${chunk.relationshipHints.routes.join(', ')}`,
+        `Queues: ${chunk.relationshipHints.queueNames.join(', ')}`,
+        `Database tables: ${chunk.relationshipHints.dbTables.join(', ')}`,
+        `File: ${chunk.filePath}`, '', chunk.content,
+      ].join('\n');
+      const vector = await createEmbedding(embeddingInput);
       indexed++;
       if (indexed % 20 === 0) console.log(`    ${indexed}/${toIndex.length}...`);
+      return {
+        id: chunk.id, vector,
+        payload: {
+          repoName: chunk.repoName, projectIds: chunk.projectIds, projectTagSources: chunk.projectTagSources,
+          serviceType: chunk.serviceType, branchName: chunk.branchName, commitSha: chunk.commitSha,
+          evidenceTypes: chunk.evidenceTypes, routes: chunk.relationshipHints.routes,
+          symbols: chunk.relationshipHints.symbols, messageNames: chunk.relationshipHints.messageNames,
+          queueNames: chunk.relationshipHints.queueNames, exchangeNames: chunk.relationshipHints.exchangeNames,
+          dbTables: chunk.relationshipHints.dbTables, structuredFacts: chunk.structuredFacts,
+          filePath: chunk.filePath, startLine: chunk.startLine, endLine: chunk.endLine,
+          content: chunk.content, contentHash: chunk.contentHash,
+        },
+      };
+    });
+
+    // Phase 2: batch upsert to Qdrant
+    for (let i = 0; i < points.length; i += UPSERT_BATCH) {
+      await qdrant.upsert(config.collectionName, { points: points.slice(i, i + UPSERT_BATCH) });
     }
     console.log(`  Done: ${indexed} indexed, ${allChunks.length - toIndex.length} skipped, ${staleIds.length} deleted`);
   }
