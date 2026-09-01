@@ -146,11 +146,12 @@ async function main() {
     byRepo.get(g.repo)!.push(g)
   }
   for (const [repo, repoGaps] of byRepo) {
-    console.log(`${repo}:`)
-    for (const g of repoGaps.slice(0, 10)) {
+    // Limit to top 5 per repo to keep prompt manageable for the LLM
+    const topGaps = repoGaps.slice(0, 5)
+    console.log(`${repo} (${repoGaps.length} total, showing top 5):`)
+    for (const g of topGaps) {
       console.log(`  [${g.type}] ${g.name}`)
     }
-    if (repoGaps.length > 10) console.log(`  ...and ${repoGaps.length - 10} more`)
     console.log("")
   }
 }
