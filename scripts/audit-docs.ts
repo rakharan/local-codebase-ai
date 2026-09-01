@@ -14,11 +14,12 @@ import { config } from "../src/lib/config.js"
 import { qdrant } from "../src/lib/qdrant.js"
 import fastGlob from "fast-glob"
 
-const TOP_REPOS = [
-  "ims-tf2", "ea-service", "tf2-microservice", "tf2-sinyo",
-  "fa-trade-publisher", "mrg-accounts", "mrg-cash",
-  "metaoffice-crm", "tf2-ois", "metaoffice-user-ts",
-]
+const SKIP_DIRS = new Set([".claude", "node_modules", ".git", "my_usage.json", "Playgrounds", "Opencode Memory"])
+
+async function getRepos(): Promise<string[]> {
+  const entries = await fs.readdir("C:/GIT/work", { withFileTypes: true })
+  return entries.filter(e => e.isDirectory() && !SKIP_DIRS.has(e.name)).map(e => e.name)
+}
 
 const DOCS_DIR = "C:/GIT/work/tf-documentation/my-website/docs"
 
@@ -40,7 +41,8 @@ async function queryFeatures(): Promise<Feature[]> {
     { key: "evidenceTypes", match: { value: "rabbitmq_publisher" } },
   ]
 
-  for (const repoName of TOP_REPOS) {
+  const repos = await getRepos()
+  for (const repoName of repos) {
     let offset: string | number | null | undefined = null
     do {
       const filter = {

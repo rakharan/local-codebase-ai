@@ -13,11 +13,7 @@ import { execSync } from "node:child_process"
 
 const REPOS_DIR = "C:/GIT/work"
 const STATE_FILE = ".data/doc-sync-state.json"
-const TOP_REPOS = [
-  "ims-tf2", "ea-service", "tf2-microservice", "tf2-sinyo",
-  "fa-trade-publisher", "mrg-accounts", "mrg-cash",
-  "metaoffice-crm", "tf2-ois", "metaoffice-user-ts",
-]
+const SKIP_DIRS = new Set([".claude", "node_modules", ".git", "my_usage.json", "Playgrounds", "Opencode Memory"])
 
 const CODE_EXTENSIONS = /\.(ts|js|php|go|sql|py|sh|json|yaml|yml)$/i
 
@@ -50,11 +46,17 @@ function git(repoPath: string, ...args: string[]): string {
   }
 }
 
+async function getRepos(): Promise<string[]> {
+  const entries = await fs.readdir(REPOS_DIR, { withFileTypes: true })
+  return entries.filter(e => e.isDirectory() && !SKIP_DIRS.has(e.name)).map(e => e.name)
+}
+
 async function main() {
   const state = await loadState()
   const changes: Array<{ repo: string; files: string[] }> = []
+  const repos = await getRepos()
 
-  for (const repo of TOP_REPOS) {
+  for (const repo of repos) {
     const repoPath = path.join(REPOS_DIR, repo)
     if (!await fs.access(repoPath).then(() => true).catch(() => false)) continue
 
