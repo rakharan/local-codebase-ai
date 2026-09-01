@@ -7,6 +7,7 @@
     "doctor-all": "node --import ./register-ts-node.mjs scripts/doctor-all.ts",
     "index-doctor-all": "node --import ./register-ts-node.mjs scripts/index-doctor-all.ts",
     "reindex-all": "node --import ./register-ts-node.mjs scripts/reindex-all.ts",
+    "reindex-full": "node --import ./register-ts-node.mjs scripts/reindex-full.ts",
     "eval:models": "node --import ./register-ts-node.mjs scripts/model-eval.ts",
     "ask": "node --import ./register-ts-node.mjs src/ask.ts",
     "digest": "node --import ./register-ts-node.mjs src/commands/digest.ts",
