@@ -6902,6 +6902,8 @@ async function main() {
     "",
     "Answer requirements:",
     "- Answer in the same language as the user's question. If the question is in Bahasa Indonesia, answer in Bahasa Indonesia while keeping code identifiers unchanged.",
+    "- Focus on answering the user's EXACT question. Do not describe unrelated features that happen to appear in the context. If the question asks about signal flow, describe signal flow — not the edit feature, even if edit docs are in the context.",
+    "- For 'how does X work' questions, lead with code evidence (function names, SQL queries, cron jobs, queue operations). Use documentation only to provide context, not as the primary answer.",
     "- Synthesize a coherent answer that connects documentation and code evidence. Do not just list sources — explain how the pieces fit together.",
     "- For 'how does X work' questions, describe the end-to-end flow: entry points, processing steps, data flow, and output. Cite specific function names, SQL queries, queue operations, and config from the sources.",
     "- When code chunks are retrieved alongside docs, use the code to confirm, deepen, or correct what the docs say. Code is ground truth — if docs and code disagree, trust the code.",
