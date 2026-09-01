@@ -41,6 +41,8 @@ import {
   questionAsksHowWorks,
   questionAsksInventory,
   questionAsksMedalMechanism,
+  isConversationalFollowUp,
+  isGreeting,
   questionBrokerHint,
   questionMetaTraderTerm,
   unique,
@@ -5654,6 +5656,44 @@ async function main() {
     serviceType: serviceType ?? "-",
     questionChars: question.length,
   })
+
+  // Gate: greetings and short conversational follow-ups skip retrieval entirely.
+  // Returns a direct response with no sources — avoids polluting results with
+  // irrelevant chunks (e.g. SMTP HELO matching "hello").
+  if (isGreeting(question)) {
+    answerLanguage = heuristicAnswerLanguage(question)
+    const greeting = shouldAnswerIndonesian(question)
+      ? "Halo. Ada yang bisa saya bantu seputar codebase? Silakan tanya."
+      : "Hello. Ready to help with codebase questions."
+    console.log("\nANSWER\n")
+    console.log(greeting)
+    console.log("\nSOURCES\n")
+    _askCompletedFull = true
+    return
+  }
+
+  if (isConversationalFollowUp(question, history.length > 0)) {
+    answerLanguage = heuristicAnswerLanguage(question)
+    const historyLines = history.length > 0
+      ? [
+          "Previous conversation:",
+          ...history.map(h => `${h.role === "user" ? "User" : "Assistant"}: ${h.content}`),
+          "",
+        ]
+      : []
+    const convoPrompt = [
+      ...historyLines,
+      `User: ${question}`,
+      "",
+      "Answer the user's message conversationally. If they're referencing something from the previous conversation, use that context. If they seem frustrated or confused, acknowledge and offer help. Keep it brief. Do not reference codebase sources.",
+    ].join("\n")
+    const convoAnswer = await chat(convoPrompt)
+    console.log("\nANSWER\n")
+    console.log(localizeAnswer(convoAnswer, question))
+    console.log("\nSOURCES\n")
+    _askCompletedFull = true
+    return
+  }
 
   retrievalDegradation.bm25Unavailable = false
   _fileChunkCache.clear()
