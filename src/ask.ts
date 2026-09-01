@@ -928,6 +928,70 @@ function edgeTextForConceptSearch(edge: RelationshipEdge): string {
   ].filter(Boolean).join("\n").toLowerCase()
 }
 
+// Build a concise text summary of relationship graph edges relevant to the question.
+// Fed into the LLM prompt so it can trace cross-service flows (calls → handles → defines → touches table).
+function buildGraphFlowContext(graph: RelationshipEdge[], question: string, hints: RelationshipHints): string {
+  if (graph.length === 0) return "none"
+
+  const graphTerms = unique([
+    ...extractQuestionHints(question),
+    ...extractQuestionTerms(question),
+    ...extractConceptTokens(question),
+    ...registryExpansion.terms,
+    ...(hints.routes ?? []),
+    ...(hints.symbols ?? []),
+    ...(hints.messageNames ?? []),
+    ...(hints.queueNames ?? []),
+    ...(hints.exchangeNames ?? []),
+    ...(hints.dbTables ?? []),
+  ].filter(term => term.length >= 2), 40).map(term => term.toLowerCase())
+
+  if (graphTerms.length === 0) return "none"
+
+  const scored = graph
+    .filter(edge => graphScopeAllows(edge))
+    .map(edge => {
+      const text = edgeTextForConceptSearch(edge)
+      let score = 0
+      for (const term of graphTerms) {
+        if (term.length >= 2 && text.includes(term)) score += term.includes("/") ? 60 : 12
+      }
+      if (questionAsksAboutServicesOrFlow(question) && (edge.toRoute || edge.rpcFunc || edge.externalFunc || edge.table || edge.symbol || edge.handler)) score += 20
+      return { edge, score }
+    })
+    .filter(item => item.score > 0)
+    .sort((left, right) => right.score - left.score || left.edge.repoName.localeCompare(right.edge.repoName))
+    .slice(0, 20)
+
+  if (scored.length === 0) return "none"
+
+  const lines = scored.map(({ edge }) => {
+    const repo = `${edge.repoName}@${edge.branchName}`
+    switch (edge.type) {
+      case "CALLS_HTTP_ENDPOINT":
+        return `- ${repo} calls ${edge.toRoute ?? "?"}${edge.httpMethod ? ` [${edge.httpMethod}]` : ""}${edge.viaConstant ? ` via ${edge.viaConstant}` : ""}${edge.fromSymbol ? ` from ${edge.fromSymbol}` : ""}`
+      case "HANDLES_HTTP_ENDPOINT":
+        return `- ${repo} handles ${edge.toRoute ?? "?"}${edge.httpMethod ? ` [${edge.httpMethod}]` : ""}${edge.handler ? `; handler: ${edge.handler}` : ""}${edge.alias ? `; alias: ${edge.alias}` : ""}`
+      case "CALLS_RPC_FUNC":
+        return `- ${repo} calls RPC ${edge.rpcFunc ?? "?"}${edge.receiverSymbol ? ` on ${edge.receiverSymbol}` : ""}`
+      case "CALLS_EXTERNAL_FUNC":
+        return `- ${repo} calls external func ${edge.externalFunc ?? "?"}${edge.fromSymbol ? ` from ${edge.fromSymbol}` : ""}`
+      case "CALLS_SYMBOL":
+        return `- ${repo} calls ${edge.calleeSymbol ?? edge.symbol ?? "?"}${edge.receiverSymbol ? ` on ${edge.receiverSymbol}` : ""}`
+      case "DEFINES_SYMBOL":
+        return `- ${repo} defines ${edge.symbol ?? edge.calleeSymbol ?? "?"}`
+      case "TOUCHES_TABLE":
+        return `- ${repo} touches table: ${edge.table ?? "?"}`
+      case "DOCUMENTS_DECISION":
+        return `- ${repo} documents decision: ${edge.symbol ?? "?"}`
+      default:
+        return `- ${repo} ${edge.type}`
+    }
+  })
+
+  return lines.join("\n")
+}
+
 function mentionedGraphRepos(question: string, graph: RelationshipEdge[]): string[] {
   const lower = question.toLowerCase()
   const repos = unique(graph.map(edge => edge.repoName), 100)
@@ -6857,6 +6921,7 @@ async function main() {
     })
     .join("\n\n")
   const evidenceInventory = buildEvidenceInventory(fallbackContextChunks, question)
+  const graphFlowContext = buildGraphFlowContext(relationshipGraph, question, hints)
   const registryPromptContext = buildRegistryPromptContext(registryExpansion)
   const investigationTraceLines = deepInvestigation
     ? [
@@ -6896,6 +6961,9 @@ async function main() {
     "Evidence inventory:",
     evidenceInventory,
     "",
+    "Cross-service graph evidence (from relationship index):",
+    graphFlowContext,
+    "",
     ...investigationTraceLines,
     "Relevant context:",
     context,
@@ -6910,6 +6978,7 @@ async function main() {
     "- Quote specific function names, table names, and key lines from the source when explaining behavior. Do not paraphrase vaguely — point to the exact code.",
     "- Structure the answer with clear sections when the question is broad. Use markdown headers, not just bullet lists.",
     "- For cross-service flows, trace the path through services and explain each hop with evidence from the sources.",
+    "- The cross-service graph evidence shows confirmed code-level connections between services (calls, handles, defines, touches table). Use these to trace cross-service flows and describe how services connect. These edges are confirmed by code analysis, not inferred.",
     "- Highlight design patterns, edge-case handling, and business rules visible in the code. These are insights the user cannot get from docs alone.",
     "- Anti-hallucination guardrail: every claim must trace back to a specific source chunk. If you cannot point to a function name, SQL query, config value, or doc line that supports a claim, do not make the claim.",
     "- Do not infer patterns, design decisions, or business rules that are not explicitly stated in the source code or documentation. Only describe what is directly visible in the code.",

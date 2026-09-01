@@ -545,6 +545,17 @@ const cases: AnswerCase[] = [
       "early-return path=exact-endpoint-detail",
     ],
   },
+  {
+    name: "isignal auto copy flow (deep, ID)",
+    question: "bagaimana cara kerja isignal auto copy dari signal masuk sampai ke akun user",
+    smoke: true,
+    args: ["--deep"],
+    required: ["dsc_signals", "fa-trade-publisher"],
+    forbidden: ["edit feature"],
+    requiredOutput: ["doc-ref-code-retrieval"],
+    maxSources: 30,
+    maxInternalMs: 120_000,
+  },
 ]
 
 function parseOptions(argv: string[]): RunnerOptions {

@@ -64,7 +64,7 @@ const BUILD_LOCK_TIMEOUT_MS = config.bm25WaitTimeoutMs  // env-configurable; def
 const BUILD_LOCK_POLL_MS = 2_000               // poll interval when waiting for another process
 
 // Bump when the cache format changes to invalidate old caches.
-const CACHE_SCHEMA_VERSION = 4
+const CACHE_SCHEMA_VERSION = 5
 
 type CacheMeta = {
   schemaVersion: number
@@ -327,6 +327,8 @@ async function buildIndex(): Promise<MiniSearchInstance> {
         || (payload.routes?.length ?? 0) > 0
         || (payload as Record<string, unknown>).symbolName
         || (payload.evidenceTypes?.includes("documentation") ?? false)
+        || (payload.evidenceTypes?.includes("env_config") ?? false)
+        || (payload.evidenceTypes?.includes("migration") ?? false)
       if (!hasIdentifiers) { skipped++; continue }
       const id = String(point.id)
       if (seen.has(id)) continue
