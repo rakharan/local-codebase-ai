@@ -46,6 +46,7 @@ import { buildExactEndpointDetailAnswer, buildExactRouteComparisonAnswer, buildL
 import { buildCommentRuleAnswer, buildDocumentationEligibilityAnswer, buildDocumentationTimelineAnswer, buildMedalMechanismAnswer, buildMetaTraderTermAnswer, buildMinimumEquityConfigAnswer, buildRegistryAliasDefinitionAnswer, cleanDocSummaryText, docLocaleForChunk, extractMinimumEquityConfigFacts, isCronDocChunk, normalizeRegistryAlias, questionAsksEligibilityRequirement, questionAsksMinimumEquityConfig, questionAsksProjectTimeline, registryAliasMatchesTerm, renderDocSummaryText, scoreDocLocalePreference, type MinimumEquityConfigFact } from "./ask/specialized-answers.js"
 import { buildVocabularyAnswer } from "./ask/vocabulary-answers.js"
 import { ctx } from "./ask/context.js"
+import { neuralRerankFallback } from "./lib/reranker.js"
 
 
 // Populate shared context for extracted modules — must be after all const declarations above
@@ -896,12 +897,23 @@ async function main() {
         : Math.max(limit, 12),
   )
   dlog("stage", { name: "merge-chunks", ms: elapsedMs(mergeStart), retrievedChunks: retrievedChunks.length })
+
+  // Neural reranker: re-score top chunks using BGE cross-encoder.
+  // Runs after heuristic merge, before account-type/deep-investigation expansion.
+  // Falls back to heuristic order if reranker unavailable.
+  let rerankedChunks = retrievedChunks
+  if (retrievedChunks.length > 0) {
+    rerankedChunks = await timeStage("neural-rerank", () =>
+      neuralRerankFallback(question, retrievedChunks),
+    )
+  }
+
   const accountTypeFileChunks = questionAsksAboutAccountTypes(question)
-    ? await timeStage("account-type-file-chunks", () => retrieveAccountTypeFileChunks(retrievedChunks, question))
+    ? await timeStage("account-type-file-chunks", () => retrieveAccountTypeFileChunks(rerankedChunks, question))
     : []
   const answerChunks = accountTypeFileChunks.length > 0
-    ? mergeChunks([...retrievedChunks, ...accountTypeFileChunks], Math.max(retrievalLimit, 320))
-    : retrievedChunks
+    ? mergeChunks([...rerankedChunks, ...accountTypeFileChunks], Math.max(retrievalLimit, 320))
+    : rerankedChunks
   const deepInvestigation = deepMode
     ? await runDeepInvestigation(question, relationshipGraph, answerChunks, exactRoutes, exactTermSearchTerms, hints)
     : undefined
