@@ -1,6 +1,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { chatJson } from "../lib/ollama.js"
+import { config } from "../lib/config.js"
 import type { RetrievedPayload } from "./types.js"
 
 export type QualityScore = {
@@ -46,8 +47,8 @@ export async function evaluateAnswerQuality(
     'Return JSON: {"groundedness":0.8,"relevance":0.9,"completeness":0.7,"faithfulness":0.9,"issues":["problem1"]}',
   ].join("\n")
 
-  try {
-    const result = await chatJson(systemPrompt, userPrompt)
+    try {
+        const result = await chatJson(systemPrompt, userPrompt, config.evalModel)
 
     // Extract JSON from response (handle potential markdown wrapping)
     const jsonMatch = result.match(/\{[\s\S]*\}/)

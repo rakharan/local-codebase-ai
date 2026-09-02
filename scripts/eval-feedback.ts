@@ -14,7 +14,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { config } from "../src/lib/config.js"
-import { createLearningRule, loadAllLearningRules } from "../src/lib/learning-rules.js"
+import { createLearningRule, loadAllLearningRules, rollbackRule } from "../src/lib/learning-rules.js"
 import { readAnswerFeedback } from "../src/lib/answer-feedback.js"
 
 type EvalResult = {
@@ -75,6 +75,43 @@ function parseEvalResult(raw: string): EvalResult | null {
   }
 }
 
+async function reAskAndVerify(question: string, oldAnswer: string, ruleId: string): Promise<string> {
+  const baseUrl = process.env.CODEBASE_AI_URL || "http://localhost:9191"
+  const apiKey = process.env.APP_API_KEY ?? ""
+  try {
+    const res = await fetch(`${baseUrl}/api/ask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+      body: JSON.stringify({ question }),
+      signal: AbortSignal.timeout(120_000),
+    })
+    if (!res.ok) return `skipped (server returned ${res.status})`
+    const data = await res.json() as { answer?: string }
+    const newAnswer = data.answer ?? ""
+
+    if (newAnswer.trim() === oldAnswer.trim()) {
+      return "no change — rule had no effect on answer"
+    }
+
+    // Ask eval model to compare
+    const compareSystem = "You are a QA evaluator. Compare two answers to the same question. Return ONLY JSON: {\"improved\": true/false, \"reason\": \"brief\"}"
+    const compareUser = `Question: ${question}\n\nOld answer (rated bad):\n${oldAnswer.slice(0, 1500)}\n\nNew answer (after correction rule):\n${newAnswer.slice(0, 1500)}\n\nIs the new answer better?`
+    const raw = await callEvalModel(`${compareSystem}\n\n${compareUser}`)
+    const match = raw.match(/\{[\s\S]*\}/)
+    if (match) {
+      const parsed = JSON.parse(match[0]) as { improved?: boolean; reason?: string }
+      if (parsed.improved === false) {
+        await rollbackRule(ruleId, "Regression check: new answer not improved")
+        return `ROLLED_BACK — ${parsed.reason ?? "no improvement"}`
+      }
+      return `improved — ${parsed.reason ?? "yes"}`
+    }
+    return "inconclusive (could not parse eval)"
+  } catch (err) {
+    return `skipped (${err instanceof Error ? err.message.slice(0, 80) : "error"})`
+  }
+}
+
 async function main(): Promise<number> {
   const applyRules = process.argv.includes("--apply")
   const feedback = await readAnswerFeedback()
@@ -96,8 +133,10 @@ async function main(): Promise<number> {
     console.log(`Q: ${item.question.slice(0, 80)}`)
     console.log(`A: ${item.answer.slice(0, 100)}...`)
 
-    // Skip if already has a rule for this question
-    const hasRule = existingRules.some(r => r.trigger.toLowerCase() === item.question.toLowerCase().slice(0, 60))
+    // Skip if already has an active rule whose trigger matches this question
+    const hasRule = existingRules.some(r =>
+      r.status === "active" && item.question.toLowerCase().includes(r.trigger.toLowerCase())
+    )
     if (hasRule) {
       console.log("⏭  Already has a learning rule — skipping.")
       continue
@@ -136,15 +175,40 @@ async function main(): Promise<number> {
       evaluated++
 
       if (applyRules) {
+        // Choose rule type based on root cause category
+        const ruleType: "prompt_directive" | "retrieval_boost" =
+          result.category === "RETRIEVAL_MISS" ? "retrieval_boost" : "prompt_directive"
+
+        // For retrieval_boost, the content should be search terms, not a prompt instruction
+        const ruleContent = ruleType === "retrieval_boost"
+          ? result.directive.replace(/^(focus on|search for|look for|retrieve)\s*/i, "").replace(/\s*(not|don't|avoid)\s+.*/i, "")
+          : result.directive
+
+        // Skip ambiguous questions — can't fix with a rule
+        if (result.category === "AMBIGUOUS_QUESTION") {
+          console.log("  ⏭  Ambiguous question — skipping rule creation.")
+          continue
+        }
+
         const rule = await createLearningRule({
-          type: "prompt_directive",
+          type: ruleType,
           trigger: result.trigger,
-          content: result.directive,
+          content: ruleContent,
           rationale: result.rationale,
           source: "meta_eval",
         })
         console.log(`  ✓ Rule created: ${rule.id}`)
         rulesCreated++
+
+        // Regression check: re-ask the question and verify the rule helped
+        if (process.env.SKIP_REGRESSION !== "1") {
+          const regStart = Date.now()
+          const regResult = await reAskAndVerify(item.question, item.answer, rule.id)
+          console.log(`  ⟳ Regression check (${Date.now() - regStart}ms): ${regResult}`)
+          if (regResult.startsWith("ROLLED_BACK")) {
+            console.log(`  ↩ Rule ${rule.id} auto-rolled back — made answer worse`)
+          }
+        }
       }
     } catch (err) {
       console.log(`  ✗ Evaluation failed: ${err instanceof Error ? err.message : err}`)

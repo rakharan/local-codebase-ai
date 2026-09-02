@@ -148,9 +148,9 @@ async function main() {
     byRepo.get(g.repo)!.push(g)
   }
   for (const [repo, repoGaps] of byRepo) {
-    // Limit to top 5 per repo to keep prompt manageable for the LLM
-    const topGaps = repoGaps.slice(0, 5)
-    console.log(`${repo} (${repoGaps.length} total, showing top 5):`)
+    // Limit to top 10 per repo to keep prompt manageable for the LLM
+    const topGaps = repoGaps.slice(0, 10)
+    console.log(`${repo} (${repoGaps.length} total, showing top 10):`)
     for (const g of topGaps) {
       console.log(`  [${g.type}] ${g.name}`)
     }

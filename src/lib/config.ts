@@ -3,6 +3,22 @@ export const config = {
   ollamaUrl: process.env.OLLAMA_URL ?? "http://localhost:11434",
   collectionName: process.env.QDRANT_COLLECTION ?? "code_chunks",
 
+  // Reranker model — neural cross-encoder for re-scoring retrieved chunks.
+  // Set to empty string or unset to disable (falls back to heuristic reranker).
+  // Default: qllama/bge-reranker-v2-m3 (568M params, 636MB, multilingual+code)
+  rerankerModel: process.env.RERANKER_MODEL ?? "qllama/bge-reranker-v2-m3",
+
+  // How many top chunks to send to the reranker. Higher = better recall, slower.
+  // Must be >= the final limit sent to LLM. CPU-only: keep low (20-30).
+  rerankerTopN: Number(process.env.RERANKER_TOP_N ?? 20),
+
+  // Max chars of chunk content to send to reranker per chunk. Truncating saves latency.
+  rerankerMaxChars: Number(process.env.RERANKER_MAX_CHARS ?? 256),
+
+  // Concurrency for reranker calls. Ollama on CPU is largely serial, so keep low.
+  rerankerConcurrency: Number(process.env.RERANKER_CONCURRENCY ?? 2),
+
+  // Embedding model stays on local Ollama regardless of chat provider.
   embeddingModel: process.env.EMBEDDING_MODEL ?? "nomic-embed-text",
   chatModel: process.env.CHAT_MODEL ?? "qwen2.5-coder:3b",
 
@@ -69,8 +85,8 @@ export const config = {
   maxDocChunkChars: Number(process.env.MAX_DOC_CHUNK_CHARS ?? 1_500),
 
   // Self-learning: meta-evaluator model (must differ from chatModel to avoid self-eval bias).
-  // Uses the same 9router/cloud provider as chat. Default: prod/claude-sonnet-5.
-  evalModel: process.env.EVAL_MODEL ?? "prod/glm-5.2",
+  // Uses the same 9router/cloud provider as chat. Default: prod/glm-5.3.
+  evalModel: process.env.EVAL_MODEL ?? "prod/glm-5.3",
 
   // Self-learning: path to learning rules JSON file. Rules are injected into
   // the LLM prompt to correct systematic answer errors.
