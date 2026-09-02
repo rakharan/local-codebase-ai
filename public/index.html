@@ -15,7 +15,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-powershell.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -987,6 +988,21 @@
     .manager-subgrid { grid-template-columns: 1fr; }
     .manager-search-row { align-items: stretch; flex-direction: column; }
   }
+
+  /* Relationship Graph */
+  .main.graph-active .chat-messages,
+  .main.graph-active .input-bar,
+  .main.graph-active .loading-indicator,
+  .main.graph-active .manager-view { display: none; }
+  .graph-view { display: none; flex: 1; overflow: hidden; padding: 16px; }
+  .main.graph-active .graph-view { display: block; }
+  .graph-container {
+    width: 100%;
+    height: calc(100vh - 60px);
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    background: #0d1117;
+  }
 </style>
 </head>
 <body>
@@ -1009,6 +1025,10 @@
     <button class="new-chat-btn" onclick="showManager()">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"></path><path d="M4 12h16"></path><path d="M4 17h16"></path></svg>
       Index Manager
+    </button>
+    <button class="new-chat-btn" onclick="showGraph()">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"></circle><circle cx="5" cy="5" r="2"></circle><circle cx="19" cy="5" r="2"></circle><circle cx="5" cy="19" r="2"></circle><circle cx="19" cy="19" r="2"></circle><line x1="12" y1="12" x2="5" y2="5"></line><line x1="12" y1="12" x2="19" y2="5"></line><line x1="12" y1="12" x2="5" y2="19"></line><line x1="12" y1="12" x2="19" y2="19"></line></svg>
+      Relationship Graph
     </button>
 
     <div>
@@ -1118,6 +1138,37 @@
       </label>
     </div>
 
+    <section class="graph-view" id="graphView">
+      <div class="manager-header" style="max-width:none;">
+        <div>
+          <div class="manager-title">Relationship Graph</div>
+          <div class="manager-subtitle">Force-directed view of cross-repo relationships (routes, tables, RPC, symbols).</div>
+        </div>
+        <div class="manager-actions">
+          <button class="manager-btn" onclick="showChat()">Back to Chat</button>
+          <button class="manager-btn primary" onclick="loadGraph()">Refresh</button>
+        </div>
+      </div>
+
+      <div class="manager-panel wide-panel" style="margin-bottom:12px;">
+        <div class="manager-search-row" style="margin-top:0;">
+          <select id="graphEdgeFilter" onchange="applyGraphFilters()">
+            <option value="ALL">All edge types</option>
+            <option value="CALLS_HTTP_ENDPOINT">CALLS_HTTP_ENDPOINT</option>
+            <option value="HANDLES_HTTP_ENDPOINT">HANDLES_HTTP_ENDPOINT</option>
+            <option value="TOUCHES_TABLE">TOUCHES_TABLE</option>
+            <option value="CALLS_RPC_FUNC">CALLS_RPC_FUNC</option>
+            <option value="DEFINES_SYMBOL">DEFINES_SYMBOL</option>
+            <option value="CALLS_SYMBOL">CALLS_SYMBOL</option>
+          </select>
+          <input id="graphRepoFilter" type="text" placeholder="repo filter (substring)" oninput="applyGraphFilters()" />
+          <button class="manager-btn" onclick="resetGraphFilter()">Reset filter</button>
+        </div>
+        <div id="graphStats" class="manager-muted" style="margin-top:8px;"></div>
+      </div>
+
+      <div id="graphContainer" class="graph-container"></div>
+    </section>
     <section class="manager-view" id="managerView">
       <div class="manager-inner">
         <div class="manager-header">
@@ -1805,6 +1856,7 @@ function toggleSettings() {
 
 function showManager() {
   mainEl.classList.add('manager-active');
+  mainEl.classList.remove('graph-active');
 
   // Set initial active tab (default to indexing)
   const managerView = document.getElementById('managerView');
@@ -1867,6 +1919,7 @@ function refreshActiveTab() {
 
 function showChat() {
   mainEl.classList.remove('manager-active');
+  mainEl.classList.remove('graph-active');
   questionInput.focus();
 }
 
@@ -3926,6 +3979,158 @@ function renderCoverage(data) {
       </div>
     </div>`;
 }
+
+// ===== Relationship Graph =====
+let graphData = null;        // raw {nodes, edges, totalEdges, typeCounts}
+let graphNetwork = null;     // vis.Network instance
+let graphSelectedRepo = null; // repo node id when filtered by click
+
+const GRAPH_GROUP_COLORS = {
+  repo:   { bg: '#58a6ff', border: '#1f6feb' }, // blue
+  route:  { bg: '#3fb950', border: '#238636' }, // green
+  table:  { bg: '#e3b341', border: '#9e6a03' }, // orange
+  rpc:    { bg: '#bc8cff', border: '#8957e5' }, // purple
+  symbol: { bg: '#8b949e', border: '#6e7681' }, // gray
+};
+
+function graphGroupKey(group) {
+  return (group === 'route' || group === 'table' || group === 'rpc' || group === 'symbol')
+    ? group : 'repo';
+}
+
+function graphIsRepoNode(node) {
+  return graphGroupKey(node && node.group) === 'repo';
+}
+
+function showGraph() {
+  mainEl.classList.add('graph-active');
+  mainEl.classList.remove('manager-active');
+  if (!graphData) loadGraph();
+}
+
+async function loadGraph() {
+  const container = document.getElementById('graphContainer');
+  const stats = document.getElementById('graphStats');
+  if (typeof vis === 'undefined') {
+    container.innerHTML = '<div class="manager-muted" style="padding:16px;color:#f85149;">vis-network failed to load (CDN blocked?).</div>';
+    stats.textContent = '';
+    return;
+  }
+  container.innerHTML = '<div class="manager-muted" style="padding:16px;">Loading graph…</div>';
+  try {
+    const res = await apiFetch('/api/graph');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    graphData = await res.json();
+    graphSelectedRepo = null;
+    const f = document.getElementById('graphRepoFilter'); if (f) f.value = '';
+    const ef = document.getElementById('graphEdgeFilter'); if (ef) ef.value = 'ALL';
+    renderGraph();
+  } catch (err) {
+    container.innerHTML = '<div class="manager-muted" style="padding:16px;color:#f85149;">Failed to load graph: ' + escapeHtml(String(err)) + '</div>';
+    stats.textContent = '';
+  }
+}
+
+function applyGraphFilters() { renderGraph(); }
+
+function resetGraphFilter() {
+  graphSelectedRepo = null;
+  const f = document.getElementById('graphRepoFilter'); if (f) f.value = '';
+  const ef = document.getElementById('graphEdgeFilter'); if (ef) ef.value = 'ALL';
+  renderGraph();
+}
+
+function renderGraph() {
+  if (!graphData) return;
+  const container = document.getElementById('graphContainer');
+  const stats = document.getElementById('graphStats');
+
+  const edgeFilter = document.getElementById('graphEdgeFilter').value;
+  const repoFilter = (document.getElementById('graphRepoFilter').value || '').toLowerCase();
+
+  let edges = graphData.edges || [];
+  if (edgeFilter !== 'ALL') edges = edges.filter(e => e.type === edgeFilter);
+  if (graphSelectedRepo) edges = edges.filter(e => e.from === graphSelectedRepo || e.to === graphSelectedRepo);
+  if (repoFilter) {
+    edges = edges.filter(e =>
+      String(e.from).toLowerCase().includes(repoFilter) ||
+      String(e.to).toLowerCase().includes(repoFilter));
+  }
+
+  // Only keep nodes referenced by the filtered edges.
+  const nodeIds = new Set();
+  edges.forEach(e => { nodeIds.add(e.from); nodeIds.add(e.to); });
+
+  const visNodes = new vis.DataSet(
+    (graphData.nodes || [])
+      .filter(n => nodeIds.has(n.id))
+      .map(n => {
+        const c = GRAPH_GROUP_COLORS[graphGroupKey(n.group)];
+        return {
+          id: n.id,
+          label: n.label || n.id,
+          group: graphGroupKey(n.group),
+          color: { background: c.bg, border: c.border, highlight: { background: c.bg, border: '#f0f6fc' } },
+          title: n.label || n.id,
+        };
+      })
+  );
+
+  const visEdges = new vis.DataSet(
+    edges.map((e, i) => ({
+      id: 'ge' + i,
+      from: e.from,
+      to: e.to,
+      // Label shown on hover via title tooltip (vis shows title on hover).
+      title: e.label || e.type || '',
+      font: { color: '#8b949e', size: 11, strokeWidth: 0, background: 'transparent' },
+      color: { color: '#30363d', highlight: '#58a6ff', hover: '#58a6ff' },
+      arrows: { to: { enabled: true, scaleFactor: 0.5 } },
+      smooth: { type: 'continuous', roundness: 0.4 },
+    }))
+  );
+
+  const data = { nodes: visNodes, edges: visEdges };
+  const options = {
+    nodes: { shape: 'dot', size: 16, borderWidth: 2, font: { color: '#c9d1d9', size: 12, face: 'sans-serif' } },
+    edges: { labelHighlightBold: false, selectionWidth: 2 },
+    physics: {
+      solver: 'forceAtlas2Based',
+      forceAtlas2Based: { gravitationalConstant: -55, springLength: 110, springConstant: 0.08, damping: 0.4 },
+      stabilization: { iterations: 150, updateInterval: 25 },
+    },
+    interaction: { hover: true, tooltipDelay: 120, navigationButtons: false, keyboard: false, zoomView: true, dragView: true },
+  };
+
+  if (graphNetwork) { try { graphNetwork.destroy(); } catch (_) {} graphNetwork = null; }
+  graphNetwork = new vis.Network(container, data, options);
+
+  // Click a repo node -> filter to that repo's edges.
+  graphNetwork.on('click', (params) => {
+    if (params.nodes && params.nodes.length > 0) {
+      const nodeId = params.nodes[0];
+      const node = (graphData.nodes || []).find(n => n.id === nodeId);
+      if (node && graphIsRepoNode(node)) {
+        graphSelectedRepo = (graphSelectedRepo === nodeId) ? null : nodeId;
+        renderGraph();
+      }
+    }
+  });
+
+  // Stats: total edges, node count, edge type distribution (raw) + filtered view.
+  const totalEdges = (graphData.totalEdges != null) ? graphData.totalEdges : (graphData.edges || []).length;
+  const totalNodes = (graphData.nodes || []).length;
+  const typeCounts = graphData.typeCounts || {};
+  const distHtml = Object.entries(typeCounts)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([t, c]) => '<code style="margin-right:8px;font-size:0.72rem;">' + escapeHtml(t) + ': ' + c + '</code>').join('');
+  stats.innerHTML =
+    'Total edges: <strong>' + totalEdges + '</strong> · Nodes: <strong>' + totalNodes + '</strong>' +
+    ' · Showing: <strong>' + visEdges.length + '</strong> edges, <strong>' + visNodes.length + '</strong> nodes' +
+    (graphSelectedRepo ? ' (repo filter: ' + escapeHtml(graphSelectedRepo) + ' — click again to clear)' : '') +
+    '<div style="margin-top:4px;">Edge type distribution: ' + (distHtml || '<span class="manager-muted">n/a</span>') + '</div>';
+}
+
 </script>
 </body>
 </html>

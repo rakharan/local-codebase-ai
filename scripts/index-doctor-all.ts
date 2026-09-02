@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { config as dotenvConfig } from "dotenv"
+dotenvConfig()
+
 /**
  * Batch script: index all Doctor output folders into RAG.
  * Usage: npx tsx scripts/index-doctor-all.ts

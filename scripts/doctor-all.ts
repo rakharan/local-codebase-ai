@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { config as dotenvConfig } from "dotenv"
+dotenvConfig()
+
 /**
  * Batch script: run Repo Doctor + index-doctor on all repos in a folder.
  * Usage: npx tsx scripts/doctor-all.ts C:/GIT/work

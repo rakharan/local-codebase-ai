@@ -1,3 +1,6 @@
+import { config as dotenvConfig } from "dotenv"
+dotenvConfig()
+
 import path from "node:path"
 import fs from "node:fs/promises"
 import { sha256, uuidFromHash } from "./lib/hash.js"

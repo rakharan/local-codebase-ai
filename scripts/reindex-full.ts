@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { config as dotenvConfig } from "dotenv"
+dotenvConfig()
+
 /**
  * Lock-protected FULL reindex: doctor-all → index-doctor-all → index-repo (per repo) → index-docs.
  *
@@ -73,7 +76,7 @@ function runStep(label: string, args: string[]): Promise<number> {
   console.log(`\n━━━ ${label} ━━━`)
   return new Promise(resolve => {
     const child = spawn(process.execPath, ["--import", "tsx", ...args], {
-      stdio: "inherit",
+      stdio: ["pipe", "inherit", "inherit"],
     })
     child.on("close", code => resolve(code ?? 1))
   })

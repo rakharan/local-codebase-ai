@@ -1,3 +1,6 @@
+import { config as dotenvConfig } from "dotenv"
+dotenvConfig()
+
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { execFile } from "node:child_process"
