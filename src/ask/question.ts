@@ -223,6 +223,31 @@ export function questionAsksMedalMechanism(question: string): boolean {
     /\b(how|gain|gained|get|earn|earned|increase|naik|menaikkan|dapat|dapet|mendapat|persyaratan|syarat|requirement|requirements|cara)\b/i.test(question)
 }
 
+const GREETING_RE = /^(hello|hi|hey|halo|hallo|hai|thanks|thank you|terima kasih|bye|good (morning|afternoon|evening)|apa kabar|test|oi|yo|sup)\b[!.?\s]*$/i
+
+export function isGreeting(question: string): boolean {
+  const normalized = question.trim().toLowerCase()
+  const wordCount = normalized.split(/\s+/).filter(Boolean).length
+  return wordCount <= 4 && GREETING_RE.test(normalized)
+}
+
+const FOLLOWUP_RE = /^(what|why|how|where|when|who)\s+(happened|happen|about|do you|did you|is this|are you|no response|didn'?t|doesn'?t|won'?t|can'?t)/i
+const CONVO_RE = /^(can you|could you|please|continue|elaborate|go on|explain more|tell me more|ok|okay|got it|nice|cool|great|awesome|perfect|makes sense|i see|understood|sorry|wait|actually|also|one more thing)\b/i
+const PASCAL_RE = /\b[A-Z][A-Za-z0-9_]{2,}\b/
+const PATH_RE = /\/[A-Za-z0-9_./:{}-]+/
+const NS_RE = /[A-Za-z_]+::[A-Za-z_]+/
+const TECH_RE = /\b(select|insert|update|delete|table|queue|route|endpoint|cron|controller|model|migration|function|method|class)\b/i
+
+export function isConversationalFollowUp(question: string, hasHistory: boolean): boolean {
+  if (!hasHistory) return false
+  const normalized = question.trim().toLowerCase()
+  const wordCount = normalized.split(/\s+/).filter(Boolean).length
+  if (wordCount > 10) return false
+  const hasCodebaseKeyword = PASCAL_RE.test(question) || PATH_RE.test(question) || NS_RE.test(question) || TECH_RE.test(normalized)
+  if (hasCodebaseKeyword) return false
+  return FOLLOWUP_RE.test(normalized) || CONVO_RE.test(normalized)
+}
+
 export function questionBrokerHint(question: string): "mrg" | "askap" | undefined {
   const mentionsMrg = /\bmrg\b/i.test(question)
   const mentionsAskap = /\b(mmb|askap)\b/i.test(question)

@@ -5,6 +5,7 @@ import { promisify } from "node:util"
 import express from "express"
 import { config } from "./lib/config.js"
 import { ensureCollection, qdrant } from "./lib/qdrant.js"
+import { prewarmBM25Index } from "./lib/bm25-index.js"
 import { deleteRelationshipGraphForScope, readRelationshipGraph } from "./lib/graph.js"
 import {
   saveVersion,
@@ -25,6 +26,11 @@ import {
   readAnswerFeedback,
   type AnswerFeedbackInput,
 } from "./lib/answer-feedback.js"
+import {
+  createLearningRule,
+  loadAllLearningRules,
+  rollbackRule,
+} from "./lib/learning-rules.js"
 import {
   listDrafts,
   readDraft,
@@ -83,8 +89,17 @@ app.use("/api/", (request, response, next) => {
 // --- API key authentication ---
 // Set APP_API_KEY in .env to enable. Leave unset to allow all (dev mode).
 const APP_API_KEY = process.env.APP_API_KEY?.trim()
+// Public probe endpoints that must remain reachable without credentials so
+// the UI can detect auth requirements and service health before login.
+// NOTE: middleware is mounted at "/api/" so Express strips that prefix from
+// request.path — compare against the stripped paths.
+const PUBLIC_API_PATHS = new Set(["/health", "/ready", "/auth-required"])
 if (APP_API_KEY) {
   app.use("/api/", (request, response, next) => {
+    if (PUBLIC_API_PATHS.has(request.path)) {
+      next()
+      return
+    }
     const authHeader = request.headers["authorization"] ?? ""
     const provided = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader
     if (provided !== APP_API_KEY) {
@@ -391,6 +406,10 @@ app.post("/api/ask", async (request, response) => {
     return
   }
 
+  const requestId = Math.random().toString(36).slice(2, 10)
+  const reqStart = Date.now()
+  console.log(`[ask][${requestId}] start q=${question.slice(0, 80)}${question.length > 80 ? "…" : ""} deep=${!!body.deep} limit=${body.limit ?? "-"}`)
+
   const args = ["--import", "./register-ts-node.mjs", "src/ask.ts", question]
 
   if (body.limit) {
@@ -431,18 +450,20 @@ app.post("/api/ask", async (request, response) => {
       timeout: body.deep ? 900_000 : 600_000,
       maxBuffer: 10 * 1024 * 1024,
       windowsHide: true,
+      env: { ...process.env, ASK_REQUEST_ID: requestId, ASK_DEBUG: process.env.ASK_DEBUG ?? "1" },
     })
 
     const output = [stdout, stderr].filter(Boolean).join("\n")
     const result = parseAskOutput(output)
 
+    console.log(`[ask][${requestId}] done ms=${Date.now() - reqStart}`)
     response.json(result)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     const stdout = (error as { stdout?: string }).stdout ?? ""
     const stderr = (error as { stderr?: string }).stderr ?? ""
 
-    console.error("Ask process failed:", message)
+    console.error(`[ask][${requestId}] failed ms=${Date.now() - reqStart}:`, message)
 
     response.status(500).json({
       error: message,
@@ -460,6 +481,10 @@ app.post("/api/ask/stream", (request, response) => {
     response.status(400).json({ error: "Missing required field: question" })
     return
   }
+
+  const requestId = Math.random().toString(36).slice(2, 10)
+  const reqStart = Date.now()
+  console.log(`[ask][${requestId}] stream-start q=${question.slice(0, 80)}${question.length > 80 ? "…" : ""} deep=${!!body.deep} limit=${body.limit ?? "-"}`)
 
   // Set up SSE headers
   response.setHeader("Content-Type", "text/event-stream")
@@ -485,15 +510,20 @@ app.post("/api/ask/stream", (request, response) => {
 
   let stdout = ""
   let stderr = ""
+  let completed = false
 
   const child = execFile(process.execPath, args, {
     cwd: rootDir,
     timeout: body.deep ? 900_000 : 600_000,
     maxBuffer: 10 * 1024 * 1024,
     windowsHide: true,
+    env: { ...process.env, ASK_REQUEST_ID: requestId, ASK_DEBUG: process.env.ASK_DEBUG ?? "1" },
   }, (error, out, err) => {
+    completed = true
     stdout = out ?? ""
     stderr = err ?? ""
+
+    console.log(`[ask][${requestId}] stream-done ms=${Date.now() - reqStart}`)
 
     if (error) {
       sendEvent({ type: "error", error: error.message, raw: [out, err].filter(Boolean).join("\n") })
@@ -513,8 +543,8 @@ app.post("/api/ask/stream", (request, response) => {
     }
   })
 
-  request.on("close", () => {
-    if (!child.killed) child.kill()
+  response.on("close", () => {
+    if (!completed && !child.killed) child.kill()
   })
 })
 
@@ -1015,6 +1045,64 @@ app.delete("/api/feedback/:id", async (request, response) => {
   }
 })
 
+// ── Learning rules ──
+app.get("/api/learning/rules", async (_request, response) => {
+  try {
+    const rules = await loadAllLearningRules()
+    response.json({ rules })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
+app.post("/api/learning/rules", async (request, response) => {
+  try {
+    const body = request.body as {
+      type?: string
+      trigger?: string
+      content?: string
+      rationale?: string
+      source?: string
+    }
+
+    if (!body.trigger || !body.content) {
+      response.status(400).json({ error: "Missing required fields: trigger, content" })
+      return
+    }
+
+    const rule = await createLearningRule({
+      type: (body.type as "prompt_directive" | "retrieval_boost" | "query_rewrite") ?? "prompt_directive",
+      trigger: body.trigger,
+      content: body.content,
+      rationale: body.rationale ?? "",
+      source: (body.source as "manual" | "meta_eval" | "feedback") ?? "manual",
+    })
+
+    response.json(rule)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
+app.post("/api/learning/rules/:id/rollback", async (request, response) => {
+  try {
+    const reason = (request.body as { reason?: string })?.reason ?? ""
+    const ok = await rollbackRule(request.params.id, reason)
+
+    if (!ok) {
+      response.status(404).json({ error: `Rule not found: ${request.params.id}` })
+      return
+    }
+
+    response.json({ ok: true })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
 app.get("/api/drafts", async (_request, response) => {
   try {
     const drafts = await listDrafts()
@@ -1343,8 +1431,91 @@ app.post("/api/decisions/:filename/rollback/:versionId", async (request, respons
   }
 })
 
+// --- Health checks ---
+// Liveness (/api/health): process is alive. Always 200 if the server can respond.
+// Readiness (/api/ready): upstream dependencies (Qdrant + Ollama) are reachable.
+// Readiness is cached briefly so a flood of probes does not hammer the upstreams.
+// BM25 prewarm status is included for observability but does not affect the HTTP
+// status code — queries degrade gracefully without BM25 (vector-only results).
+
+let bm25PrewarmStatus: "warming" | "ready" | "failed" | "skipped" = "skipped"
+
+type ReadinessState = {
+  qdrant: "ok" | "down"
+  ollama: "ok" | "down"
+  bm25: "warming" | "ready" | "failed" | "skipped"
+  qdrantDetail: string | undefined
+  ollamaDetail: string | undefined
+}
+
+type CachedReadiness = {
+  checkedAt: number
+  ready: boolean
+  state: ReadinessState
+}
+
+const READINESS_CACHE_TTL_MS = 5_000
+let cachedReadiness: CachedReadiness | null = null
+
+async function fetchWithTimeout(url: string, ms: number): Promise<Response> {
+  const controller = new AbortController()
+  const id = setTimeout(() => controller.abort(), ms)
+  try {
+    return await fetch(url, { signal: controller.signal })
+  } finally {
+    clearTimeout(id)
+  }
+}
+
+async function probeReadiness(): Promise<ReadinessState> {
+  let qdrantStatus: ReadinessState["qdrant"] = "ok"
+  let ollamaStatus: ReadinessState["ollama"] = "ok"
+  let qdrantDetail: string | undefined
+  let ollamaDetail: string | undefined
+
+  try {
+    await qdrant.getCollections()
+  } catch (err) {
+    qdrantStatus = "down"
+    qdrantDetail = err instanceof Error ? err.message : String(err)
+  }
+
+  try {
+    const res = await fetchWithTimeout(`${config.ollamaUrl}/api/tags`, 2_000)
+    if (!res.ok) {
+      ollamaStatus = "down"
+      ollamaDetail = `HTTP ${res.status}`
+    }
+  } catch (err) {
+    ollamaStatus = "down"
+    ollamaDetail = err instanceof Error ? err.message : String(err)
+  }
+
+  return { qdrant: qdrantStatus, ollama: ollamaStatus, bm25: bm25PrewarmStatus, qdrantDetail, ollamaDetail }
+}
+
+async function getReadiness(): Promise<CachedReadiness> {
+  if (cachedReadiness && Date.now() - cachedReadiness.checkedAt < READINESS_CACHE_TTL_MS) {
+    return cachedReadiness
+  }
+  const state = await probeReadiness()
+  const ready = state.qdrant === "ok" && state.ollama === "ok"
+  cachedReadiness = { checkedAt: Date.now(), ready, state }
+  return cachedReadiness
+}
+
 app.get("/api/health", (_request, response) => {
+  // Liveness: process is up.
   response.json({ status: "ok" })
+})
+
+app.get("/api/ready", async (_request, response) => {
+  const result = await getReadiness()
+  response.status(result.ready ? 200 : 503).json({
+    ready: result.ready,
+    checkedAt: new Date(result.checkedAt).toISOString(),
+    dependencies: result.state,
+  })
 })
 
 app.get("/api/auth-required", (_request, response) => {
@@ -1355,4 +1526,11 @@ const port = Number(process.env.PORT ?? 9191)
 
 app.listen(port, () => {
   console.log(`Local Codebase AI server running at http://localhost:${port}`)
+
+  // Prewarm BM25 disk cache in the background so the first /api/ask request
+  // does not pay the ~2-3 min cold-build cost. Non-blocking — errors are logged.
+  bm25PrewarmStatus = "warming"
+  prewarmBM25Index()
+    .then(() => { bm25PrewarmStatus = "ready" })
+    .catch(() => { bm25PrewarmStatus = "failed" })
 })

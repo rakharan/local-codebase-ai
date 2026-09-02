@@ -8,6 +8,15 @@ import { inferRelationshipHints } from "./lib/relationships.js"
 import { extractStructuredFacts } from "./lib/facts.js"
 import { createEmbedding } from "./lib/ollama.js"
 import type { CodeChunk } from "./lib/chunker.js"
+
+async function mapWithConcurrency<T, R>(items: readonly T[], concurrency: number, task: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const limit = Math.max(1, Math.floor(concurrency))
+  const results: R[] = new Array(items.length)
+  let cursor = 0
+  async function worker() { while (cursor < items.length) { const i = cursor++; results[i] = await task(items[i]!, i) } }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()))
+  return results
+}
 import { inferProjectIdsForRepo, inferProjectTagForChunk, normalizeProjectIds } from "./lib/service-registry.js"
 
 const program = new Command()
@@ -61,22 +70,42 @@ function normalizeRepoName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9_-]/g, "")
 }
 
-function mapDocFolderToRepoNames(folderName: string): string[] {
-  const mapping: Record<string, string[]> = {
-    "ims-docs": ["ims-mrg", "ims-askap", "ims-tf2"],
-    "isignal-docs": ["tf2-ois", "fa-trade-publisher", "ims-tf2"],
-    "wallet-docs": ["tf2-ois"],
-    "fa-porto-docs": ["tf2-porto-service"],
-    "analyst-docs": ["tf2-ois"],
-    "channel-subs-docs": ["tf2-ois"],
-    "keteng-docs": ["tf2-ois"],
-    "devops-docs": ["tf2-ois", "ims-tf2", "mrg-accounts", "tf2-porto-service", "tf2-sinyo"],
-    "product-knowledge": ["tf2-ois", "ims-tf2", "mrg-accounts"],
-  }
+// Doc-folder → repo mapping. Override at runtime via the DOC_FOLDER_REPO_MAP
+// env var (a JSON object of the same shape) without changing code.
+const DEFAULT_DOC_FOLDER_REPO_MAP: Record<string, string[]> = {
+  "ims-docs": ["ims-mrg", "ims-askap", "ims-tf2"],
+  "isignal-docs": ["tf2-ois", "fa-trade-publisher", "ims-tf2"],
+  "wallet-docs": ["tf2-ois"],
+  "fa-porto-docs": ["tf2-porto-service"],
+  "analyst-docs": ["tf2-ois"],
+  "channel-subs-docs": ["tf2-ois"],
+  "keteng-docs": ["tf2-ois"],
+  "devops-docs": ["tf2-ois", "ims-tf2", "mrg-accounts", "tf2-porto-service", "tf2-sinyo"],
+  "product-knowledge": ["tf2-ois", "ims-tf2", "mrg-accounts"],
+}
 
+function loadDocFolderRepoMap(): Record<string, string[]> {
+  const envValue = process.env.DOC_FOLDER_REPO_MAP
+  if (envValue && envValue.trim()) {
+    try {
+      const parsed = JSON.parse(envValue)
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, string[]>
+      }
+      console.warn("[index-docs] DOC_FOLDER_REPO_MAP is not a JSON object — using defaults")
+    } catch (err) {
+      console.warn(`[index-docs] DOC_FOLDER_REPO_MAP is invalid JSON — using defaults: ${err instanceof Error ? err.message : err}`)
+    }
+  }
+  return DEFAULT_DOC_FOLDER_REPO_MAP
+}
+
+const DOC_FOLDER_REPO_MAP = loadDocFolderRepoMap()
+
+function mapDocFolderToRepoNames(folderName: string): string[] {
   const normalized = normalizeRepoName(folderName)
 
-  for (const [key, repos] of Object.entries(mapping)) {
+  for (const [key, repos] of Object.entries(DOC_FOLDER_REPO_MAP)) {
     if (normalized === normalizeRepoName(key)) {
       return repos
     }
@@ -155,7 +184,7 @@ function extractReposFromFrontmatter(frontmatter: Record<string, string>): strin
   return [raw]
 }
 
-const MAX_DOC_CHUNK_CHARS = 1_500
+const MAX_DOC_CHUNK_CHARS = config.maxDocChunkChars
 
 function projectHashKey(projectIds: string[]): string {
   return projectIds.length > 0 ? projectIds.join(",") : "unassigned"
@@ -457,15 +486,69 @@ async function main() {
 
     await deleteStaleChunks(staleIds)
 
+    // Phase 1: compute embeddings concurrently
+    const upsertBatchSize = 64
     let indexed = 0
+    const points = await mapWithConcurrency(chunksToIndex, config.indexConcurrency, async (chunk) => {
+      const embeddingInput = [
+        `Repository: ${chunk.repoName}`,
+        `Projects: ${chunk.projectIds.join(", ") || "unassigned"}`,
+        `Branch: ${chunk.branchName}`,
+        `Documentation locale: ${chunk.docLocale ?? "default"}`,
+        `Service type: ${chunk.serviceType}`,
+        `Evidence types: ${chunk.evidenceTypes.join(", ")}`,
+        `Routes: ${chunk.relationshipHints.routes.join(", ")}`,
+        `Symbols: ${chunk.relationshipHints.symbols.join(", ")}`,
+        `Message names: ${chunk.relationshipHints.messageNames.join(", ")}`,
+        `Database tables: ${chunk.relationshipHints.dbTables.join(", ")}`,
+        `Structured facts: ${chunk.structuredFacts.map(fact => `${fact.category}:${fact.text}`).join(" | ")}`,
+        `File: ${chunk.filePath}`,
+        `Lines: ${chunk.startLine}-${chunk.endLine}`,
+        "",
+        chunk.content,
+      ].join("\n")
 
-    for (const chunk of chunksToIndex) {
-      await upsertChunk(chunk)
+      const vector = await createEmbedding(embeddingInput)
       indexed++
+      if (indexed % 10 === 0) console.log(`  Indexed ${indexed} chunks for ${repoName}...`)
 
-      if (indexed % 10 === 0) {
-        console.log(`  Indexed ${indexed} chunks for ${repoName}...`)
+      return {
+        id: chunk.id,
+        vector,
+        payload: {
+          repoName: chunk.repoName,
+          projectIds: chunk.projectIds,
+          projectTagSources: chunk.projectTagSources,
+          serviceType: chunk.serviceType,
+          branchName: chunk.branchName,
+          commitSha: chunk.commitSha,
+          docLocale: chunk.docLocale,
+          evidenceTypes: chunk.evidenceTypes,
+          routes: chunk.relationshipHints.routes,
+          symbols: chunk.relationshipHints.symbols,
+          messageNames: chunk.relationshipHints.messageNames,
+          queueNames: chunk.relationshipHints.queueNames,
+          exchangeNames: chunk.relationshipHints.exchangeNames,
+          dbTables: chunk.relationshipHints.dbTables,
+          structuredFacts: chunk.structuredFacts,
+          filePath: chunk.filePath,
+          startLine: chunk.startLine,
+          endLine: chunk.endLine,
+          content: chunk.content,
+          contentHash: chunk.contentHash,
+          chunkType: chunk.chunkType,
+          symbolName: chunk.symbolName,
+          parentSymbol: chunk.parentSymbol,
+          hasOverlap: chunk.hasOverlap,
+        },
       }
+    })
+
+    // Phase 2: batch upsert to Qdrant
+    for (let i = 0; i < points.length; i += upsertBatchSize) {
+      await qdrant.upsert(config.collectionName, {
+        points: points.slice(i, i + upsertBatchSize),
+      })
     }
 
     console.log(`Done ${repoName}. Indexed ${indexed}, skipped ${chunks.length - chunksToIndex.length}.`)

@@ -30,6 +30,13 @@ function normalizeFactLine(line: string): string {
 function isNoisyFactLine(line: string): boolean {
   return line.length < 12 ||
     line.length > 220 ||
+    /^\s*(\/\/|#)/.test(line) ||          // line comment markers
+    /^\s*\/\*/.test(line) ||               // block comment start
+    /^\s*\*\s/.test(line) ||               // block comment continuation (JSDoc)
+    /^#[0-9a-f]{3,8}\s*(!important)?/i.test(line) ||  // CSS hex colors
+    /!important/i.test(line) ||             // CSS !important
+    /^\s*(import|require)\s+/.test(line) || // import/require statements
+    /^\s*<\/?[a-z]/i.test(line) ||          // HTML tags
     /console\.log|describe\(|it\(|expect\(|logger\.|\/\/\s*todo/i.test(line)
 }
 

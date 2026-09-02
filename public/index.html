@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CodebaseAI — Internal Knowledge Base</title>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
@@ -1077,6 +1077,20 @@
     </div>
   </div>
 
+  <!-- Generic Prompt/Confirm Modal (prompt()/confirm() are blocked in some webviews) -->
+  <div id="promptModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1100;align-items:center;justify-content:center;">
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;width:440px;max-width:90vw;">
+      <h2 id="promptModalTitle" style="font-size:1rem;font-weight:600;color:#f0f6fc;margin-bottom:12px;"></h2>
+      <p id="promptModalMessage" style="font-size:0.875rem;color:#c9d1d9;margin-bottom:16px;white-space:pre-wrap;line-height:1.5;"></p>
+      <input id="promptModalInput" type="text" placeholder=""
+        style="display:none;width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;color:#c9d1d9;font-size:0.875rem;margin-bottom:16px;" />
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button id="promptModalCancel" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:8px 16px;color:#c9d1d9;cursor:pointer;font-size:0.875rem;">Cancel</button>
+        <button id="promptModalOk" style="background:#238636;border:1px solid #2ea043;border-radius:6px;padding:8px 16px;color:#fff;cursor:pointer;font-size:0.875rem;font-weight:600;">OK</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Main Chat Area -->
   <main class="main">
     <!-- Header -->
@@ -1532,6 +1546,77 @@ source: brain_dump
 function getApiKey() { return localStorage.getItem('app_api_key') || ''; }
 function setApiKey(key) { localStorage.setItem('app_api_key', key); }
 
+// --- Modal-based prompt/confirm (native prompt()/confirm() are blocked in some webviews) ---
+function promptModal(message, defaultValue = '') {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('promptModal');
+    const titleEl = document.getElementById('promptModalTitle');
+    const msgEl = document.getElementById('promptModalMessage');
+    const inputEl = document.getElementById('promptModalInput');
+    const okBtn = document.getElementById('promptModalOk');
+    const cancelBtn = document.getElementById('promptModalCancel');
+
+    titleEl.textContent = 'Input required';
+    msgEl.textContent = message;
+    inputEl.style.display = 'block';
+    inputEl.value = defaultValue;
+    okBtn.textContent = 'OK';
+
+    modal.style.display = 'flex';
+    setTimeout(() => inputEl.focus(), 0);
+
+    function cleanup() {
+      modal.style.display = 'none';
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      inputEl.removeEventListener('keydown', onKey);
+      modal.removeEventListener('click', onBackdrop);
+    }
+    function onOk() { const v = inputEl.value; cleanup(); resolve(v); }
+    function onCancel() { cleanup(); resolve(null); }
+    function onKey(e) { if (e.key === 'Enter') { e.preventDefault(); onOk(); } if (e.key === 'Escape') { e.preventDefault(); onCancel(); } }
+    function onBackdrop(e) { if (e.target === modal) onCancel(); }
+
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    inputEl.addEventListener('keydown', onKey);
+    modal.addEventListener('click', onBackdrop);
+  });
+}
+
+function confirmModal(message) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('promptModal');
+    const titleEl = document.getElementById('promptModalTitle');
+    const msgEl = document.getElementById('promptModalMessage');
+    const inputEl = document.getElementById('promptModalInput');
+    const okBtn = document.getElementById('promptModalOk');
+    const cancelBtn = document.getElementById('promptModalCancel');
+
+    titleEl.textContent = 'Confirm';
+    msgEl.textContent = message;
+    inputEl.style.display = 'none';
+    okBtn.textContent = 'Confirm';
+
+    modal.style.display = 'flex';
+    setTimeout(() => okBtn.focus(), 0);
+
+    function cleanup() {
+      modal.style.display = 'none';
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      modal.removeEventListener('click', onBackdrop);
+    }
+    function onOk() { cleanup(); resolve(true); }
+    function onCancel() { cleanup(); resolve(false); }
+    function onBackdrop(e) { if (e.target === modal) onCancel(); }
+
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    modal.addEventListener('click', onBackdrop);
+  });
+}
+
 // --- Settings modal ---
 function openSettings() {
   const modal = document.getElementById('settingsModal');
@@ -1552,6 +1637,8 @@ function saveSettings() {
   // Show brief confirmation
   const btn = document.querySelector('#settingsModal button[onclick="saveSettings()"]');
   if (btn) { btn.textContent = '✓ Saved'; setTimeout(() => btn && (btn.textContent = 'Save'), 1500); }
+  // Resolve any awaiting apiFetch retry.
+  if (_settingsSaveResolver) { const r = _settingsSaveResolver; _settingsSaveResolver = null; r(key); }
 }
 
 function toggleApiKeyVisibility() {
@@ -1593,20 +1680,40 @@ async function apiFetch(url, options = {}) {
   if (key) headers['Authorization'] = `Bearer ${key}`;
   const res = await fetch(url, { ...options, headers });
   if (res.status === 401) {
-    const k = prompt('API key required. Enter your APP_API_KEY:');
-    if (k) { setApiKey(k); return apiFetch(url, options); }
+    // Open settings modal so user can enter the key, then retry once.
+    if (!apiFetch._retrying) {
+      apiFetch._retrying = true;
+      openSettings();
+      const newKey = await waitForSettingsSave();
+      apiFetch._retrying = false;
+      if (newKey !== null) return apiFetch(url, options);
+    }
   }
   return res;
+}
+
+// Resolves with the saved key when saveSettings() is called, or null on cancel/close.
+let _settingsSaveResolver = null;
+function waitForSettingsSave() {
+  return new Promise((resolve) => {
+    _settingsSaveResolver = resolve;
+    // If user closes without saving, treat as cancel.
+    const origClose = closeSettings;
+    closeSettings = function() {
+      document.getElementById('settingsModal').style.display = 'none';
+      if (_settingsSaveResolver) { const r = _settingsSaveResolver; _settingsSaveResolver = null; r(null); }
+      closeSettings = origClose;
+    };
+  });
 }
 
 // Check if auth is required on load and prompt if key not set
 async function checkAuth() {
   try {
-    const res = await apiFetch('/api/auth-required');
+    const res = await fetch('/api/auth-required');
     const { required } = await res.json();
     if (required && !getApiKey()) {
-      const k = prompt('This server requires an API key. Enter your APP_API_KEY:');
-      if (k) setApiKey(k);
+      openSettings();
     }
   } catch { /* ignore */ }
 }
@@ -1678,8 +1785,6 @@ if (window.mermaid) {
 marked.setOptions({
   breaks: true,
   gfm: true,
-  headerIds: false,
-  mangle: false,
 });
 
 function autoResize(textarea) {
@@ -1775,6 +1880,9 @@ function setQuestion(q) {
 function escapeHtml(text) {
   if (!text) return '';
   const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
 
 function makeVsCodeLink(source) {
   // Source format: "repoName@branch [serviceType] filePath:startLine-endLine (evidenceTypes)"
@@ -1792,9 +1900,6 @@ function makeVsCodeLink(source) {
     const fullPath = `${repoBase}/${filePath}`;
     return `vscode://file/${fullPath}:${line}`;
   } catch { return null; }
-}
-  div.textContent = text;
-  return div.innerHTML;
 }
 
 function saveRecent(question) {
@@ -1918,7 +2023,7 @@ async function loadIndexSummary() {
 async function deleteIndexScope(repoName, branchName) {
   const scope = branchName ? `${repoName}@${branchName}` : repoName;
 
-  if (!confirm(`Delete indexed data for ${scope}? This removes Qdrant chunks and relationship graph edges for that scope.`)) {
+  if (!await confirmModal(`Delete indexed data for ${scope}? This removes Qdrant chunks and relationship graph edges for that scope.`)) {
     return;
   }
 
@@ -2347,7 +2452,7 @@ async function reindexRegistryEntry(entryName) {
     return;
   }
 
-  if (!confirm(`Reindex affected repos for "${name}" with --replace-repo?\n\nKnown paths: ${(entry.repoPaths || []).map(repoPath => repoPath.repo).join(', ')}\nMissing paths: ${missingPathRepos.join(', ') || 'none'}\n\nThis can take a while.`)) {
+  if (!await confirmModal(`Reindex affected repos for "${name}" with --replace-repo?\n\nKnown paths: ${(entry.repoPaths || []).map(repoPath => repoPath.repo).join(', ')}\nMissing paths: ${missingPathRepos.join(', ') || 'none'}\n\nThis can take a while.`)) {
     return;
   }
 
@@ -2385,7 +2490,7 @@ async function deleteRegistryEntry(entryName) {
   const entry = registryEntries.find(item => item.name === entryName);
   const name = entry?.name || entryName;
 
-  if (!confirm(`Delete registry entry "${name}"? This does not delete indexed chunks, but future registry expansion will stop using it.`)) {
+  if (!await confirmModal(`Delete registry entry "${name}"? This does not delete indexed chunks, but future registry expansion will stop using it.`)) {
     return;
   }
 
@@ -2515,7 +2620,7 @@ async function deleteKnowledgeNote(noteId) {
   const note = knowledgeNotes.find(item => item.id === noteId);
   const title = note?.title || noteId;
 
-  if (!confirm(`Delete knowledge note "${title}"?`)) return;
+  if (!await confirmModal(`Delete knowledge note "${title}"?`)) return;
 
   notesStatus.textContent = `Deleting note: ${title}`;
 
@@ -2666,13 +2771,13 @@ async function copyRegressionDraft(feedbackId) {
     await navigator.clipboard.writeText(draft);
     feedbackReviewStatus.textContent = 'Regression draft copied. Paste it into src/answer-regression.ts and replace placeholders.';
   } catch {
-    window.prompt('Copy regression draft:', draft);
+    await promptModal('Copy regression draft (clipboard unavailable):', draft);
   }
 }
 
 async function deleteAnswerFeedback(feedbackId) {
   const item = answerFeedbackItems.find(feedback => feedback.id === feedbackId);
-  if (!confirm(`Resolve/delete feedback for: ${item?.question || feedbackId}?`)) return;
+  if (!await confirmModal(`Resolve/delete feedback for: ${item?.question || feedbackId}?`)) return;
 
   feedbackReviewStatus.textContent = 'Deleting feedback...';
 
@@ -2727,8 +2832,13 @@ function renderRecent() {
 }
 
 function renderMarkdown(text) {
-  const html = marked.parse(text);
-  const wrapper = document.createElement('div');
+  let html
+  try {
+    html = marked.parse(text)
+  } catch {
+    html = `<pre>${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`
+  }
+  const wrapper = document.createElement('div')
   wrapper.className = 'markdown-body';
   wrapper.innerHTML = html;
 
@@ -2935,7 +3045,7 @@ async function sendFeedback(messageIndex, rating) {
   if (!msg || msg.role !== 'assistant' || !msg.question) return;
 
   const note = rating === 'bad'
-    ? (prompt('What should be better? This becomes local feedback for future evals.', '') || '')
+    ? (await promptModal('What should be better? This becomes local feedback for future evals.', '') || '')
     : '';
 
   msg.feedbackSaving = true;
@@ -3002,19 +3112,15 @@ async function ask() {
   }));
 
   try {
-    const apiKey = getApiKey();
-    const headers = { 'Content-Type': 'application/json' };
-    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-
-    const res = await fetch('/api/ask/stream', {
+    const res = await apiFetch('/api/ask/stream', {
       method: 'POST',
-      headers,
       body: JSON.stringify({ question, repoName, project, branch, serviceType, chatModel, deep, history: historyForApi }),
     });
 
     if (!res.ok) {
       const data = await res.json();
-      messages.push({ role: 'assistant', content: `**Error:** ${data.error || 'Unknown error'}`, question, sources: [] });
+      const details = data.raw ? `\n\n\`\`\`text\n${data.raw}\n\`\`\`` : '';
+      messages.push({ role: 'assistant', content: `**Error:** ${data.error || 'Unknown error'}${details}`, question, sources: [] });
       saveMessages();
       return;
     }
@@ -3028,34 +3134,42 @@ async function ask() {
     const decoder = new TextDecoder();
     let buffer = '';
 
+    const handleEvent = (line) => {
+      if (!line.startsWith('data: ')) return;
+      let event;
+      try { event = JSON.parse(line.slice(6)); } catch { return; }
+      if (event.type === 'thinking') {
+        messages[msgIndex].content = '💭 Thinking...▌';
+        renderMessages();
+      } else if (event.type === 'progress') {
+        if (messages[msgIndex].streaming) {
+          if (messages[msgIndex].content === '▌' || messages[msgIndex].content === '💭 Thinking...▌') messages[msgIndex].content = '';
+          messages[msgIndex].content += event.text + '\n';
+          renderMessages();
+        }
+      } else if (event.type === 'answer') {
+        messages[msgIndex] = { role: 'assistant', content: event.answer, question, sources: event.sources || [] };
+        saveRecent(question);
+        saveMessages();
+        renderMessages();
+      } else if (event.type === 'error') {
+        const details = event.raw ? `\n\n\`\`\`text\n${event.raw}\n\`\`\`` : '';
+        messages[msgIndex] = { role: 'assistant', content: `**Error:** ${event.error}${details}`, question, sources: [] };
+        saveMessages();
+        renderMessages();
+      }
+    };
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const event = JSON.parse(line.slice(6));
-          if (event.type === 'thinking') {
-            messages[msgIndex].content = '💭 Thinking...▌';
-            renderMessages();
-          } else if (event.type === 'answer') {
-            saveRecent(question);
-            messages[msgIndex] = { role: 'assistant', content: event.answer, question, sources: event.sources || [] };
-            saveMessages();
-            renderMessages();
-          } else if (event.type === 'error') {
-            messages[msgIndex] = { role: 'assistant', content: `**Error:** ${event.error}`, question, sources: [] };
-            saveMessages();
-            renderMessages();
-          }
-        } catch { /* ignore parse errors */ }
-      }
+      for (const line of lines) handleEvent(line);
     }
+    // Flush final buffered event (answer often arrives without trailing newline)
+    if (buffer.trim()) handleEvent(buffer);
   } catch (err) {
     messages.push({ role: 'assistant', content: `**Network error:** ${err.message}`, question, sources: [] });
     saveMessages();
@@ -3261,7 +3375,7 @@ async function saveDraft() {
 async function approveDraft(fileName) {
   const draftsStatus = document.getElementById('draftsStatus');
 
-  if (!confirm(`Approve draft "${fileName}"? This will move it to approved/ and index it to Qdrant.`)) {
+  if (!await confirmModal(`Approve draft "${fileName}"? This will move it to approved/ and index it to Qdrant.`)) {
     return;
   }
 
@@ -3287,7 +3401,7 @@ async function approveDraft(fileName) {
 async function discardDraft(fileName) {
   const draftsStatus = document.getElementById('draftsStatus');
 
-  if (!confirm(`Discard draft "${fileName}"? This will permanently delete it.`)) {
+  if (!await confirmModal(`Discard draft "${fileName}"? This will permanently delete it.`)) {
     return;
   }
 
@@ -3703,7 +3817,7 @@ async function viewVersionContent(fileName, versionId) {
 }
 
 async function rollbackToVersion(fileName, versionId) {
-  if (!confirm(`Restore version ${versionId} of "${fileName}"? Current content will be overwritten.`)) return;
+  if (!await confirmModal(`Restore version ${versionId} of "${fileName}"? Current content will be overwritten.`)) return;
   const decisionsStatus = document.getElementById('decisionsStatus');
   decisionsStatus.textContent = `Restoring version ${versionId}...`;
   try {

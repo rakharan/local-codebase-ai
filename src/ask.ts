@@ -2,9 +2,10 @@ import path from "node:path"
 import { Command } from "commander"
 import { qdrant } from "./lib/qdrant.js"
 import { config, setChatModel } from "./lib/config.js"
-import { createEmbedding, chat } from "./lib/ollama.js"
+import { createEmbedding, chat, resolveChatProvider, resolveChatBaseUrlHost } from "./lib/ollama.js"
 import { readRelationshipGraph } from "./lib/graph.js"
 import { bm25Search, isIdentifierQuery } from "./lib/bm25-index.js"
+import { dlog, nowMs, elapsedMs, timeStage, isDebugEnabled } from "./lib/debug-log.js"
 import { buildRegistryPromptContext, expandQuestionWithRegistry, type RegistryExpansion, type ServiceRegistryEntry } from "./lib/service-registry.js"
 import { normalizeProjectIds, reposForProjectIds } from "./lib/service-registry.js"
 import {
@@ -15,6 +16,8 @@ import {
 } from "./ask/account-types.js"
 import { compactPayloadSources, compactRetrievedChunks } from "./ask/compaction.js"
 import { buildDoctorInventoryAnswer } from "./ask/doctor.js"
+import { evaluateAnswerQuality, logQualityEvaluation } from "./ask/answer-evaluation.js"
+import { loadActiveLearningRules, formatRulesForPrompt } from "./lib/learning-rules.js"
 import {
   answerLanguageLabel as answerLanguageLabelFor,
   detectAnswerLanguage,
@@ -39,6 +42,8 @@ import {
   questionAsksHowWorks,
   questionAsksInventory,
   questionAsksMedalMechanism,
+  isConversationalFollowUp,
+  isGreeting,
   questionBrokerHint,
   questionMetaTraderTerm,
   unique,
@@ -108,6 +113,23 @@ const projectFilterIds = normalizeProjectIds(options.project ? [options.project]
 const projectFilterRepos = new Set(reposForProjectIds(projectFilterIds))
 let answerLanguage: AnswerLanguage = "unknown"
 
+// Per-query retrieval degradation flags. Reset at the start of each query in
+// main() so a degraded state from a previous question does not leak forward.
+// Surfaced in the answer output so the user/ops knows keyword search was
+// unavailable and the answer is based on vector results only.
+const retrievalDegradation = { bm25Unavailable: false }
+
+// Per-request in-memory cache of file-scoped chunk scrolls. Keyed by
+// `repoName|branchName|filePath`. Avoids re-scrolling the same file when
+// retrieveFileChunks / retrieveNeighborChunks / resolveHandlerChunks all
+// touch the same file within one /api/ask request. Reset at the start of
+// main() so it never leaks across requests in long-lived processes.
+const _fileChunkCache = new Map<string, RetrievedChunk[]>()
+
+// Set true when main() completes the full retrieval+answer path (vs early returns).
+let _askCompletedFull = false
+const _askMainStart = nowMs()
+
 function buildFilter() {
   const must = []
   const should = []
@@ -165,6 +187,65 @@ function buildFilter() {
   }
 }
 
+// JS-side mirror of the Qdrant filter produced by buildFilter(). Used to
+// filter BM25 candidate payloads fetched by ID (qdrant.retrieve does not
+// accept the same must/should filter shape as scroll in all client versions,
+// so we filter in JS after fetching the small candidate set).
+function payloadMatchesFilter(payload: RetrievedPayload, filter: SearchFilter): boolean {
+  if (!filter) return true
+
+  if (filter.must) {
+    for (const cond of filter.must) {
+      const key = (cond as { key: string }).key
+      const value = (cond as { match: { value: unknown } }).match.value
+      if (key === "repoName" && payload.repoName !== value) return false
+      if (key === "branchName" && payload.branchName !== value) return false
+      if (key === "serviceType" && payload.serviceType !== value) return false
+      if (key === "projectIds" && !payload.projectIds?.includes(value as string)) return false
+    }
+  }
+
+  if (filter.should && filter.should.length > 0) {
+    const matched = filter.should.some(cond => {
+      const key = (cond as { key: string }).key
+      const value = (cond as { match: { value: unknown } }).match.value
+      if (key === "projectIds") return payload.projectIds?.includes(value as string) ?? false
+      if (key === "repoName") return payload.repoName === value
+      if (key === "branchName") return payload.branchName === value
+      if (key === "serviceType") return payload.serviceType === value
+      return false
+    })
+    if (!matched) return false
+  }
+
+  return true
+}
+
+// Fetch full payloads for a set of Qdrant point IDs, applying an optional
+// buildFilter in JS. Returns RetrievedChunk[] with non-empty content only.
+// Used by BM25-candidate retrieval paths to avoid full-collection scrolls.
+async function retrieveChunksByIds(ids: string[], filter: SearchFilter = undefined): Promise<RetrievedChunk[]> {
+  if (ids.length === 0) return []
+
+  try {
+    const points = await qdrant.retrieve(config.collectionName, {
+      ids,
+      with_payload: true,
+    })
+    const chunks: RetrievedChunk[] = []
+    for (const point of points) {
+      const payload = point.payload as RetrievedPayload | null | undefined
+      if (!payload?.content) continue
+      if (!payloadMatchesFilter(payload, filter)) continue
+      chunks.push({ id: String(point.id), payload })
+    }
+    return chunks
+  } catch (err) {
+    console.error("retrieveChunksByIds failed:", err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
 async function retrieve(queryText: string, resultLimit: number): Promise<RetrievedChunk[]> {
   const questionVector = await createEmbedding(queryText)
   const filter = buildFilter()
@@ -209,8 +290,21 @@ async function retrieve(queryText: string, resultLimit: number): Promise<Retriev
           }
         }
       } catch (err) {
-        // BM25 retrieve failed (e.g. ECONNRESET during index warm-up) — degrade gracefully
-        console.error("BM25 retrieve failed, skipping BM25 boost:", err instanceof Error ? err.message : err)
+        // BM25 payload retrieval failed (e.g. ECONNRESET during index warm-up).
+        // Degrade to vector-only results, but record + surface the degradation
+        // so it is alertable and the answer does not silently claim keyword
+        // evidence was consulted.
+        retrievalDegradation.bm25Unavailable = true
+        const reason = err instanceof Error ? err.message : String(err)
+        console.error(
+          JSON.stringify({
+            level: "warn",
+            component: "retrieve",
+            event: "bm25_payload_unavailable",
+            reason,
+            missingIds: missingIds.length,
+          }),
+        )
       }
     }
 
@@ -276,56 +370,50 @@ async function retrieveDocumentationSubjectMatches(subjectTerms: string[], resul
 
   if (terms.length === 0) return []
 
+  // BM25 candidate retrieval — replaces 100+ scroll calls with a single
+  // index search. Documentation chunks are now indexed in BM25 (schema v3).
+  const bm25Results = await bm25Search(terms.join(" "), Math.max(resultLimit * 6, 300))
+
+  if (bm25Results.length === 0) return []
+
+  const candidates = await retrieveChunksByIds(bm25Results.map(r => r.id))
+
   const matches: Array<RetrievedChunk & { score: number }> = []
-  let offset: string | number | Record<string, unknown> | null | undefined
 
-  do {
-    const filter = buildFilter()
-    const page = await qdrant.scroll(config.collectionName, {
-      limit: 256,
-      with_payload: true,
-      with_vector: false,
-      ...(filter ? { filter } : {}),
-      ...(offset ? { offset } : {}),
-    })
+  for (const chunk of candidates) {
+    const payload = chunk.payload
+    if (!payload?.content) continue
+    if (!payload.evidenceTypes?.includes("documentation")) continue
 
-    for (const point of page.points) {
-      const payload = point.payload as RetrievedPayload | null | undefined
+    const filePath = payload.filePath?.toLowerCase() ?? ""
+    const content = payload.content.toLowerCase()
+    const text = `${filePath}\n${content}`
+    let score = 0
 
-      if (!payload?.content || !payload.evidenceTypes?.includes("documentation")) continue
+    for (const term of terms) {
+      const termPattern = new RegExp(`\\b${escapeRegExp(term)}\\b`, "i")
 
-      const filePath = payload.filePath?.toLowerCase() ?? ""
-      const content = payload.content.toLowerCase()
-      const text = `${filePath}\n${content}`
-      let score = 0
-
-      for (const term of terms) {
-        const termPattern = new RegExp(`\\b${escapeRegExp(term)}\\b`, "i")
-
-        if (term.length <= 3) {
-          if (termPattern.test(text)) score += 12
-          if (new RegExp(`[\\\\/]${escapeRegExp(term)}[-_][a-z0-9_-]*docs?[\\\\/]`, "i").test(filePath)) score += 70
-          if (new RegExp(`\\(${escapeRegExp(term.toUpperCase())}\\)`).test(payload.content ?? "")) score += 45
-        } else if (text.includes(term)) {
-          score += 12
-          // Extra boost when the term appears in the file path (doc is *about* this term)
-          if (new RegExp(`[\\\\/]${escapeRegExp(term)}[-_][a-z0-9_-]*docs?[\\\\/]`, "i").test(filePath)) score += 70
-          if (filePath.includes(term)) score += 30
-        }
+      if (term.length <= 3) {
+        if (termPattern.test(text)) score += 12
+        if (new RegExp(`[\\\\/]${escapeRegExp(term)}[-_][a-z0-9_-]*docs?[\\\\/]`, "i").test(filePath)) score += 70
+        if (new RegExp(`\\(${escapeRegExp(term.toUpperCase())}\\)`).test(payload.content ?? "")) score += 45
+      } else if (text.includes(term)) {
+        score += 12
+        // Extra boost when the term appears in the file path (doc is *about* this term)
+        if (new RegExp(`[\\\\/]${escapeRegExp(term)}[-_][a-z0-9_-]*docs?[\\\\/]`, "i").test(filePath)) score += 70
+        if (filePath.includes(term)) score += 30
       }
-
-      if (/docs:[^/\\]+[/\\][^/\\]+-docs[/\\]index\.mdx?$/i.test(payload.filePath ?? "")) score += 55
-      if (score <= 0) continue
-
-      matches.push({
-        id: String(point.id),
-        payload,
-        score: score + scoreDocLocalePreference(payload),
-      })
     }
 
-    offset = page.next_page_offset
-  } while (offset)
+    if (/docs:[^/\\]+[/\\]index\.mdx?$/i.test(payload.filePath ?? "")) score += 55
+    if (score <= 0) continue
+
+    matches.push({
+      id: chunk.id,
+      payload,
+      score: score + scoreDocLocalePreference(payload),
+    })
+  }
 
   return matches
     .sort((left, right) => right.score - left.score)
@@ -376,91 +464,199 @@ async function retrieveExactVocabularyMatches(terms: string[], resultLimit: numb
 
   if (exactTerms.length === 0) return []
 
+  // BM25 candidate retrieval — vocabulary chunks are now indexed (schema v3).
+  const bm25Results = await bm25Search(exactTerms.join(" "), Math.max(resultLimit * 6, 200))
+
+  if (bm25Results.length === 0) return []
+
+  const candidates = await retrieveChunksByIds(bm25Results.map(r => r.id))
   const matches: Array<RetrievedChunk & { score: number }> = []
-  let offset: string | number | Record<string, unknown> | null | undefined
 
-  do {
-    const filter = buildFilter()
-    const page = await qdrant.scroll(config.collectionName, {
-      limit: 256,
-      with_payload: true,
-      with_vector: false,
-      ...(filter ? { filter } : {}),
-      ...(offset ? { offset } : {}),
-    })
+  for (const chunk of candidates) {
+    const payload = chunk.payload
+    if (!payload?.content || !payload.filePath?.startsWith("vocabulary://")) continue
 
-    for (const point of page.points) {
-      const payload = point.payload as RetrievedPayload | null | undefined
+    const score = scoreExactTermMatch(payload, exactTerms)
 
-      if (!payload?.content || !payload.filePath?.startsWith("vocabulary://")) continue
+    if (score <= 0) continue
 
-      const score = scoreExactTermMatch(payload, exactTerms)
-
-      if (score <= 0) continue
-
-      matches.push({
-        id: String(point.id),
-        payload,
-        score,
-      })
-    }
-
-    offset = page.next_page_offset
-  } while (offset)
+    matches.push({ id: chunk.id, payload, score })
+  }
 
   return matches
     .sort((left, right) => right.score - left.score)
     .slice(0, resultLimit)
 }
 
+// Extract code identifiers from documentation chunks and retrieve matching code chunks.
+// Bridges the vocabulary gap: docs use prose ("Auto Copy system") while code uses
+// identifiers (dsc_bot_copy, AMQPPubSubSignalCopy, CronCheckAutoCopyTrade).
+async function retrieveCodeFromDocReferences(docChunks: RetrievedChunk[], resultLimit: number): Promise<RetrievedChunk[]> {
+  if (docChunks.length === 0) return []
+
+  // Collect all doc content + file paths
+  const docText = docChunks
+    .map(c => `${c.payload.filePath ?? ""}\n${c.payload.content ?? ""}`)
+    .join("\n")
+
+  // Extract repo names mentioned in the docs — used to filter results so
+  // unrelated repos (e.g. ea-service matching "signal") are excluded.
+  // Match hyphenated lowercase identifiers like fa-trade-publisher, tf2-ois.
+  const docRepoNames = new Set<string>()
+  for (const m of docText.matchAll(/\b([a-z][a-z0-9]*(?:-[a-z0-9]+){1,})\b/g)) {
+    const repo = m[1]
+    if (repo && repo.length >= 5 && !["auto-copy", "end-to-end", "fa-trade", "tf-documentation"].includes(repo)) {
+      docRepoNames.add(repo)
+    }
+  }
+
+  // Extract code-like identifiers that appear in documentation
+  const identifiers = new Set<string>()
+
+  // SCREAMING_CASE constants (AUTO_COPY_MINIMUM_EQUITY, POINT_LEVELS)
+  for (const m of docText.matchAll(/\b[A-Z][A-Z0-9_]{3,}\b/g)) {
+    const term = m[0]
+    if (term && !["TODO", "FIXME", "NOTE", "WARN", "HTTP", "HTTPS", "URL", "API", "JSON", "SQL", "PHP", "MT4", "MT5", "RPC", "AMQP", "CSS", "HTML", "SMTP", "UUID"].includes(term)) {
+      identifiers.add(term)
+    }
+  }
+
+  // CamelCase class/function names (AMQPPubSubSignalCopy, CronCheckDeals, SignalBroadcast)
+  for (const m of docText.matchAll(/\b[A-Z][a-zA-Z0-9]{5,}\b/g)) {
+    const term = m[0]
+    if (term && !["AutoCopy", "MetaTrader", "WebSocket", "Docusaurus", "Dockerfile", "Jenkins", "GitHub", "JavaScript", "TypeScript", "Mongoose", "ECONNRESET"].includes(term)) {
+      identifiers.add(term)
+    }
+  }
+
+  // snake_case identifiers (dsc_bot_copy, signal_settled, platform_type)
+  for (const m of docText.matchAll(/\b(?:dsc|mrg|tf|fa|ois)_[a-z][a-z0-9_]{2,}\b/g)) {
+    if (m[0]) identifiers.add(m[0])
+  }
+
+  // PHP class::method (Helper::requestAPI, Schema::create)
+  for (const m of docText.matchAll(/\b([A-Z][a-zA-Z]+)::([a-zA-Z]+)\b/g)) {
+    if (m[0]) identifiers.add(m[0])
+    if (m[1]) identifiers.add(m[1])
+  }
+
+  // Known repo names from registry — these go FIRST in search terms so they
+  // aren't cut off by the 32-term limit.
+  const repoSearchTerms: string[] = []
+  for (const repo of registryExpansion.terms) {
+    if (repo.length >= 3) {
+      identifiers.add(repo)
+      repoSearchTerms.push(repo)
+    }
+  }
+
+  if (identifiers.size === 0) return []
+
+  // Prioritize repo names first, then fill with other identifiers
+  const searchTerms = unique([
+    ...repoSearchTerms,
+    ...[...docRepoNames],
+    ...[...identifiers].filter(t => !repoSearchTerms.includes(t)),
+  ], 48)
+  const bm25Results = await bm25Search(searchTerms.join(" "), Math.max(resultLimit * 4, 200))
+
+  if (bm25Results.length === 0) return []
+
+  // Fetch payloads for BM25 hits
+  const candidates = await retrieveChunksByIds(bm25Results.map(r => r.id))
+
+  // Only keep code chunks (exclude documentation — docs are already in the pool).
+  // Filter to repos mentioned in the docs to avoid false positives (e.g.
+  // ea-service matching "signal" but unrelated to iSignal).
+  return candidates
+    .filter(chunk => chunk.payload.content)
+    .filter(chunk => !chunk.payload.evidenceTypes?.includes("documentation"))
+    .filter(chunk => {
+      if (docRepoNames.size === 0) return true
+      const repoName = chunk.payload.repoName?.toLowerCase() ?? ""
+      return docRepoNames.has(repoName)
+    })
+    .slice(0, resultLimit)
+}
+
+// Retrieve sibling docs from the same documentation section.
+// When we find isignal-docs/edge-cases.md, also fetch cron-jobs/index.md,
+// features/edit.md, etc. — these contain specific identifiers (CronCheckDeals,
+// dsc_bot_copy) that feed into doc-ref-code-retrieval.
+async function retrieveDocSectionSiblings(docChunks: RetrievedChunk[], maxResults: number): Promise<RetrievedChunk[]> {
+  const sectionPaths = new Set<string>()
+
+  for (const chunk of docChunks) {
+    const filePath = chunk.payload.filePath ?? ""
+    // Extract doc section: "isignal-docs" from "my-website/docs/isignal-docs/features/edge-cases.md"
+    // or from "docs:isignal-docs\index.mdx"
+    const match = filePath.match(/([a-z][-a-z0-9]*-docs?)\b/i)
+    if (match && match[1]) {
+      sectionPaths.add(match[1].toLowerCase())
+    }
+  }
+
+  if (sectionPaths.size === 0) return []
+
+  // Search BM25 for docs containing the section path in their filePath
+  const searchTerms = [...sectionPaths].slice(0, 5)
+  const bm25Results = await bm25Search(searchTerms.join(" "), Math.max(maxResults * 3, 72))
+
+  if (bm25Results.length === 0) return []
+
+  const candidates = await retrieveChunksByIds(bm25Results.map(r => r.id))
+
+  // Deduplicate against already-retrieved doc chunks
+  const existingIds = new Set(docChunks.map(c => c.id))
+
+  return candidates
+    .filter(chunk => chunk.payload.content)
+    .filter(chunk => chunk.payload.evidenceTypes?.includes("documentation"))
+    .filter(chunk => {
+      const filePath = chunk.payload.filePath?.toLowerCase() ?? ""
+      return [...sectionPaths].some(path => filePath.includes(path))
+    })
+    .filter(chunk => !existingIds.has(chunk.id))
+    .slice(0, maxResults)
+}
+
 async function retrieveMetaTraderTermMatches(term: "MT4" | "MT5", resultLimit: number): Promise<RetrievedChunk[]> {
+  // BM25 candidate retrieval — MetaTrader config chunks have identifiers (symbols,
+  // routes) so they're already in the BM25 index.
+  const searchTerms = [term, "MetaTrader", "platform_type", "metaserver", "ServerPlatform", "VOLUME_MULTIPLIER"]
+  const bm25Results = await bm25Search(searchTerms.join(" "), Math.max(resultLimit * 6, 300))
+
+  if (bm25Results.length === 0) return []
+
+  const candidates = await retrieveChunksByIds(bm25Results.map(r => r.id))
   const matches: Array<RetrievedChunk & { score: number }> = []
   const termPattern = new RegExp(`(?:^|[^a-zA-Z0-9])${term}(?:[^a-zA-Z0-9]|$)`, "i")
-  let offset: string | number | Record<string, unknown> | null | undefined
 
-  do {
-    const filter = buildFilter()
-    const page = await qdrant.scroll(config.collectionName, {
-      limit: 256,
-      with_payload: true,
-      with_vector: false,
-      ...(filter ? { filter } : {}),
-      ...(offset ? { offset } : {}),
-    })
+  for (const chunk of candidates) {
+    const payload = chunk.payload
+    if (!payload?.content) continue
+    if (/devops-docs/i.test(payload.filePath ?? "")) continue
 
-    for (const point of page.points) {
-      const payload = point.payload as RetrievedPayload | null | undefined
+    const text = `${payload.filePath ?? ""}\n${payload.content}`
 
-      if (!payload?.content) continue
-      if (/devops-docs/i.test(payload.filePath ?? "")) continue
+    if (!termPattern.test(text)) continue
+    if (!/metatrader|platform_type|metaserver|serverplatform|tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier|akun metatrader/i.test(text)) continue
 
-      const text = `${payload.filePath ?? ""}\n${payload.content}`
+    let score = 0
+    const filePath = payload.filePath?.toLowerCase() ?? ""
 
-      if (!termPattern.test(text)) continue
-      if (!/metatrader|platform_type|metaserver|serverplatform|tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier|akun metatrader/i.test(text)) continue
+    if (/tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier/i.test(text)) score += 80
+    if (/platform_type|metaserver_id|ServerPlatform/i.test(text)) score += 45
+    if (/MetaTrader|metatrader/i.test(text)) score += 30
+    if (filePath.includes("libs/config")) score += 35
+    if (filePath.includes("models/user") || filePath.includes("models/demo") || filePath.includes("models/real")) score += 18
+    if (payload.evidenceTypes?.includes("documentation")) score -= 12
+    if (term === "MT4" && (/platform_type\s*==\s*0\b/.test(text) || /["']?platform_type["']?\s*:\s*0\b/.test(text))) score += 60
+    if (term === "MT5" && (/platform_type\s*==\s*3\b/.test(text) || /["']?platform_type["']?\s*:\s*3\b/.test(text))) score += 60
+    if (term === "MT5" && (/platform_type\s*==\s*5\b/.test(text) || /["']?platform_type["']?\s*:\s*5\b/.test(text))) score += 60
 
-      let score = 0
-      const filePath = payload.filePath?.toLowerCase() ?? ""
-
-      if (/tf_metatrader_platform_type|mrg_metatrader_platform_type|askap_metatrader_platform_type|volume_multiplier/i.test(text)) score += 80
-      if (/platform_type|metaserver_id|ServerPlatform/i.test(text)) score += 45
-      if (/MetaTrader|metatrader/i.test(text)) score += 30
-      if (filePath.includes("libs/config")) score += 35
-      if (filePath.includes("models/user") || filePath.includes("models/demo") || filePath.includes("models/real")) score += 18
-      if (payload.evidenceTypes?.includes("documentation")) score -= 12
-      if (term === "MT4" && (/platform_type\s*==\s*0\b/.test(text) || /["']?platform_type["']?\s*:\s*0\b/.test(text))) score += 60
-      if (term === "MT5" && (/platform_type\s*==\s*3\b/.test(text) || /["']?platform_type["']?\s*:\s*3\b/.test(text))) score += 60
-      if (term === "MT5" && (/platform_type\s*==\s*5\b/.test(text) || /["']?platform_type["']?\s*:\s*5\b/.test(text))) score += 60
-
-      matches.push({
-        id: String(point.id),
-        payload,
-        score,
-      })
-    }
-
-    offset = page.next_page_offset
-  } while (offset)
+    matches.push({ id: chunk.id, payload, score })
+  }
 
   return matches
     .sort((left, right) => right.score - left.score)
@@ -733,6 +929,70 @@ function edgeTextForConceptSearch(edge: RelationshipEdge): string {
     edge.table,
     edge.evidence,
   ].filter(Boolean).join("\n").toLowerCase()
+}
+
+// Build a concise text summary of relationship graph edges relevant to the question.
+// Fed into the LLM prompt so it can trace cross-service flows (calls → handles → defines → touches table).
+function buildGraphFlowContext(graph: RelationshipEdge[], question: string, hints: RelationshipHints): string {
+  if (graph.length === 0) return "none"
+
+  const graphTerms = unique([
+    ...extractQuestionHints(question),
+    ...extractQuestionTerms(question),
+    ...extractConceptTokens(question),
+    ...registryExpansion.terms,
+    ...(hints.routes ?? []),
+    ...(hints.symbols ?? []),
+    ...(hints.messageNames ?? []),
+    ...(hints.queueNames ?? []),
+    ...(hints.exchangeNames ?? []),
+    ...(hints.dbTables ?? []),
+  ].filter(term => term.length >= 2), 40).map(term => term.toLowerCase())
+
+  if (graphTerms.length === 0) return "none"
+
+  const scored = graph
+    .filter(edge => graphScopeAllows(edge))
+    .map(edge => {
+      const text = edgeTextForConceptSearch(edge)
+      let score = 0
+      for (const term of graphTerms) {
+        if (term.length >= 2 && text.includes(term)) score += term.includes("/") ? 60 : 12
+      }
+      if (questionAsksAboutServicesOrFlow(question) && (edge.toRoute || edge.rpcFunc || edge.externalFunc || edge.table || edge.symbol || edge.handler)) score += 20
+      return { edge, score }
+    })
+    .filter(item => item.score > 0)
+    .sort((left, right) => right.score - left.score || left.edge.repoName.localeCompare(right.edge.repoName))
+    .slice(0, 20)
+
+  if (scored.length === 0) return "none"
+
+  const lines = scored.map(({ edge }) => {
+    const repo = `${edge.repoName}@${edge.branchName}`
+    switch (edge.type) {
+      case "CALLS_HTTP_ENDPOINT":
+        return `- ${repo} calls ${edge.toRoute ?? "?"}${edge.httpMethod ? ` [${edge.httpMethod}]` : ""}${edge.viaConstant ? ` via ${edge.viaConstant}` : ""}${edge.fromSymbol ? ` from ${edge.fromSymbol}` : ""}`
+      case "HANDLES_HTTP_ENDPOINT":
+        return `- ${repo} handles ${edge.toRoute ?? "?"}${edge.httpMethod ? ` [${edge.httpMethod}]` : ""}${edge.handler ? `; handler: ${edge.handler}` : ""}${edge.alias ? `; alias: ${edge.alias}` : ""}`
+      case "CALLS_RPC_FUNC":
+        return `- ${repo} calls RPC ${edge.rpcFunc ?? "?"}${edge.receiverSymbol ? ` on ${edge.receiverSymbol}` : ""}`
+      case "CALLS_EXTERNAL_FUNC":
+        return `- ${repo} calls external func ${edge.externalFunc ?? "?"}${edge.fromSymbol ? ` from ${edge.fromSymbol}` : ""}`
+      case "CALLS_SYMBOL":
+        return `- ${repo} calls ${edge.calleeSymbol ?? edge.symbol ?? "?"}${edge.receiverSymbol ? ` on ${edge.receiverSymbol}` : ""}`
+      case "DEFINES_SYMBOL":
+        return `- ${repo} defines ${edge.symbol ?? edge.calleeSymbol ?? "?"}`
+      case "TOUCHES_TABLE":
+        return `- ${repo} touches table: ${edge.table ?? "?"}`
+      case "DOCUMENTS_DECISION":
+        return `- ${repo} documents decision: ${edge.symbol ?? "?"}`
+      default:
+        return `- ${repo} ${edge.type}`
+    }
+  })
+
+  return lines.join("\n")
 }
 
 function mentionedGraphRepos(question: string, graph: RelationshipEdge[]): string[] {
@@ -1192,41 +1452,31 @@ async function buildGraphFlowAnswer(question: string, graph: RelationshipEdge[])
 async function retrieveExactRouteMatches(routes: string[]): Promise<RetrievedChunk[]> {
   if (routes.length === 0) return []
 
+  // BM25 candidate retrieval: search route strings against the in-memory index
+  // (routes field + content) → candidate IDs → fetch full payloads by ID.
+  // Avoids the prior ~24s full-collection scroll by narrowing to BM25 hits.
+  const bm25Results = await bm25Search(routes.join(" "), 300)
+
+  if (bm25Results.length === 0) return []
+
   const filter = buildFilter()
+  const candidates = await retrieveChunksByIds(bm25Results.map(r => r.id), filter)
   const matches: RetrievedChunk[] = []
-  let offset: string | number | Record<string, unknown> | null | undefined
 
-  do {
-    const scrollRequest = {
-      limit: 256,
-      with_payload: true,
-      with_vector: false,
-      ...(filter ? { filter } : {}),
-      ...(offset ? { offset } : {}),
+  for (const chunk of candidates) {
+    const payload = chunk.payload
+
+    if (!options.repoName && payload.repoName === "local-codebase-ai") continue
+
+    const storedRoutes = payload.routes ?? []
+    const hasMatch = routes.some(route => {
+      return storedRoutes.some(storedRoute => routeMatches(storedRoute, route)) || contentContainsRoute(payload.content ?? "", route)
+    })
+
+    if (hasMatch) {
+      matches.push(chunk)
     }
-    const page = await qdrant.scroll(config.collectionName, scrollRequest)
-
-    for (const point of page.points) {
-      const payload = point.payload as RetrievedPayload | null | undefined
-
-      if (!payload?.content) continue
-      if (!options.repoName && payload.repoName === "local-codebase-ai") continue
-
-      const storedRoutes = payload.routes ?? []
-      const hasMatch = routes.some(route => {
-        return storedRoutes.some(storedRoute => routeMatches(storedRoute, route)) || contentContainsRoute(payload.content ?? "", route)
-      })
-
-      if (hasMatch) {
-        matches.push({
-          id: String(point.id),
-          payload,
-        })
-      }
-    }
-
-    offset = page.next_page_offset
-  } while (offset)
+  }
 
   return matches
 }
@@ -1268,38 +1518,24 @@ async function discoverConceptRouteAnchors(question: string): Promise<string[]> 
 
   if (tokens.length < 2) return []
 
+  // BM25 candidate retrieval: search concept tokens against the in-memory
+  // index → candidate IDs → fetch full payloads → score locally.
+  // Avoids the prior ~25s full-collection scroll.
+  const bm25Results = await bm25Search(tokens.join(" "), 300)
+
+  if (bm25Results.length === 0) return []
+
   const filter = buildFilter()
+  const candidates = await retrieveChunksByIds(bm25Results.map(r => r.id), filter)
   const matches: Array<RetrievedChunk & { score: number }> = []
-  let offset: string | number | Record<string, unknown> | null | undefined
 
-  do {
-    const scrollRequest = {
-      limit: 256,
-      with_payload: true,
-      with_vector: false,
-      ...(filter ? { filter } : {}),
-      ...(offset ? { offset } : {}),
+  for (const chunk of candidates) {
+    const score = scoreConceptAnchor(chunk.payload, tokens)
+
+    if (score > 0) {
+      matches.push({ ...chunk, score })
     }
-    const page = await qdrant.scroll(config.collectionName, scrollRequest)
-
-    for (const point of page.points) {
-      const payload = point.payload as RetrievedPayload | null | undefined
-
-      if (!payload?.content) continue
-
-      const score = scoreConceptAnchor(payload, tokens)
-
-      if (score > 0) {
-        matches.push({
-          id: String(point.id),
-          payload,
-          score,
-        })
-      }
-    }
-
-    offset = page.next_page_offset
-  } while (offset)
+  }
 
   const bestMatches = matches.sort((left, right) => right.score - left.score).slice(0, 12)
 
@@ -1436,6 +1672,40 @@ async function retrieveExactTermMatches(terms: string[], maxMatches: number, fil
 
   if (exactTerms.length === 0) return []
 
+  // When a specific filter is provided (e.g. repoBranchFileFilter), the scroll
+  // is already scoped to a small result set — keep the original scroll path.
+  // Only use BM25 candidate retrieval for unfiltered (full-collection) scans,
+  // which were the dominant latency source (~24s each).
+  if (filter) {
+    return retrieveExactTermMatchesViaScroll(exactTerms, maxMatches, filter)
+  }
+
+  const bm25Results = await bm25Search(exactTerms.join(" "), Math.max(maxMatches * 6, 300))
+
+  if (bm25Results.length === 0) return []
+
+  const candidates = await retrieveChunksByIds(bm25Results.map(r => r.id))
+  const matches: Array<RetrievedChunk & { score: number }> = []
+
+  for (const chunk of candidates) {
+    const score = scoreExactTermMatch(chunk.payload, exactTerms)
+
+    if (score > 0) {
+      matches.push({ ...chunk, score })
+    }
+  }
+
+  return matches
+    .sort((left, right) => right.score - left.score)
+    .slice(0, maxMatches)
+    .map(({ score: _score, ...chunk }) => chunk)
+}
+
+async function retrieveExactTermMatchesViaScroll(
+  exactTerms: string[],
+  maxMatches: number,
+  filter: SearchFilter,
+): Promise<RetrievedChunk[]> {
   const matches: Array<RetrievedChunk & { score: number }> = []
   let offset: string | number | Record<string, unknown> | null | undefined
 
@@ -1474,31 +1744,6 @@ async function retrieveExactTermMatches(terms: string[], maxMatches: number, fil
     .map(({ score: _score, ...chunk }) => chunk)
 }
 
-function chunkScopeFilter(chunk: RetrievedChunk) {
-  const must = [
-    {
-      key: "repoName",
-      match: {
-        value: chunk.payload.repoName ?? "",
-      },
-    },
-    {
-      key: "branchName",
-      match: {
-        value: chunk.payload.branchName ?? "",
-      },
-    },
-    {
-      key: "filePath",
-      match: {
-        value: chunk.payload.filePath ?? "",
-      },
-    },
-  ]
-
-  return { must }
-}
-
 function repoBranchFileFilter(repoName: string, branchName: string, filePath: string) {
   return {
     must: [
@@ -1525,6 +1770,10 @@ function repoBranchFileFilter(repoName: string, branchName: string, filePath: st
 }
 
 async function retrieveFileChunks(repoName: string, branchName: string, filePath: string): Promise<RetrievedChunk[]> {
+  const cacheKey = `${repoName}|${branchName}|${filePath}`
+  const cached = _fileChunkCache.get(cacheKey)
+  if (cached) return cached
+
   const chunks: RetrievedChunk[] = []
   let offset: string | number | Record<string, unknown> | null | undefined
 
@@ -1551,57 +1800,113 @@ async function retrieveFileChunks(repoName: string, branchName: string, filePath
     offset = page.next_page_offset
   } while (offset)
 
-  return chunks.sort((left, right) => (left.payload.startLine ?? 0) - (right.payload.startLine ?? 0))
+  chunks.sort((left, right) => (left.payload.startLine ?? 0) - (right.payload.startLine ?? 0))
+  _fileChunkCache.set(cacheKey, chunks)
+  return chunks
 }
 
 async function retrieveNeighborChunks(chunks: RetrievedChunk[], lineWindow = 90): Promise<RetrievedChunk[]> {
-  const neighbors: RetrievedChunk[] = []
+  // Group input chunks by file scope so each unique file is scrolled at most
+  // once (the prior version did one scroll-per-chunk, re-fetching the same
+  // file N times). Uses retrieveFileChunks which is backed by the per-request
+  // file cache, so repeated neighbor calls on the same file are free.
+  const byFile = new Map<string, RetrievedChunk[]>()
 
   for (const chunk of chunks) {
     if (!chunk.payload.repoName || !chunk.payload.branchName || !chunk.payload.filePath) continue
-
-    let offset: string | number | Record<string, unknown> | null | undefined
-
-    do {
-      const page = await qdrant.scroll(config.collectionName, {
-        filter: chunkScopeFilter(chunk),
-        limit: 128,
-        with_payload: true,
-        with_vector: false,
-        ...(offset ? { offset } : {}),
-      })
-
-      for (const point of page.points) {
-        const payload = point.payload as RetrievedPayload | null | undefined
-
-        if (!payload?.content || payload.startLine === undefined || payload.endLine === undefined) continue
-
-        const nearStart = (chunk.payload.startLine ?? 0) - lineWindow
-        const nearEnd = (chunk.payload.endLine ?? 0) + lineWindow
-
-        if (payload.endLine >= nearStart && payload.startLine <= nearEnd) {
-          neighbors.push({
-            id: String(point.id),
-            payload,
-          })
-        }
-      }
-
-      offset = page.next_page_offset
-    } while (offset)
+    const key = `${chunk.payload.repoName}|${chunk.payload.branchName}|${chunk.payload.filePath}`
+    const arr = byFile.get(key) ?? []
+    arr.push(chunk)
+    byFile.set(key, arr)
   }
 
-  return neighbors
+  const neighbors: RetrievedChunk[] = []
+
+  for (const [, fileChunks] of byFile) {
+    const first = fileChunks[0]
+    if (!first) continue
+    const fileScopeChunks = await retrieveFileChunks(
+      first.payload.repoName!,
+      first.payload.branchName!,
+      first.payload.filePath!,
+    )
+
+    for (const chunk of fileChunks) {
+      const nearStart = (chunk.payload.startLine ?? 0) - lineWindow
+      const nearEnd = (chunk.payload.endLine ?? 0) + lineWindow
+
+      for (const fc of fileScopeChunks) {
+        const fcStart = fc.payload.startLine
+        const fcEnd = fc.payload.endLine
+        if (fcStart === undefined || fcEnd === undefined) continue
+        if (fcEnd >= nearStart && fcStart <= nearEnd) {
+          neighbors.push(fc)
+        }
+      }
+    }
+  }
+
+  // Deduplicate by id — overlapping windows from multiple input chunks may
+  // select the same neighbor chunk.
+  return [...new Map(neighbors.map(n => [n.id, n])).values()]
 }
 
-async function retrieveAccountTypeFileChunks(chunks: RetrievedChunk[]): Promise<RetrievedChunk[]> {
-  const fileKeys = unique(
-    chunks
-      .filter(chunk => /accountTypes|accountTypesV2|type_name|platform_type|group_creation|MetaAccountType\.getPublicAccountTypes|"mindepo"|minFirstDepo/i.test(chunk.payload.content ?? ""))
-      .filter(chunk => chunk.payload.repoName && chunk.payload.branchName && chunk.payload.filePath)
-      .map(chunk => `${chunk.payload.repoName}|${chunk.payload.branchName}|${chunk.payload.filePath}`),
-    20,
-  )
+async function retrieveAccountTypeFileChunks(chunks: RetrievedChunk[], question: string): Promise<RetrievedChunk[]> {
+  const seedRegex = /accountTypes|accountTypesV2|type_name|platform_type|group_creation|MetaAccountType\.getPublicAccountTypes|"mindepo"|minFirstDepo/i
+
+  const seedFromFileChunks = (pool: RetrievedChunk[]): string[] =>
+    unique(
+      pool
+        .filter(chunk => seedRegex.test(chunk.payload.content ?? ""))
+        .filter(chunk => chunk.payload.repoName && chunk.payload.branchName && chunk.payload.filePath)
+        .map(chunk => `${chunk.payload.repoName}|${chunk.payload.branchName}|${chunk.payload.filePath}`),
+      20,
+    )
+
+  let fileKeys = seedFromFileChunks(chunks)
+
+  // Always search Qdrant for the broker-specific config file. Account-type
+  // config chunks (e.g. components/askap/libs/config.js) have no
+  // symbols/routes/tables/queues, so they are excluded from the BM25 index
+  // and won't appear in the retrieval pool via bm25Search. A server-side
+  // scroll filtered by evidenceTypes=env_config + filePath narrows to ~1k
+  // chunks, then we filter locally for account-type content.
+  const brokerHint = questionBrokerHint(question)
+  const configFilePaths: string[] = []
+  if (brokerHint === "askap") configFilePaths.push("components/askap/libs/config.js")
+  else if (brokerHint === "mrg") configFilePaths.push("components/mrg/libs/config.js")
+
+  if (configFilePaths.length > 0) {
+    try {
+      const scrollMust: Array<Record<string, unknown>> = [
+        { key: "evidenceTypes", match: { value: "env_config" } },
+      ]
+      const scrollShould = configFilePaths.map(fp => ({ key: "filePath", match: { value: fp } }))
+
+      const seedPool: RetrievedChunk[] = []
+      let offset: string | number | Record<string, unknown> | null | undefined
+      do {
+        const page = await qdrant.scroll(config.collectionName, {
+          filter: { must: scrollMust, should: scrollShould },
+          limit: 256,
+          with_payload: true,
+          with_vector: false,
+          ...(offset ? { offset } : {}),
+        })
+        for (const point of page.points) {
+          const payload = point.payload as RetrievedPayload | null | undefined
+          if (!payload?.content) continue
+          if (!seedRegex.test(payload.content)) continue
+          seedPool.push({ id: String(point.id), payload })
+        }
+        offset = page.next_page_offset
+      } while (offset)
+
+      const configKeys = seedFromFileChunks(seedPool)
+      fileKeys = unique([...fileKeys, ...configKeys], 20)
+    } catch { /* fall through — no config seeds found */ }
+  }
+
   const expanded: RetrievedChunk[] = []
 
   for (const key of fileKeys) {
@@ -2011,6 +2316,14 @@ function buildExactEndpointDetailAnswer(
 
   if (!definition) return undefined
 
+  // Only keep endpoint facts for the specific handler from the route definition.
+  // Without this, facts for unrelated handlers in the same route file (e.g.
+  // GetAccountTypes, CheckAccounts) pollute the evidence section.
+  const handlerMethodName = definition.handler.split(".").at(-1) ?? definition.handler
+  const relevantEndpointFacts = endpointFacts.filter(fact => {
+    const factMethodName = fact.match(/^\s*([A-Za-z_$][\w$]*)\s+in\s+/)?.[1]
+    return factMethodName === handlerMethodName
+  })
   const source =
     chunks.find(chunk => {
       const content = chunk.content ?? ""
@@ -2019,16 +2332,16 @@ function buildExactEndpointDetailAnswer(
     }) ?? chunks[0]
   const lines = source ? `${source.filePath}:${source.startLine}-${source.endLine}` : "unknown"
   const bodyFields = unique(
-    endpointFacts.flatMap(fact => {
+    relevantEndpointFacts.flatMap(fact => {
       const match = fact.match(/body fields:\s*([^;]+)/)
 
       return match?.[1] ? match[1].split(",").map(value => value.trim()) : []
     }),
     12,
   )
-  const rpcFunctions = extractRpcFuncNamesFromFacts(endpointFacts)
+  const rpcFunctions = extractRpcFuncNamesFromFacts(relevantEndpointFacts)
   const validationFacts = unique(
-    endpointFacts.flatMap(fact => {
+    relevantEndpointFacts.flatMap(fact => {
       const match = fact.match(/validation\/auth:\s*([^;]+)/)
 
       return match?.[1] ? match[1].split(",").map(value => value.trim()) : []
@@ -2036,7 +2349,7 @@ function buildExactEndpointDetailAnswer(
     12,
   )
   const extraPayload = unique(
-    endpointFacts.flatMap(fact => {
+    relevantEndpointFacts.flatMap(fact => {
       const match = fact.match(/extra payload:\s*([^;]+)/)
 
       return match?.[1] ? match[1].split(",").map(value => value.trim()) : []
@@ -2044,7 +2357,7 @@ function buildExactEndpointDetailAnswer(
     12,
   )
   const returnFacts = unique(
-    endpointFacts.flatMap(fact => {
+    relevantEndpointFacts.flatMap(fact => {
       const match = fact.match(/return:\s*([^;]+)/)
 
       return match?.[1] ? match[1].split(",").map(value => value.trim()) : []
@@ -2071,7 +2384,7 @@ function buildExactEndpointDetailAnswer(
     16,
   )
   const servicesInvolved = unique(
-    [...endpointFacts, ...downstreamFacts].flatMap(fact => {
+    [...relevantEndpointFacts, ...downstreamFacts].flatMap(fact => {
       const match = fact.match(/\bin\s+([^@\s]+)@([^ ]+)\s+([^:;]+)/)
 
       return match?.[1] && match?.[2] ? [`${match[1]}@${match[2]}`] : []
@@ -2129,7 +2442,7 @@ function buildExactEndpointDetailAnswer(
     "",
     "Evidence:",
     upstreamFacts.length > 0 ? upstreamFacts.map(fact => `- ${fact}`).join("\n") : undefined,
-    endpointFacts.length > 0 ? endpointFacts.map(fact => `- ${fact}`).join("\n") : "- No handler facts were extracted.",
+    relevantEndpointFacts.length > 0 ? relevantEndpointFacts.map(fact => `- ${fact}`).join("\n") : "- No handler facts were extracted.",
     downstreamFacts.length > 0 ? downstreamFacts.map(fact => `- ${fact}`).join("\n") : "- No downstream facts were extracted.",
   ].join("\n")
 }
@@ -2589,7 +2902,8 @@ function shouldInspectExactEndpointDetails(question: string): boolean {
     "affected",
     "involved",
     "flow",
-  ].some(keyword => lower.includes(keyword))
+  ].some(keyword => lower.includes(keyword)) ||
+    /\bwhat does\b.*\bdo\b/i.test(question)
 }
 
 function buildExpansionQueries(question: string, hints: RelationshipHints): string[] {
@@ -2619,6 +2933,7 @@ function mergeChunks(chunks: RetrievedChunk[], maxResults = Math.max(limit, 12))
 
 function chunkHasStrongQuestionEvidence(chunk: RetrievedPayload, questionText: string): boolean {
   const text = [
+    chunk.repoName ?? "",
     chunk.filePath ?? "",
     chunk.content ?? "",
     ...(chunk.routes ?? []),
@@ -2644,6 +2959,7 @@ function chunkHasStrongQuestionEvidence(chunk: RetrievedPayload, questionText: s
 function scoreFallbackContextChunk(chunk: RetrievedPayload, questionText: string): number {
   const lowerQuestion = questionText.toLowerCase()
   const text = [
+    chunk.repoName ?? "",
     chunk.filePath ?? "",
     chunk.content ?? "",
     ...(chunk.routes ?? []),
@@ -2662,7 +2978,7 @@ function scoreFallbackContextChunk(chunk: RetrievedPayload, questionText: string
   }
   if (chunk.filePath?.startsWith("vocabulary://")) score += questionAsksAboutGlossary(questionText) ? 50 : 8
   if (chunk.filePath?.startsWith("doctor:") || chunk.filePath?.startsWith("doctor-fact:")) score += questionAsksInventory(questionText) ? 80 : 20
-  if (chunk.evidenceTypes?.includes("documentation")) score += questionAsksAboutGlossary(questionText) || questionAsksHowWorks(questionText) || questionAsksInventory(questionText) ? 45 : -12
+  if (chunk.evidenceTypes?.includes("documentation")) score += questionAsksAboutGlossary(questionText) || questionAsksHowWorks(questionText) || questionAsksInventory(questionText) ? 25 : -12
   // Boost comment chunks for rationale/meaning questions — comments often explain WHY
   if (chunk.evidenceTypes?.includes("comment")) {
     score += /\b(why|kenapa|mengapa|what does|apa itu|artinya|maksud|mean|means|meaning|rationale|reason|alasan|explain|jelasin|jelaskan)\b/i.test(questionText) ? 35 : 8
@@ -2670,6 +2986,13 @@ function scoreFallbackContextChunk(chunk: RetrievedPayload, questionText: string
   // Boost migration chunks for "what does X mean" questions about DB columns/values
   if (chunk.evidenceTypes?.includes("migration")) {
     score += /\b(status|value|nilai|arti|mean|means|apa itu|what does|column|kolom)\b/i.test(questionText) ? 25 : 0
+  }
+  // For "how works" questions, boost implementation code over docs —
+  // code chunks with routes/queues/tables show the actual implementation.
+  if (questionAsksHowWorks(questionText) && !chunk.evidenceTypes?.includes("documentation")) {
+    if ((chunk.routes?.length ?? 0) > 0 || (chunk.queueNames?.length ?? 0) > 0 || (chunk.exchangeNames?.length ?? 0) > 0 || (chunk.dbTables?.length ?? 0) > 0 || (chunk.symbols?.length ?? 0) > 0) {
+      score += 35
+    }
   }
   if ((chunk.routes?.length ?? 0) > 0) score += 28
   if ((chunk.symbols?.length ?? 0) > 0) score += 18
@@ -2840,27 +3163,100 @@ async function runDeepInvestigation(
   }
 }
 
-function filterEndpointSourceChunks(
-  chunks: RetrievedChunk[],
-  routes: string[],
-  handlerRefs: HandlerRef[],
+/**
+ * Selects at most 4 precise source chunks for the deterministic endpoint
+ * detail answer: route definition, handler implementation, upstream caller,
+ * and downstream RPC/model. Excludes local-codebase-ai repo, unrelated
+ * doctor docs, and chunks from other handlers in the same route file.
+ */
+function selectEndpointSources(
+  evidencePool: RetrievedChunk[],
+  routeDefinition: RouteDefinition | undefined,
+  handlerMethodName: string | undefined,
   rpcFuncNames: string[],
-  extraTerms: string[] = [],
-): RetrievedChunk[] {
-  const handlerNames = new Set(handlerRefs.map(ref => ref.methodName))
+  originRepoNames: string[],
+): RetrievedPayload[] {
+  const routeUrl = routeDefinition?.url
+  const routeHandler = routeDefinition?.handler
+  const originRepos = new Set(originRepoNames.filter(Boolean))
   const rpcNames = new Set(rpcFuncNames)
-  const terms = new Set(extraTerms)
-  const filtered = chunks.filter(chunk => {
+  const seen = new Set<string>()
+  const selected: RetrievedPayload[] = []
+
+  const isEligible = (chunk: RetrievedChunk): boolean => {
+    const payload = chunk.payload
+    if (!payload?.content) return false
+    // Exclude self-repo (local-codebase-ai) — never relevant as a source.
+    if (payload.repoName === "local-codebase-ai") return false
+    // Exclude doctor docs unless they are the only evidence (handled by caller).
+    if (payload.source_type === "decision") return false
+    if (!seen.has(chunk.id)) return true
+    return false
+  }
+
+  // 1. Route definition chunk: contains the route URL + handler in route-block syntax.
+  if (routeUrl && routeHandler) {
+    const routeChunk = evidencePool.find(chunk => {
+      if (!isEligible(chunk)) return false
+      const content = chunk.payload.content ?? ""
+      return contentContainsRoute(content, routeUrl) && content.includes(routeHandler)
+    })
+    if (routeChunk) {
+      selected.push(routeChunk.payload)
+      seen.add(routeChunk.id)
+    }
+  }
+
+  // 2. Handler implementation chunk: contains `async <handlerMethodName>(`.
+  if (handlerMethodName) {
+    const handlerPattern = new RegExp(`\\basync\\s+${escapeRegExp(handlerMethodName)}\\s*\\(`)
+    const handlerChunk = evidencePool.find(chunk => {
+      if (!isEligible(chunk)) return false
+      // Prefer handler in the same origin repo (where the route is defined).
+      if (chunk.payload.repoName && originRepos.has(chunk.payload.repoName)) {
+        return handlerPattern.test(chunk.payload.content ?? "")
+      }
+      return false
+    }) ?? evidencePool.find(chunk => {
+      if (!isEligible(chunk)) return false
+      return handlerPattern.test(chunk.payload.content ?? "")
+    })
+    if (handlerChunk) {
+      selected.push(handlerChunk.payload)
+      seen.add(handlerChunk.id)
+    }
+  }
+
+  // 3. Upstream caller chunk: contains Helper::requestAPI.
+  const upstreamChunk = evidencePool.find(chunk => {
+    if (!isEligible(chunk)) return false
     const content = chunk.payload.content ?? ""
-    const hasRoute = routes.some(route => contentContainsRoute(content, route))
-    const hasHandler = [...handlerNames].some(handlerName => content.includes(handlerName))
-    const hasRpcFunc = [...rpcNames].some(rpcFuncName => content.includes(rpcFuncName))
-    const hasExtraTerm = [...terms].some(term => content.includes(term))
-
-    return hasRoute || hasHandler || hasRpcFunc || hasExtraTerm
+    return content.includes("Helper::requestAPI")
   })
+  if (upstreamChunk) {
+    selected.push(upstreamChunk.payload)
+    seen.add(upstreamChunk.id)
+  }
 
-  return mergeChunks(filtered, 14)
+  // 4. Downstream RPC/model chunk: references an RPC func name and is in a
+  //    different repo than the route origin (the model/RPC implementation).
+  const downstreamChunk = evidencePool.find(chunk => {
+    if (!isEligible(chunk)) return false
+    const payload = chunk.payload
+    const content = payload.content ?? ""
+    if (!originRepos.has(payload.repoName ?? "")) {
+      return [...rpcNames].some(name => content.includes(name))
+    }
+    return false
+  })
+  if (downstreamChunk) {
+    selected.push(downstreamChunk.payload)
+    seen.add(downstreamChunk.id)
+  }
+
+  // Deduplicate by id (in case the same chunk matched multiple categories).
+  const deduped = [...new Map(selected.map(p => [`${p.repoName}|${p.filePath}|${p.startLine}`, p])).values()]
+  return deduped.slice(0, 4)
 }
 
 function extractSqlTableNamesFromContent(content: string): string[] {
@@ -4184,7 +4580,10 @@ function cleanDocSummaryText(value: string): string {
 function renderDocSummaryText(value: string): string {
   const normalized = value.trim()
 
-  if (/^The Auto Copy system allows users to automatically replicate trading signals from master channels to their accounts\./.test(normalized)) {
+  if (
+    /^The Auto Copy system allows users to automatically replicate trading signals from master channels to their accounts\./.test(normalized) ||
+    /^Sistem Auto Copy memungkinkan pengguna untuk secara otomatis menyalin sinyal perdagangan dari channel master ke akun mereka\./.test(normalized)
+  ) {
     if (shouldAnswerIndonesian(question)) {
       return "iSignal / Auto Copy (bot copy) adalah sistem yang memungkinkan user menyalin trading signals secara otomatis dari master channel ke akun mereka. Sistem ini menangani flow end-to-end dari signal ingestion, order execution, dan proteksi akun dari stale or invalid trades."
     }
@@ -5023,7 +5422,7 @@ async function buildMermaidDiagramAnswer(chunks: RetrievedPayload[], question: s
   const isChannelSubsQuestion = /\b(channel.?subs|channel subscription)\b/i.test(question)
   const proactiveDiagramKeys: string[] = []
   if (questionAsksHowWorks(question)) {
-    if (isIsignalQuestion || (!isChannelSubsQuestion)) {
+    if (isIsignalQuestion) {
       proactiveDiagramKeys.push("isignal|docs|docs:isignal-docs\\architecture\\diagrams.mdx")
     }
     if (isChannelSubsQuestion) {
@@ -5241,10 +5640,68 @@ function buildExactSymbolAnswer(symbolNames: string[], chunks: RetrievedChunk[])
 }
 
 async function main() {
-  answerLanguage = await detectAnswerLanguage(question)
+  const mainStart = nowMs()
+  const provider = resolveChatProvider()
+  dlog("ask-start", {
+    provider,
+    chatBaseUrlHost: resolveChatBaseUrlHost(),
+    chatModel: config.chatModel,
+    embeddingModel: config.embeddingModel,
+    embeddingUrl: config.ollamaUrl,
+    qdrantUrl: config.qdrantUrl,
+    deep: deepMode,
+    limit,
+    repoName: options.repoName ?? "-",
+    project: options.project ?? "-",
+    branch: options.branch ?? "-",
+    serviceType: serviceType ?? "-",
+    questionChars: question.length,
+  })
+
+  // Gate: greetings and short conversational follow-ups skip retrieval entirely.
+  // Returns a direct response with no sources — avoids polluting results with
+  // irrelevant chunks (e.g. SMTP HELO matching "hello").
+  if (isGreeting(question)) {
+    answerLanguage = heuristicAnswerLanguage(question)
+    const greeting = shouldAnswerIndonesian(question)
+      ? "Halo. Ada yang bisa saya bantu seputar codebase? Silakan tanya."
+      : "Hello. Ready to help with codebase questions."
+    console.log("\nANSWER\n")
+    console.log(greeting)
+    console.log("\nSOURCES\n")
+    _askCompletedFull = true
+    return
+  }
+
+  if (isConversationalFollowUp(question, history.length > 0)) {
+    answerLanguage = heuristicAnswerLanguage(question)
+    const historyLines = history.length > 0
+      ? [
+          "Previous conversation:",
+          ...history.map(h => `${h.role === "user" ? "User" : "Assistant"}: ${h.content}`),
+          "",
+        ]
+      : []
+    const convoPrompt = [
+      ...historyLines,
+      `User: ${question}`,
+      "",
+      "Answer the user's message conversationally. If they're referencing something from the previous conversation, use that context. If they seem frustrated or confused, acknowledge and offer help. Keep it brief. Do not reference codebase sources.",
+    ].join("\n")
+    const convoAnswer = await chat(convoPrompt)
+    console.log("\nANSWER\n")
+    console.log(localizeAnswer(convoAnswer, question))
+    console.log("\nSOURCES\n")
+    _askCompletedFull = true
+    return
+  }
+
+  retrievalDegradation.bm25Unavailable = false
+  _fileChunkCache.clear()
+  answerLanguage = await timeStage("language", () => detectAnswerLanguage(question))
 
   const questionRoutes = extractQuestionRoutes(question)
-  const relationshipGraph = await readRelationshipGraph()
+  const relationshipGraph = await timeStage("graph-load", () => readRelationshipGraph())
   const negativeRepoConstraint = questionAsksNegativeRepoConstraint(question)
 
   if (negativeRepoConstraint) {
@@ -5363,15 +5820,18 @@ async function main() {
     !questionAsksHowWorks(question) &&
     !questionAsksInventory(question)
   const conceptRoutes = shouldDiscoverConceptRoutes
-    ? unique([...discoverGraphRouteAnchors(question, relationshipGraph), ...await discoverConceptRouteAnchors(question)], 10)
+    ? await timeStage("concept-route-discovery", async () =>
+        unique([...discoverGraphRouteAnchors(question, relationshipGraph), ...await discoverConceptRouteAnchors(question)], 10))
     : []
   const exactRoutes = unique([...questionRoutes, ...conceptRoutes], 10)
+  const exactRouteStart = nowMs()
   const exactChunks = await retrieveExactRouteMatches(exactRoutes)
+  dlog("stage", { name: "exact-route-match", ms: elapsedMs(exactRouteStart), exactRoutes: exactRoutes.length, chunks: exactChunks.length })
 
   // BM25 symbol lookup — runs independently of vector search for identifier queries
   const symbolIdentifiers = extractQuestionHints(question).filter(t => isIdentifierQuery(t))
   const symbolChunks: RetrievedChunk[] = symbolIdentifiers.length > 0
-    ? await (async () => {
+    ? await timeStage("bm25-symbol", async () => {
         const bm25Results = await bm25Search(symbolIdentifiers.join(" "), 8)
         if (bm25Results.length === 0) return []
         try {
@@ -5386,7 +5846,7 @@ async function main() {
           console.error("BM25 symbol retrieve failed:", err instanceof Error ? err.message : err)
           return []
         }
-      })()
+      })
     : []
   const questionHints = extractQuestionHints(question)
   const generalVocabKeywords = ["medal", "level", "rank", "persyaratan", "naik", "requirement", "syarat", "tier", "grade"]
@@ -5449,6 +5909,7 @@ async function main() {
     ...minimumEquitySearchTerms,
   ], 48)
   // Run all independent exact-match scroll scans in parallel.
+  const exactParallelStart = nowMs()
   const [exactTermChunks, exactVocabularyChunks, exactMetaTraderChunks, exactMinimumEquityChunks, isignalDocChunks] = await Promise.all([
     exactRoutes.length === 0
       ? retrieveExactTermMatches(exactTermSearchTerms, questionAsksAboutAccountTypes(question) ? 60 : 32)
@@ -5476,6 +5937,20 @@ async function main() {
         })()
       : Promise.resolve([]),
   ])
+  if (exactRoutes.length > 0) {
+    dlog("stage", { name: "exact-term-parallel", status: "skipped", reason: "exact-routes-present" })
+  } else {
+    dlog("stage", {
+      name: "exact-term-parallel",
+      status: "executed",
+      ms: elapsedMs(exactParallelStart),
+      exactTerm: exactTermChunks.length,
+      vocab: exactVocabularyChunks.length,
+      metaTrader: exactMetaTraderChunks.length,
+      equity: exactMinimumEquityChunks.length,
+      isignal: isignalDocChunks.length,
+    })
+  }
 
   // Fallback: if the question is about general vocabulary topics (medal, level, rank) but no vocabulary
   // chunks were retrieved via exact matching, explicitly search for vocabulary chunks.
@@ -5544,7 +6019,8 @@ async function main() {
 
   const exactTermDetailChunks =
     exactRoutes.length === 0 && exactTermChunks.length > 0
-      ? await retrieveNeighborChunks(exactTermChunks, questionAsksAboutAccountTypes(question) ? 240 : 70)
+      ? await timeStage("exact-term-detail-neighbors", () =>
+          retrieveNeighborChunks(exactTermChunks, questionAsksAboutAccountTypes(question) ? 240 : 70))
       : []
   const exactComparison = exactRoutes.length >= 2 && isExactRouteComparisonQuestion(question)
   // Decision-intent questions should not be treated as endpoint inspections — they ask
@@ -5563,12 +6039,12 @@ async function main() {
   const exactHandlerRefs = extractExactRouteHandlerRefs(exactChunks, exactRoutes)
   const exactDetailChunks =
     exactChunks.length > 0
-      ? await retrieveExactRouteDetails(
+      ? await timeStage("exact-route-details", () => retrieveExactRouteDetails(
           exactChunks,
           exactHandlerRefs,
           exactComparison || exactEndpointInspection || shouldExpandExactRouteQuestion(question),
           exactRoutes,
-        )
+        ))
       : []
   const retrievalLimit = questionAsksAboutGlossary(question) ? Math.max(limit, 18) : limit
 
@@ -5722,14 +6198,23 @@ async function main() {
     }
   }
 
+  // Apply retrieval boost from learning rules — append boost terms to BM25 queries
+  const activeRules = await loadActiveLearningRules()
+  const boostTerms = activeRules
+    .filter(r => r.type === "retrieval_boost" && question.toLowerCase().includes(r.trigger.toLowerCase()))
+    .map(r => r.content)
+    .join(" ")
+  const boostedRetrievalQuestion = boostTerms ? `${retrievalQuestion} ${boostTerms}` : retrievalQuestion
+
   // Run independent retrieval calls in parallel to avoid sequential Qdrant round-trips.
   const isGlossaryNotAccountTypes = exactRoutes.length === 0 && questionAsksAboutGlossary(question) && !questionAsksAboutAccountTypes(question)
+  const vectorParallelStart = nowMs()
   const [
     initialChunks,
     preferredLocaleDocChunksRaw,
     exactDocumentationSubjectChunksRaw,
   ] = await Promise.all([
-    exactRoutes.length > 0 ? Promise.resolve([]) : retrieve(retrievalQuestion, retrievalLimit),
+    exactRoutes.length > 0 ? Promise.resolve([]) : retrieve(boostedRetrievalQuestion, retrievalLimit),
     isGlossaryNotAccountTypes
       ? retrievePreferredLocaleDocChunks(retrievalQuestion, Math.max(retrievalLimit, 16))
       : Promise.resolve([]),
@@ -5742,6 +6227,42 @@ async function main() {
         ], Math.max(retrievalLimit, 24))
       : Promise.resolve([]),
   ])
+  if (exactRoutes.length > 0) {
+    dlog("stage", { name: "vector-retrieval-parallel", status: "skipped", reason: "exact-routes-present" })
+  } else {
+    dlog("stage", {
+      name: "vector-retrieval-parallel",
+      status: "executed",
+      ms: elapsedMs(vectorParallelStart),
+      initial: initialChunks.length,
+      preferredLocaleDoc: (preferredLocaleDocChunksRaw as RetrievedChunk[]).length,
+      docSubject: (exactDocumentationSubjectChunksRaw as RetrievedChunk[]).length,
+    })
+  }
+
+  // Learning rules: BM25 boost search — find chunks containing boost terms that
+  // vector search missed. Merge into initialChunks before reranking.
+  if (boostTerms) {
+    const boostStart = nowMs()
+    const bm25BoostResults = await bm25Search(boostTerms, Math.max(retrievalLimit * 4, 48))
+    const existingIds = new Set(initialChunks.map(c => c.id))
+    const missingBoostIds = bm25BoostResults.map(r => r.id).filter(id => !existingIds.has(id))
+    if (missingBoostIds.length > 0) {
+      try {
+        const boostPoints = await qdrant.retrieve(config.collectionName, {
+          ids: missingBoostIds.slice(0, 24),
+          with_payload: true,
+        })
+        for (const point of boostPoints) {
+          const payload = point.payload as RetrievedPayload
+          if (payload?.content) {
+            initialChunks.push({ id: String(point.id), payload })
+          }
+        }
+      } catch { /* fall through */ }
+    }
+    dlog("stage", { name: "bm25-boost", ms: elapsedMs(boostStart), boostResults: bm25BoostResults.length, merged: missingBoostIds.length })
+  }
   const preferredLocaleDocChunks = (preferredLocaleDocChunksRaw as RetrievedChunk[]).filter(chunk => {
     // When the question is about a specific product (isignal, FA, etc.), exclude unrelated repos
     // so the docs:id locale for a different product doesn't dominate.
@@ -5754,6 +6275,7 @@ async function main() {
     return true
   })
   const exactDocumentationSubjectChunks = exactDocumentationSubjectChunksRaw as RetrievedChunk[]
+  const docNeighborStart = nowMs()
   const [preferredLocaleDocNeighborChunks, exactDocumentationSubjectNeighborChunks] = await Promise.all([
     preferredLocaleDocChunks.length > 0 && questionAsksAboutGlossary(question)
       ? retrieveNeighborChunks(preferredLocaleDocChunks, 30)
@@ -5762,10 +6284,20 @@ async function main() {
       ? retrieveNeighborChunks(exactDocumentationSubjectChunks, 40)
       : Promise.resolve([]),
   ])
+  if (preferredLocaleDocChunks.length > 0 || exactDocumentationSubjectChunks.length > 0) {
+    dlog("stage", {
+      name: "doc-neighbor-retrieval",
+      ms: elapsedMs(docNeighborStart),
+      preferredLocaleNeighbors: preferredLocaleDocNeighborChunks.length,
+      docSubjectNeighbors: exactDocumentationSubjectNeighborChunks.length,
+    })
+  }
   const hints = collectHints([...exactChunks, ...exactDetailChunks, ...exactTermChunks, ...exactVocabularyChunks, ...exactMetaTraderChunks, ...exactMinimumEquityChunks, ...isignalDocChunks, ...exactTermDetailChunks, ...vocabUsageChunks, ...exactDocumentationSubjectChunks, ...initialChunks])
   const expansionQueries =
-    exactRoutes.length > 0 && exactChunks.length === 0
+    exactEndpointInspection
       ? []
+      : exactRoutes.length > 0 && exactChunks.length === 0
+        ? []
       : exactRoutes.length > 0 && !shouldExpandExactRouteQuestion(question)
         ? []
       : shouldExpandRetrieval(question, hints)
@@ -5773,14 +6305,40 @@ async function main() {
         : []
   const expandedChunks = []
 
+  const expansionStart = nowMs()
   for (const expansionQuery of expansionQueries) {
     expandedChunks.push(...await retrieve(`${expansionQuery}\n${registryExpansion.terms.join(" ")}`, Math.max(3, Math.ceil(retrievalLimit / 2))))
+  }
+  if (expansionQueries.length > 0) {
+    dlog("stage", { name: "expansion-retrieval", ms: elapsedMs(expansionStart), queries: expansionQueries.length, chunks: expandedChunks.length })
+  }
+
+  // Bridge vocabulary gap: extract code identifiers from retrieved documentation
+  // chunks and find the actual implementation code they reference.
+  // First, expand to sibling docs from the same doc section — e.g., if we found
+  // isignal-docs/edge-cases.md, also fetch cron-jobs/index.md which contains
+  // specific identifiers (CronCheckDeals, etc.) that lead to implementation code.
+  const docChunksForExpansion = [...preferredLocaleDocChunks, ...exactDocumentationSubjectChunks, ...isignalDocChunks, ...preferredLocaleDocNeighborChunks, ...exactDocumentationSubjectNeighborChunks]
+  const docSectionStart = nowMs()
+  const docSectionSiblings = docChunksForExpansion.length > 0
+    ? await retrieveDocSectionSiblings(docChunksForExpansion, 24)
+    : []
+  if (docSectionSiblings.length > 0) {
+    dlog("stage", { name: "doc-section-expansion", ms: elapsedMs(docSectionStart), siblingDocs: docSectionSiblings.length })
+  }
+  const docChunksForCodeRef = [...docChunksForExpansion, ...docSectionSiblings]
+  const docRefStart = nowMs()
+  const docRefCodeChunks = docChunksForCodeRef.length > 0
+    ? await retrieveCodeFromDocReferences(docChunksForCodeRef, Math.max(retrievalLimit, 24))
+    : []
+  if (docRefCodeChunks.length > 0) {
+    dlog("stage", { name: "doc-ref-code-retrieval", ms: elapsedMs(docRefStart), codeChunks: docRefCodeChunks.length })
   }
 
   // For decision-intent questions, always fetch approved decision chunks directly
   // and prepend them — they must not compete for slots against code chunks.
   const decisionChunks: RetrievedChunk[] = isDecisionIntentQuestion
-    ? await (async () => {
+    ? await timeStage("decision-chunks", async () => {
         const result = await qdrant.scroll(config.collectionName, {
           filter: { must: [{ key: "source_type", match: { value: "decision" } }] },
           limit: 20,
@@ -5790,15 +6348,19 @@ async function main() {
         return result.points
           .map(point => ({ id: String(point.id), payload: point.payload as RetrievedPayload }))
           .filter(chunk => chunk.payload.content)
-      })()
+      })
     : []
 
+  const mergeStart = nowMs()
   const retrievedChunks = mergeChunks(
     [
       ...decisionChunks,
       ...exactChunks,
       ...symbolChunks,
       ...exactDetailChunks,
+      // Code chunks from doc-ref retrieval go early — compactRetrievedChunks is
+      // first-come-first-served, so code must be ahead of docs to survive the limit.
+      ...docRefCodeChunks,
       // isignalDocChunks first — they are explicitly scrolled for timeline/eligibility
       // questions and must not be crowded out by docs:id chunks from other repos
       ...isignalDocChunks,
@@ -5806,6 +6368,7 @@ async function main() {
       ...preferredLocaleDocNeighborChunks,
       ...exactDocumentationSubjectChunks,
       ...exactDocumentationSubjectNeighborChunks,
+      ...docSectionSiblings,
       ...exactTermChunks,
       ...exactVocabularyChunks,
       ...exactMetaTraderChunks,
@@ -5826,8 +6389,9 @@ async function main() {
         ? Math.max(limit, 48)
         : Math.max(limit, 12),
   )
+  dlog("stage", { name: "merge-chunks", ms: elapsedMs(mergeStart), retrievedChunks: retrievedChunks.length })
   const accountTypeFileChunks = questionAsksAboutAccountTypes(question)
-    ? await retrieveAccountTypeFileChunks(retrievedChunks)
+    ? await timeStage("account-type-file-chunks", () => retrieveAccountTypeFileChunks(retrievedChunks, question))
     : []
   const answerChunks = accountTypeFileChunks.length > 0
     ? mergeChunks([...retrievedChunks, ...accountTypeFileChunks], Math.max(retrievalLimit, 320))
@@ -5849,15 +6413,40 @@ async function main() {
   const handlerFacts = extractHandlerFactSummary(exactDetailChunks, exactHandlerRefs, exactRouteRepoNames)
   const endpointFacts = extractEndpointHandlerFacts(exactDetailChunks, exactHandlerRefs, exactRouteRepoNames)
   const endpointRpcFuncNames = extractRpcFuncNamesFromFacts(endpointFacts)
-  const endpointExtraTermChunks = endpointRpcFuncNames.some(name => /SubmitDepositDemo/i.test(name))
-    ? await retrieveExactTermMatches(["deposit_demo", "users_demoid", "SubmitDepositDemo"], 12)
+  // Skip endpoint-extra-terms when exactDetailChunks already contain the
+  // relevant downstream evidence (deposit_demo / users_demoid / RPC func).
+  // The extra retrieval is only needed when the route-details stage didn't
+  // already surface the downstream model chunks.
+  const hasDownstreamEvidence = exactDetailChunks.some(c => {
+    const content = c.payload.content ?? ""
+    return content.includes("deposit_demo") || content.includes("users_demoid") || endpointRpcFuncNames.some(name => content.includes(name))
+  })
+  const endpointExtraTermChunks = endpointRpcFuncNames.some(name => /SubmitDepositDemo/i.test(name)) && !hasDownstreamEvidence
+    ? await timeStage("endpoint-extra-terms", () =>
+        retrieveExactTermMatches(["deposit_demo", "users_demoid", "SubmitDepositDemo"], 12))
     : []
+  if (endpointRpcFuncNames.some(name => /SubmitDepositDemo/i.test(name)) && hasDownstreamEvidence) {
+    dlog("stage", { name: "endpoint-extra-terms", status: "skipped", reason: "downstream-evidence-already-present" })
+  }
   const endpointDetailEvidenceChunks = [...exactDetailChunks, ...endpointExtraTermChunks]
   const phpConstantNamesForExactRoutes = extractPhpConstantNamesForRoutes(exactChunks, exactRoutes)
-  // Fallback: when no PHP constants found (config not indexed), search directly for PHP
-  // model chunks that call Helper::requestAPI for any of the exact route path segments.
-  const phpCallerChunks: RetrievedChunk[] = phpConstantNamesForExactRoutes.length === 0 && exactRoutes.length > 0
-    ? await (async () => {
+  // Compute upstream facts from existing evidence first. Only run the PHP
+  // caller fallback (php-caller-chunks) when no upstream facts were found
+  // and no PHP constants were extracted — avoids ~85ms BM25+retrieve when
+  // the evidence is already present.
+  const upstreamConstantNames = phpConstantNamesForExactRoutes.length > 0
+    ? phpConstantNamesForExactRoutes
+    : endpointDetailEvidenceChunks.flatMap(c =>
+        [...(c.payload.content ?? "").matchAll(/\bHelper::requestAPI\s*\(\s*(?:[A-Z][A-Za-z0-9_]*::)?([A-Z][A-Z0-9_]+)/g)]
+          .map(m => m[1] ?? "")
+          .filter(Boolean)
+      )
+  const preliminaryUpstreamFacts = extractUpstreamRouteCallerFacts(
+    endpointDetailEvidenceChunks,
+    upstreamConstantNames,
+  )
+  const phpCallerChunks: RetrievedChunk[] = preliminaryUpstreamFacts.length === 0 && phpConstantNamesForExactRoutes.length === 0 && exactRoutes.length > 0
+    ? await timeStage("php-caller-chunks", async () => {
         const routeSegments = exactRoutes.flatMap(r => r.split("/").filter(s => s.length > 3 && !/^v\d+$/.test(s)))
         if (routeSegments.length === 0) return []
         const bm25Hits = await bm25Search(routeSegments.join(" "), 16)
@@ -5871,18 +6460,21 @@ async function main() {
           console.error("BM25 PHP caller retrieve failed:", err instanceof Error ? err.message : err)
           return []
         }
-      })()
+      })
     : []
-  const upstreamFacts = extractUpstreamRouteCallerFacts(
-    [...endpointDetailEvidenceChunks, ...phpCallerChunks],
-    phpConstantNamesForExactRoutes.length > 0
-      ? phpConstantNamesForExactRoutes
-      : phpCallerChunks.flatMap(c =>
+  if (preliminaryUpstreamFacts.length > 0) {
+    dlog("stage", { name: "php-caller-chunks", status: "skipped", reason: "upstream-facts-already-present" })
+  }
+  const upstreamFacts = phpCallerChunks.length > 0
+    ? extractUpstreamRouteCallerFacts(
+        [...endpointDetailEvidenceChunks, ...phpCallerChunks],
+        phpCallerChunks.flatMap(c =>
           [...(c.payload.content ?? "").matchAll(/\bHelper::requestAPI\s*\(\s*(?:[A-Z][A-Za-z0-9_]*::)?([A-Z][A-Z0-9_]+)/g)]
             .map(m => m[1] ?? "")
             .filter(Boolean)
         ),
-  )
+      )
+    : preliminaryUpstreamFacts
   const downstreamFacts = extractDownstreamRpcFacts(
     endpointDetailEvidenceChunks,
     exactRouteRepoNames,
@@ -5900,16 +6492,33 @@ async function main() {
     ? buildExactEndpointDetailAnswer(routeDefinitions, endpointFacts, genericDownstreamFacts, chunks, upstreamFacts)
     : undefined
 
+  // In deep mode, skip ALL deterministic fast paths — let the LLM synthesize
+  // from the full retrieved context for richer, more nuanced answers.
+  fastPaths: {
+    if (deepMode) break fastPaths
+
   if (deterministicExactAnswer || deterministicEndpointAnswer) {
-    const sourceChunks = compactPayloadSources(deterministicEndpointAnswer
-      ? filterEndpointSourceChunks(
-          retrievedChunks,
-          exactRoutes,
-          exactHandlerRefs,
+    // Build source list from precise evidence chunks used in the answer.
+    // selectEndpointSources picks at most 4: route definition, handler
+    // implementation, upstream caller, downstream RPC/model — excluding
+    // local-codebase-ai, unrelated doctor docs, and other handlers in the
+    // same route file.
+    const endpointDefinition = deterministicEndpointAnswer
+      ? routeDefinitions.map(parseRouteDefinition).find(d => d !== undefined)
+      : undefined
+    const specificHandler = endpointDefinition?.handler.split(".").at(-1)
+    const sourcePayloads = deterministicEndpointAnswer
+      ? selectEndpointSources(
+          [...exactChunks, ...exactDetailChunks, ...endpointExtraTermChunks, ...phpCallerChunks],
+          endpointDefinition,
+          specificHandler,
           endpointRpcFuncNames,
-          phpConstantNamesForExactRoutes,
-        ).map(chunk => chunk.payload)
-      : chunks, 16)
+          exactRouteRepoNames,
+        )
+      : chunks
+    const sourceChunks = compactPayloadSources(sourcePayloads, 16)
+
+    dlog("early-return", { path: deterministicExactAnswer ? "exact-route-comparison" : "exact-endpoint-detail", totalMs: elapsedMs(mainStart), sources: sourceChunks.length })
 
     console.log("\nANSWER\n")
     console.log(localizeAnswer(deterministicExactAnswer ?? deterministicEndpointAnswer ?? "", question))
@@ -6158,7 +6767,11 @@ async function main() {
     return
   }
 
-  const mermaidDiagramAnswer = await buildMermaidDiagramAnswer(chunks, question)
+  // In deep mode, skip the deterministic mermaid fast path — let the LLM synthesize
+  // a richer answer using the diagram + surrounding retrieved context.
+  const mermaidDiagramAnswer = !deepMode
+    ? await buildMermaidDiagramAnswer(chunks, question)
+    : undefined
 
   if (mermaidDiagramAnswer) {
     console.log("\nANSWER\n")
@@ -6190,7 +6803,8 @@ async function main() {
   // Decision fast path must run before glossary/documentation paths — decision-intent
   // questions like "what is the rule about X" match questionAsksAboutGlossary() but
   // should be answered from approved decisions, not documentation summaries.
-  const documentationGlossaryAnswer = isDecisionIntentQuestion && decisionChunks.length > 0
+  const hasLearningRuleMatch = activeRules.some(r => question.toLowerCase().includes(r.trigger.toLowerCase()))
+  const documentationGlossaryAnswer = (isDecisionIntentQuestion && decisionChunks.length > 0) || hasLearningRuleMatch
     ? undefined
     : await buildDocumentationGlossaryAnswer(chunks, question)
 
@@ -6262,6 +6876,7 @@ async function main() {
 
     return
   }
+  } // end fastPaths
 
   // Fast path for decision-intent questions when approved decisions are available.
   // Send only decision chunks with a focused prompt — avoids noise from code chunks
@@ -6304,7 +6919,27 @@ async function main() {
       "Do not invent information not present in the decisions above.",
     ].join("\n")
 
-    const decisionAnswer = await chat(decisionPrompt).catch(() => "")
+    // Distinguish "LLM returned nothing" from "LLM call failed". Previously
+    // both collapsed to "" via .catch(() => ""), making a down Ollama/network
+    // error indistinguishable from "no matching decision" and silently falling
+    // through to general retrieval. Now the failure is logged + flagged so it
+    // is alertable, while still degrading safely.
+    let decisionAnswer = ""
+    let decisionLlmFailed = false
+    try {
+      decisionAnswer = await chat(decisionPrompt)
+    } catch (err) {
+      decisionLlmFailed = true
+      const reason = err instanceof Error ? err.message : String(err)
+      console.error(
+        JSON.stringify({
+          level: "warn",
+          component: "decision-answer",
+          event: "llm_call_failed",
+          reason,
+        }),
+      )
+    }
 
     if (decisionAnswer && !/^\s*$/.test(decisionAnswer)) {
       const sourceChunks = compactPayloadSources(decisionPayloads, 8)
@@ -6316,6 +6951,19 @@ async function main() {
         console.log(`- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`)
       }
       return
+    }
+
+    if (decisionLlmFailed) {
+      // The decision LLM call failed (not merely empty) — record that we are
+      // degrading to the general retrieval path instead of answering from decisions.
+      console.error(
+        JSON.stringify({
+          level: "info",
+          component: "decision-answer",
+          event: "degrade_to_general_retrieval",
+          reason: "decision LLM call failed",
+        }),
+      )
     }
   }
 
@@ -6347,6 +6995,7 @@ async function main() {
     })
     .join("\n\n")
   const evidenceInventory = buildEvidenceInventory(fallbackContextChunks, question)
+  const graphFlowContext = buildGraphFlowContext(relationshipGraph, question, hints)
   const registryPromptContext = buildRegistryPromptContext(registryExpansion)
   const investigationTraceLines = deepInvestigation
     ? [
@@ -6364,8 +7013,12 @@ async function main() {
       ]
     : []
 
+  const activeLearningRules = await loadActiveLearningRules()
+  const learningRulesBlock = formatRulesForPrompt(activeLearningRules)
+
   const prompt = [
     ...historyLines,
+    learningRulesBlock,
     `Question: ${question}`,
     `Answer language: ${answerLanguageLabel(question)}`,
     "",
@@ -6386,12 +7039,28 @@ async function main() {
     "Evidence inventory:",
     evidenceInventory,
     "",
+    "Cross-service graph evidence (from relationship index):",
+    graphFlowContext,
+    "",
     ...investigationTraceLines,
     "Relevant context:",
     context,
     "",
     "Answer requirements:",
     "- Answer in the same language as the user's question. If the question is in Bahasa Indonesia, answer in Bahasa Indonesia while keeping code identifiers unchanged.",
+    "- Focus on answering the user's EXACT question. Do not describe unrelated features that happen to appear in the context. If the question asks about signal flow, describe signal flow — not the edit feature, even if edit docs are in the context.",
+    "- For 'how does X work' questions, lead with code evidence (function names, SQL queries, cron jobs, queue operations). Use documentation only to provide context, not as the primary answer.",
+    "- Synthesize a coherent answer that connects documentation and code evidence. Do not just list sources — explain how the pieces fit together.",
+    "- For 'how does X work' questions, describe the end-to-end flow: entry points, processing steps, data flow, and output. Cite specific function names, SQL queries, queue operations, and config from the sources.",
+    "- When code chunks are retrieved alongside docs, use the code to confirm, deepen, or correct what the docs say. Code is ground truth — if docs and code disagree, trust the code.",
+    "- Quote specific function names, table names, and key lines from the source when explaining behavior. Do not paraphrase vaguely — point to the exact code.",
+    "- Structure the answer with clear sections when the question is broad. Use markdown headers, not just bullet lists.",
+    "- For cross-service flows, trace the path through services and explain each hop with evidence from the sources.",
+    "- The cross-service graph evidence shows confirmed code-level connections between services (calls, handles, defines, touches table). Use these to trace cross-service flows and describe how services connect. These edges are confirmed by code analysis, not inferred.",
+    "- Highlight design patterns, edge-case handling, and business rules visible in the code. These are insights the user cannot get from docs alone.",
+    "- Anti-hallucination guardrail: every claim must trace back to a specific source chunk. If you cannot point to a function name, SQL query, config value, or doc line that supports a claim, do not make the claim.",
+    "- Do not infer patterns, design decisions, or business rules that are not explicitly stated in the source code or documentation. Only describe what is directly visible in the code.",
+    "- When connecting services or describing flows, only state connections that are explicitly shown in sources (e.g., a cron job calling a function, a SQL query referencing a table, a queue consumer). Do not infer connections from naming similarity or domain knowledge.",
     "- Answer from the context only.",
     "- Answer the user's exact question. If retrieved context is about a different topic, say NOT_FOUND_IN_INDEXED_CODEBASE for the requested topic instead of answering the different topic.",
     "- Domain vocabulary hints are synonyms for retrieval and disambiguation, not evidence. Do not present a hint as a fact unless it is supported by the source context.",
@@ -6410,21 +7079,44 @@ async function main() {
     "- Treat the Evidence inventory as a whitelist for service, route, message, queue, exchange, and database table names.",
     "- Do not infer database table names from domain words. Only name tables that appear in metadata, SQL, or quoted source context.",
     "- Do not infer service involvement from class/client names alone. A service/repo is confirmed only when it appears in source metadata or an explicit source says it calls/handles the same route/message/function.",
-    "- Avoid words like likely, probably, might, or suggests for facts. Use 'not confirmed in retrieved context' instead.",
+    "- Use 'not confirmed in retrieved context' for gaps instead of hedging with likely, probably, might, or suggests.",
     "- If the evidence inventory says requested database/table evidence is not present, answer that the table impact is NOT_FOUND_IN_INDEXED_CODEBASE.",
     "- If the evidence inventory says requested service/flow evidence is not present, do not describe a flow; say what anchor was missing.",
-    "- For cross-service flows, separate confirmed facts from guesses.",
     "- Prefer evidence from RabbitMQ handlers, API routes, cron jobs, database usage, and config files.",
     deepMode ? "- Deep investigation mode is enabled. Include a short 'Investigation trace' section before the final answer, summarizing which indexed evidence paths were followed. Keep it concise and do not expose hidden chain-of-thought." : undefined,
     deepMode ? "- In deep investigation mode, use the expanded evidence set to follow route -> handler -> RPC/message -> consumer -> database/config/docs when those links are present. Stop at NEED_MORE_EVIDENCE when the next link is missing." : undefined,
     "- Mention queue, routing key, exchange, and database table names when present.",
     "- If a route calls a symbol/message and another service consumes or handles the same symbol/message, explain that link as confirmed only when both sides appear in sources.",
-    "- Do not add architecture, database, deployment, or cross-service sections unless the question asks for them or the context directly supports them.",
-    "- For general summary questions, do not mention cross-service flow unless the question explicitly asks about it.",
+    "- For general summary questions, only describe cross-service flow when the question asks about it or the context directly traces the flow through multiple services.",
     history.length > 0 ? "- This question may be a follow-up. Use the previous conversation to resolve pronouns like 'it', 'that', or 'the endpoint', but still ground your answer in the retrieved context above." : undefined,
   ].filter((line): line is string => typeof line === "string").join("\n")
 
-  const answer = await chat(prompt)
+  dlog("prompt-built", { promptChars: prompt.length, fallbackChunks: fallbackContextChunks.length })
+
+  const answerStart = nowMs()
+  let answer = await chat(prompt, deepMode ? config.deepMaxTokens : undefined)
+  dlog("stage", { name: "answer-llm", ms: elapsedMs(answerStart), outChars: answer.length })
+
+  // Quality gate: evaluate and retry if needed
+  if (config.qualityRetryEnabled && fallbackContextChunks.length > 0) {
+    const evalStart = nowMs()
+    const evaluation = await evaluateAnswerQuality(question, answer, fallbackContextChunks)
+    dlog("stage", { name: "quality-eval", ms: elapsedMs(evalStart), score: evaluation.score, threshold: config.qualityThreshold })
+    await logQualityEvaluation(question, evaluation, false, answer)
+
+    if (evaluation.score < config.qualityThreshold) {
+      console.log(`\n⚠ Answer quality low (${evaluation.score.toFixed(2)}), retrying with refinement...\n`)
+
+      const retryPrompt = `${prompt}\n\nPrevious answer had quality issues:\n${evaluation.issues.join("\n")}\n\nPlease improve the answer based on this feedback.`
+      const retryStart = nowMs()
+      answer = await chat(retryPrompt, deepMode ? config.deepMaxTokens : undefined)
+      dlog("stage", { name: "answer-llm-retry", ms: elapsedMs(retryStart), outChars: answer.length })
+
+      const retryEval = await evaluateAnswerQuality(question, answer, fallbackContextChunks)
+      await logQualityEvaluation(question, retryEval, true, answer)
+    }
+  }
+
   const displayAnswer = /\bNOT_FOUND_IN_INDEXED_CODEBASE\b/.test(answer) && !/\bI do not have\b/i.test(answer)
     ? `I do not have enough indexed evidence for the requested topic.\n\n${answer}`
     : answer
@@ -6432,16 +7124,49 @@ async function main() {
   console.log("\nANSWER\n")
   console.log(localizeAnswer(displayAnswer, question))
 
+  if (retrievalDegradation.bm25Unavailable) {
+    console.log("\n[degraded] keyword (BM25) search was unavailable for this query — answer based on vector results only.")
+  }
+
   console.log("\nSOURCES\n")
 
-  for (const chunk of fallbackContextChunks) {
+  // Build the complete set of chunks whose evidence was included in the prompt.
+  // fallbackContextChunks is the main set, but the prompt also includes structured
+  // facts (upstream/downstream/handler facts) extracted from endpointExtraTermChunks
+  // and phpCallerChunks, which are retrieved AFTER the main chunk set and may not
+  // be in fallbackContextChunks. Include them so source attribution is complete.
+  const sourcePayloads = [...fallbackContextChunks]
+  const seenKeys = new Set(
+    fallbackContextChunks.map(c => `${c.repoName}:${c.filePath}:${c.startLine}-${c.endLine}`),
+  )
+
+  for (const chunk of [...endpointExtraTermChunks, ...phpCallerChunks]) {
+    const p = chunk.payload
+    const key = `${p.repoName}:${p.filePath}:${p.startLine}-${p.endLine}`
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key)
+      sourcePayloads.push(p)
+    }
+  }
+
+  for (const chunk of sourcePayloads) {
     console.log(
       `- ${chunk.repoName}@${chunk.branchName ?? "unknown"} [${chunk.serviceType ?? "unknown"}] ${chunk.filePath}:${chunk.startLine}-${chunk.endLine} (${chunk.evidenceTypes?.join(", ") ?? "unknown"})`,
     )
   }
+
+  _askCompletedFull = true
+  dlog("ask-complete", { totalMs: elapsedMs(mainStart), sources: sourcePayloads.length, bm25Degraded: retrievalDegradation.bm25Unavailable })
 }
 
-main().catch(error => {
-  console.error(error)
-  process.exit(1)
-})
+main()
+  .then(() => {
+    if (!_askCompletedFull) {
+      dlog("ask-complete-early-return", { totalMs: elapsedMs(_askMainStart) })
+    }
+  })
+  .catch(error => {
+    dlog("ask-failed", { totalMs: elapsedMs(_askMainStart), error: error instanceof Error ? error.message : String(error) })
+    console.error(error)
+    process.exit(1)
+  })

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
+import { prewarmBM25Index } from "./lib/bm25-index.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -11,6 +12,15 @@ type AnswerCase = {
   required: string[]
   forbidden?: string[]
   timeoutMs?: number
+  // Structured assertions against the combined stdout+stderr output (debug logs).
+  // These check retrieval behavior, not just answer prose.
+  requiredOutput?: string[]
+  forbiddenOutput?: string[]
+  // Max number of SOURCES lines permitted in the answer. Asserts source precision.
+  maxSources?: number
+  // Soft performance budget: fail if internal ask (ask-complete-early-return or
+  // ask-complete totalMs) exceeds this. Generous default to avoid flakiness.
+  maxInternalMs?: number
 }
 
 type RunnerOptions = {
@@ -422,6 +432,130 @@ const cases: AnswerCase[] = [
       "NOT_FOUND_IN_INDEXED_CODEBASE",
     ],
   },
+  {
+    name: "retrieval: exact endpoint source precision excludes self-repo and docs",
+    smoke: true,
+    question: "Which services call the mrg API?",
+    required: [
+      "Endpoint definition found in",
+      "/mrg/api/v1/deposit/demo/",
+      "MrgV2Controller.SubmitDepositDemo",
+      "ims-tf2@develop",
+      "mrg-accounts@develop",
+      "accountReqDemo",
+    ],
+    forbidden: [
+      "local-codebase-ai@main",
+      "ims-tf2-docs@doctor",
+      "ims-tf2@doctor",
+      "GetAccountTypes in ims-tf2",
+      "CheckAccounts in ims-tf2",
+      "GetAccounts in ims-tf2",
+      "GetDemoAccounts in ims-tf2",
+      "GetContestAccounts in ims-tf2",
+    ],
+    // Assert retrieval behavior via debug logs.
+    requiredOutput: [
+      "early-return path=exact-endpoint-detail",
+    ],
+    forbiddenOutput: [
+      "llm-start call=language",
+      "stage name=expansion-retrieval",
+    ],
+    // Source precision: at most 4 sources (route def, handler, upstream, downstream).
+    maxSources: 4,
+    // Soft latency budget (10s, generous to avoid flakiness on cold BM25 load).
+    maxInternalMs: 10_000,
+  },
+  {
+    name: "retrieval: explicit endpoint question returns handler details",
+    smoke: true,
+    question: "What does /mrg/api/v1/deposit/demo/ do?",
+    required: [
+      "Endpoint definition found in",
+      "/mrg/api/v1/deposit/demo/",
+      "MrgV2Controller.SubmitDepositDemo",
+      "SubmitDepositDemo",
+      "mrg-accounts@develop",
+      "deposit_demo",
+      "users_demoid",
+    ],
+    forbidden: [
+      "local-codebase-ai@main",
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
+  {
+    name: "retrieval: repo-filtered query respects scope",
+    question: "What does /mrg/api/v1/deposit/demo/ do?",
+    args: ["--repo-name", "ims-tf2", "--branch", "develop"],
+    required: [
+      "/mrg/api/v1/deposit/demo/",
+      "MrgV2Controller.SubmitDepositDemo",
+      "ims-tf2@develop",
+    ],
+    forbidden: [
+      "local-codebase-ai@main",
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
+  {
+    name: "retrieval: Indonesian endpoint question uses heuristic language",
+    smoke: true,
+    question: "Bagaimana alur endpoint /mrg/api/v1/deposit/demo/?",
+    required: [
+      "/mrg/api/v1/deposit/demo/",
+      "MrgV2Controller.SubmitDepositDemo",
+    ],
+    forbidden: [
+      "local-codebase-ai@main",
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+    // Assert the language LLM call was skipped (heuristic was confident),
+    // rather than asserting an exact ms=0 which is brittle.
+    forbiddenOutput: [
+      "llm-start call=language",
+    ],
+  },
+  {
+    name: "retrieval: ambiguous identifier query falls through to LLM or heuristic",
+    // Question with no heuristic language tokens — exercises the LLM fallback
+    // path (or heuristic "unknown"). Previous version used "validation flow"
+    // which the English heuristic already matches, so it never tested fallback.
+    question: "MRG SubmitDepositDemo",
+    required: [
+      "SubmitDepositDemo",
+      "/mrg/api/v1/deposit/demo/",
+    ],
+    forbidden: [
+      "local-codebase-ai@main",
+      "NOT_FOUND_IN_INDEXED_CODEBASE",
+    ],
+  },
+  {
+    name: "retrieval: decision-intent question avoids deterministic endpoint path",
+    question: "Why was SubmitDepositDemo changed?",
+    required: [],
+    forbidden: [
+      "Endpoint definition found in",
+    ],
+    // Strengthen: must not take the deterministic endpoint-detail early return,
+    // and the process must not fail mid-answer.
+    forbiddenOutput: [
+      "early-return path=exact-endpoint-detail",
+    ],
+  },
+  {
+    name: "isignal auto copy flow (deep, ID)",
+    question: "bagaimana cara kerja isignal auto copy dari signal masuk sampai ke akun user",
+    smoke: true,
+    args: ["--deep"],
+    required: ["dsc_signals", "fa-trade-publisher"],
+    forbidden: ["edit feature"],
+    requiredOutput: ["doc-ref-code-retrieval"],
+    maxSources: 30,
+    maxInternalMs: 120_000,
+  },
 ]
 
 function parseOptions(argv: string[]): RunnerOptions {
@@ -461,6 +595,7 @@ async function ask(question: string, timeoutMs: number, args: string[] = [], opt
       timeout: timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
       windowsHide: true,
+      env: { ...process.env, ASK_DEBUG: "1" },
     },
   )
 
@@ -469,6 +604,21 @@ async function ask(question: string, timeoutMs: number, args: string[] = [], opt
 
 function findMissing(output: string, expected: string[]): string[] {
   return expected.filter(value => !output.includes(value))
+}
+
+function countSources(output: string): number {
+  const sourcesMatch = output.match(/\nSOURCES\n\n([\s\S]*)/)
+  if (!sourcesMatch?.[1]) return 0
+  return sourcesMatch[1]
+    .split("\n")
+    .map(line => line.trim())
+    .filter(line => line.startsWith("- ")).length
+}
+
+function parseInternalMs(output: string): number | undefined {
+  // Matches both ask-complete-early-return and ask-complete totalMs=N.
+  const match = output.match(/ask-complete(?:-early-return)? totalMs=(\d+)/)
+  return match?.[1] ? Number(match[1]) : undefined
 }
 
 async function main() {
@@ -495,32 +645,67 @@ async function main() {
     console.log(`Case filter: ${runnerOptions.grep}`)
   }
 
+  // Prewarm BM25 in-process before spawning children so each child hits the
+  // fast disk-cache path instead of contending on the cross-process build lock.
+  // Without this, the first smoke case can SIGTERM while waiting up to 300s
+  // for another process's build to finish.
+  console.log("Prewarming BM25 index...")
+  try {
+    await prewarmBM25Index()
+    console.log("BM25 index ready.")
+  } catch (err) {
+    console.warn(`BM25 prewarm failed (non-fatal): ${err instanceof Error ? err.message : err}`)
+  }
+
   for (const answerCase of selectedCases) {
     process.stdout.write(`Running: ${answerCase.name}... `)
 
     try {
       const output = await ask(answerCase.question, answerCase.timeoutMs ?? 180_000, answerCase.args, runnerOptions)
+      const failures: string[] = []
+
+      // 1. Answer-content assertions (required / forbidden against full output).
       const missing = findMissing(output, answerCase.required)
       const presentForbidden = (answerCase.forbidden ?? []).filter(value => output.includes(value))
+      if (missing.length > 0) {
+        failures.push(`Missing required evidence: ${missing.join(", ")}`)
+      }
+      if (presentForbidden.length > 0) {
+        failures.push(`Found forbidden output: ${presentForbidden.join(", ")}`)
+      }
 
-      if (missing.length > 0 || presentForbidden.length > 0) {
+      // 2. Structured debug-output assertions.
+      const missingOutput = findMissing(output, answerCase.requiredOutput ?? [])
+      const presentForbiddenOutput = (answerCase.forbiddenOutput ?? []).filter(value => output.includes(value))
+      if (missingOutput.length > 0) {
+        failures.push(`Missing required debug output: ${missingOutput.join(", ")}`)
+      }
+      if (presentForbiddenOutput.length > 0) {
+        failures.push(`Found forbidden debug output: ${presentForbiddenOutput.join(", ")}`)
+      }
+
+      // 3. Source-count precision budget.
+      if (answerCase.maxSources !== undefined) {
+        const sourceCount = countSources(output)
+        if (sourceCount > answerCase.maxSources) {
+          failures.push(`Source count ${sourceCount} exceeds max ${answerCase.maxSources}`)
+        }
+      }
+
+      // 4. Soft performance budget (internal ask time).
+      if (answerCase.maxInternalMs !== undefined) {
+        const internalMs = parseInternalMs(output)
+        if (internalMs !== undefined && internalMs > answerCase.maxInternalMs) {
+          failures.push(`Internal ask ${internalMs}ms exceeds budget ${answerCase.maxInternalMs}ms`)
+        }
+      }
+
+      if (failures.length > 0) {
         failed++
         console.log("FAILED")
-
-        if (missing.length > 0) {
-          console.log("  Missing required evidence:")
-          for (const value of missing) {
-            console.log(`  - ${value}`)
-          }
+        for (const f of failures) {
+          console.log(`  - ${f}`)
         }
-
-        if (presentForbidden.length > 0) {
-          console.log("  Found forbidden output:")
-          for (const value of presentForbidden) {
-            console.log(`  - ${value}`)
-          }
-        }
-
         console.log("  Output preview:")
         console.log(output.slice(0, 2_000))
       } else {

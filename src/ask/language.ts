@@ -15,6 +15,12 @@ export function heuristicAnswerLanguage(question: string): AnswerLanguage {
 
 export async function detectAnswerLanguage(question: string): Promise<AnswerLanguage> {
   const heuristic = heuristicAnswerLanguage(question)
+
+  // Skip the LLM call when the heuristic is confident. Saves ~2s per request
+  // for clearly English or clearly Indonesian questions. Only ambiguous
+  // questions (heuristic returns "unknown") fall through to the LLM.
+  if (heuristic !== "unknown") return heuristic
+
   const detected = await detectPreferredLanguage(question)
 
   if (detected === "unknown") return heuristic
