@@ -410,7 +410,7 @@ app.post("/api/ask", async (request, response) => {
   const reqStart = Date.now()
   console.log(`[ask][${requestId}] start q=${question.slice(0, 80)}${question.length > 80 ? "…" : ""} deep=${!!body.deep} limit=${body.limit ?? "-"}`)
 
-  const args = ["--import", "./register-ts-node.mjs", "src/ask.ts", question]
+  const args = ["--import", "tsx", "src/ask.ts", question]
 
   if (body.limit) {
     args.push("--limit", String(body.limit))
@@ -498,7 +498,7 @@ app.post("/api/ask/stream", (request, response) => {
 
   sendEvent({ type: "thinking" })
 
-  const args = ["--import", "./register-ts-node.mjs", "src/ask.ts", question]
+  const args = ["--import", "tsx", "src/ask.ts", question]
   if (body.limit) args.push("--limit", String(body.limit))
   if (body.deep) args.push("--deep")
   if (body.chatModel?.trim()) args.push("--chat-model", body.chatModel.trim())

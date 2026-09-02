@@ -47,6 +47,7 @@ import { buildCommentRuleAnswer, buildDocumentationEligibilityAnswer, buildDocum
 import { buildVocabularyAnswer } from "./ask/vocabulary-answers.js"
 import { ctx } from "./ask/context.js"
 import { neuralRerankFallback } from "./lib/reranker.js"
+import { routeModel } from "./ask/model-router.js"
 
 
 // Populate shared context for extracted modules — must be after all const declarations above
@@ -148,6 +149,7 @@ function localizeAnswer(answer: string, question: string): string {
 }
 async function main() {
   const mainStart = nowMs()
+  routeModel(question, deepMode, Boolean(options.chatModel))
   const provider = resolveChatProvider()
   dlog("ask-start", {
     provider,

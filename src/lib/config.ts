@@ -3,6 +3,12 @@ export const config = {
   ollamaUrl: process.env.OLLAMA_URL ?? "http://localhost:11434",
   collectionName: process.env.QDRANT_COLLECTION ?? "code_chunks",
 
+  // Model routing: route simple queries to a fast model, complex to the full model.
+  // Set SIMPLE_MODEL to a fast local model (e.g. qwen2.5-coder:3b).
+  // Leave empty to disable routing (always use CHAT_MODEL).
+  simpleModel: process.env.SIMPLE_MODEL ?? "",
+  deepModel: process.env.DEEP_MODEL ?? "",
+
   // Reranker model — neural cross-encoder for re-scoring retrieved chunks.
   // Set to empty string or unset to disable (falls back to heuristic reranker).
   // Default: qllama/bge-reranker-v2-m3 (568M params, 636MB, multilingual+code)
