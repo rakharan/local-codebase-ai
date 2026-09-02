@@ -14,9 +14,11 @@
 ## Current phase
 - Phase 6 COMPLETE (merged to main 2026-06-15)
 - Answer quality gate committed (answer-evaluation.ts, config.qualityThreshold, retry-on-low-score)
-- Reliability hardening DONE (uncommitted): structured failure logging (BM25 retrieve, LLM call), Qdrant index-error narrowing, `/api/ready` readiness probe, BM25 TTL configurable + point-count fast-path, Qdrant server-side evidence-type filters, bounded embedding concurrency, lock-protected `npm run reindex-all`
-- Config externalized: chunker/ollama/docs constants + doc-folder→repo map now env-overridable
-- DEFERRED: split ask.ts (~6500 lines) — blocked on runnable characterization tests (answer-regression.ts needs live Qdrant+Ollama stack); do not refactor blind
+- Reliability hardening DONE: structured failure logging, Qdrant index-error narrowing, `/api/ready` readiness probe, BM25 TTL configurable, bounded embedding concurrency, lock-protected reindex
+- Config externalized: chunker/ollama/docs constants + doc-folder→repo map env-overridable
+- ask.ts SPLIT DONE (2026-09-02): 7193→1679 lines, 14 modules under src/ask/, ctx singleton for shared state
+- BGE neural reranker DONE: src/lib/reranker.ts, qllama/bge-reranker-v2-m3 (636MB), top-20 chunks in ~5.6s
+- tsx DONE: replaced ts-node, near-instant startup
 - Next: smoke-test cross-service queries; map `channelsconfig.php` + `faconfig.php` to `CONFIG_CONST_MAP`
 
 ## Open gaps (`docs/phase4-gap-report-2026-06-11.md`)
