@@ -69,8 +69,8 @@ export const config = {
   maxDocChunkChars: Number(process.env.MAX_DOC_CHUNK_CHARS ?? 1_500),
 
   // Self-learning: meta-evaluator model (must differ from chatModel to avoid self-eval bias).
-  // Uses the same 9router/cloud provider as chat. Default: prod/claude-sonnet-5.
-  evalModel: process.env.EVAL_MODEL ?? "prod/glm-5.2",
+  // Uses the same 9router/cloud provider as chat. Default: prod/glm-5.3.
+  evalModel: process.env.EVAL_MODEL ?? "prod/glm-5.3",
 
   // Self-learning: path to learning rules JSON file. Rules are injected into
   // the LLM prompt to correct systematic answer errors.

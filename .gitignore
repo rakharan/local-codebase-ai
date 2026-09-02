@@ -16,3 +16,5 @@ repo-docs-*/
 local-codebase-ai-phase5.docx
 local-codebase-ai-plan-v2.md
 local-codebase-ai-plan.docx
+src/ask/extraction_plan.json
+src/ask/comprehensive_plan.json

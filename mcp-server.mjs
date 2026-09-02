@@ -48,7 +48,7 @@ const TOOLS = [
       type: "object",
       properties: {
         trigger: { type: "string", description: "Keyword or phrase that activates this rule (e.g. 'deposit flow')" },
-        type: { type: "string", enum: ["prompt_directive", "retrieval_boost"], description: "prompt_directive = tell LLM what to focus on; retrieval_boost = add search terms to BM25 query" },
+        type: { type: "string", enum: ["prompt_directive", "retrieval_boost", "query_rewrite"], description: "prompt_directive = tell LLM what to focus on; retrieval_boost = add search terms to BM25 query; query_rewrite = replace retrieval query entirely" },
         content: { type: "string", description: "For prompt_directive: instruction text. For retrieval_boost: extra search terms (space-separated)" },
         rationale: { type: "string", description: "Why this rule was created (what was wrong)" },
       },

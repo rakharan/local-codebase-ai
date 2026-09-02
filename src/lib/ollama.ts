@@ -140,7 +140,7 @@ function getOpenAIApiKey(): string {
     return config.geminiApiKey ?? config.groqApiKey ?? config.openAIApiKey ?? ""
 }
 
-async function chatAnthropic(system: string, userContent: string, maxTokens?: number): Promise<string> {
+async function chatAnthropic(system: string, userContent: string, maxTokens?: number, modelOverride?: string): Promise<string> {
     const baseUrl = config.anthropicBaseUrl.replace(/\/$/, "")
     // Truncate if exceeds cloud model context limit
     const truncatedContent = userContent.length > MAX_CLOUD_PROMPT_CHARS
@@ -154,7 +154,7 @@ async function chatAnthropic(system: string, userContent: string, maxTokens?: nu
             "anthropic-version": "2023-06-01",
         },
         body: JSON.stringify({
-            model: config.chatModel,
+            model: modelOverride ?? config.chatModel,
             max_tokens: maxTokens ?? config.maxTokens,
             system,
             messages: [{ role: "user", content: truncatedContent }],
@@ -169,7 +169,7 @@ async function chatAnthropic(system: string, userContent: string, maxTokens?: nu
     return data.content?.find(b => b.type === "text")?.text?.trim() ?? ""
 }
 
-async function chatOpenAI(messages: Array<{ role: string; content: string }>, jsonMode = false, maxTokens?: number): Promise<string> {
+async function chatOpenAI(messages: Array<{ role: string; content: string }>, jsonMode = false, maxTokens?: number, modelOverride?: string): Promise<string> {
     const baseUrl = getOpenAIBaseUrl()
     const apiKey = getOpenAIApiKey()
 
@@ -182,7 +182,7 @@ async function chatOpenAI(messages: Array<{ role: string; content: string }>, js
     })
 
     const body: Record<string, unknown> = {
-        model: config.chatModel,
+        model: modelOverride ?? config.chatModel,
         messages: truncatedMessages,
         max_tokens: maxTokens ?? config.maxTokens,
         stream: false,
@@ -478,16 +478,17 @@ export async function detectPreferredLanguage(input: string): Promise<AnswerLang
     }
 }
 
-export async function chatJson(systemPrompt: string, userPrompt: string): Promise<string> {
+export async function chatJson(systemPrompt: string, userPrompt: string, modelOverride?: string): Promise<string> {
     const start = nowMs()
     const provider = resolveChatProvider()
     const callTag = "chatJson"
+    const model = modelOverride ?? config.chatModel
 
     if (isDebugEnabled()) {
         dlog("llm-start", {
             call: callTag,
             provider,
-            model: config.chatModel,
+            model,
             systemChars: systemPrompt.length,
             userChars: userPrompt.length,
             numCtx: config.numCtx,
@@ -503,18 +504,18 @@ export async function chatJson(systemPrompt: string, userPrompt: string): Promis
         let result: string
 
         if (isAnthropicCompatible()) {
-            result = await chatAnthropic(systemPrompt, userPrompt)
+            result = await chatAnthropic(systemPrompt, userPrompt, undefined, modelOverride)
         } else if (isOpenAICompatible()) {
-            result = await chatOpenAI(messages, true)
+            result = await chatOpenAI(messages, true, undefined, modelOverride)
         } else {
             // Ollama path
-            const isQwen3 = config.chatModel.startsWith("qwen3")
+            const isQwen3 = model.startsWith("qwen3")
 
             const res = await fetchWithRetry(`${config.ollamaUrl}/api/chat`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    model: config.chatModel,
+                    model,
                     stream: false,
                     format: "json",
                     options: { temperature: 0, num_ctx: config.numCtx },
@@ -533,7 +534,7 @@ export async function chatJson(systemPrompt: string, userPrompt: string): Promis
                 dlog("llm-fail", {
                     call: callTag,
                     provider,
-                    model: config.chatModel,
+                    model,
                     ms: elapsedMs(start),
                     httpStatus: res.status,
                 })

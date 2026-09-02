@@ -62,6 +62,16 @@ export async function createLearningRule(input: {
 }): Promise<LearningRule> {
   const rules = await loadAllLearningRules()
   const now = new Date().toISOString()
+
+  // Deactivate existing active rules with same trigger+type to prevent conflicts
+  for (const r of rules) {
+    if (r.status === "active" && r.trigger.toLowerCase() === input.trigger.toLowerCase() && r.type === input.type) {
+      r.status = "rolled_back"
+      r.rolledBackAt = now
+      r.rollbackReason = "Superseded by newer rule for same trigger+type"
+    }
+  }
+
   const rule: LearningRule = {
     id: `rule-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     type: input.type,
