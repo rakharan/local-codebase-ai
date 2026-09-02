@@ -4,7 +4,7 @@
  *
  * Output is stable (no timestamps) for Hermes monitor-mode hash suppression.
  *
- * Usage: node --import ./register-ts-node.mjs scripts/check-code-changes.ts
+ * Usage: npx tsx scripts/check-code-changes.ts
  */
 
 import fs from "node:fs/promises"

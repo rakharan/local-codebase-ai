@@ -1,6 +1,9 @@
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
+import { config as dotenvConfig } from "dotenv"
 import { prewarmBM25Index } from "./lib/bm25-index.js"
+
+dotenvConfig() // load .env before spawning child processes
 
 const execFileAsync = promisify(execFile)
 
@@ -584,7 +587,7 @@ async function ask(question: string, timeoutMs: number, args: string[] = [], opt
     process.execPath,
     [
       "--import",
-      "./register-ts-node.mjs",
+      "tsx",
       "src/ask.ts",
       question,
       ...(options.chatModel ? ["--chat-model", options.chatModel] : []),

@@ -924,6 +924,87 @@ app.post("/api/registry/entries/:entryName/reindex", async (request, response) =
   }
 })
 
+// Graph endpoint — returns relationship edges for visualization
+app.get("/api/graph", async (request, response) => {
+  try {
+    const repoFilter = request.query.repo as string | undefined
+    const edgeTypeFilter = request.query.type as string | undefined
+    const limit = Math.min(Number(request.query.limit ?? 500), 2000)
+
+    const allEdges = await readRelationshipGraph()
+    let edges = allEdges
+
+    if (repoFilter) {
+      edges = edges.filter(e => e.repoName === repoFilter || e.repoName.includes(repoFilter))
+    }
+
+    if (edgeTypeFilter) {
+      edges = edges.filter(e => e.type === edgeTypeFilter)
+    }
+
+    // Build nodes and edges for vis.js format.
+    // Each repo is a node. Edges connect repos that share a route/handler/symbol/table.
+    // For CALLS_HTTP_ENDPOINT: from = repoName, to = handler's repo (if known from toRoute)
+    // For TOUCHES_TABLE: node per repo, edge to a table node
+    const nodeSet = new Map<string, { id: string; label: string; group: string }>()
+    const edgeList: Array<{ from: string; to: string; label: string; type: string }> = []
+
+    function addNode(id: string, group: string) {
+      if (!nodeSet.has(id)) {
+        nodeSet.set(id, { id, label: id, group })
+      }
+    }
+
+    for (const edge of edges.slice(0, limit)) {
+      const repo = edge.repoName
+      addNode(repo, edge.serviceType)
+
+      if (edge.type === "HANDLES_HTTP_ENDPOINT" && edge.toRoute) {
+        // Route node
+        const routeId = `route:${edge.toRoute}`
+        addNode(routeId, "route")
+        edgeList.push({ from: repo, to: routeId, label: `handles ${edge.httpMethod ?? ""}`, type: edge.type })
+      } else if (edge.type === "CALLS_HTTP_ENDPOINT" && edge.toRoute) {
+        const routeId = `route:${edge.toRoute}`
+        addNode(routeId, "route")
+        edgeList.push({ from: repo, to: routeId, label: `calls via ${edge.viaConstant ?? ""}`, type: edge.type })
+      } else if (edge.type === "TOUCHES_TABLE" && edge.table) {
+        const tableId = `table:${edge.table}`
+        addNode(tableId, "table")
+        edgeList.push({ from: repo, to: tableId, label: "touches", type: edge.type })
+      } else if (edge.type === "CALLS_RPC_FUNC" && edge.rpcFunc) {
+        const rpcId = `rpc:${edge.rpcFunc}`
+        addNode(rpcId, "rpc")
+        edgeList.push({ from: repo, to: rpcId, label: "calls RPC", type: edge.type })
+      } else if (edge.type === "DEFINES_SYMBOL" && edge.symbol) {
+        const symId = `symbol:${edge.symbol}`
+        addNode(symId, "symbol")
+        edgeList.push({ from: repo, to: symId, label: "defines", type: edge.type })
+      } else if (edge.type === "CALLS_SYMBOL" && edge.calleeSymbol) {
+        const symId = `symbol:${edge.calleeSymbol}`
+        addNode(symId, "symbol")
+        edgeList.push({ from: repo, to: symId, label: "calls", type: edge.type })
+      }
+    }
+
+    // Edge type counts for legend
+    const typeCounts: Record<string, number> = {}
+    for (const e of edges) {
+      typeCounts[e.type] = (typeCounts[e.type] ?? 0) + 1
+    }
+
+    response.json({
+      nodes: [...nodeSet.values()],
+      edges: edgeList,
+      totalEdges: edges.length,
+      typeCounts,
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
 app.get("/api/knowledge/notes", async (_request, response) => {
   try {
     response.json({

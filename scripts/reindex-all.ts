@@ -8,7 +8,7 @@
  * instead of starting a second concurrent reindex.
  *
  * Usage:
- *   node --import ./register-ts-node.mjs scripts/reindex-all.ts <repos-folder>
+ *   npx tsx scripts/reindex-all.ts <repos-folder>
  *
  * Exit codes:
  *   0  reindex completed
@@ -72,7 +72,7 @@ async function releaseLock(): Promise<void> {
 function runStep(label: string, args: string[]): Promise<number> {
   console.log(`\n━━━ ${label} ━━━`)
   return new Promise(resolve => {
-    const child = spawn(process.execPath, ["--import", "./register-ts-node.mjs", ...args], {
+    const child = spawn(process.execPath, ["--import", "tsx", ...args], {
       stdio: "inherit",
     })
     child.on("close", code => {
@@ -84,7 +84,7 @@ function runStep(label: string, args: string[]): Promise<number> {
 async function main(): Promise<number> {
   const targetDir = process.argv[2]
   if (!targetDir) {
-    console.error("Usage: node --import ./register-ts-node.mjs scripts/reindex-all.ts <repos-folder>")
+    console.error("Usage: npx tsx scripts/reindex-all.ts <repos-folder>")
     return 1
   }
 

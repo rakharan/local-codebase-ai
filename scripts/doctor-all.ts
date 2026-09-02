@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Batch script: run Repo Doctor + index-doctor on all repos in a folder.
- * Usage: node --import ./register-ts-node.mjs scripts/doctor-all.ts C:/GIT/work
+ * Usage: npx tsx scripts/doctor-all.ts C:/GIT/work
  */
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -9,7 +9,7 @@ import { runDoctor } from '../src/doctor/doctor.js';
 
 const targetDir = process.argv[2];
 if (!targetDir) {
-  console.error('Usage: node --import ./register-ts-node.mjs scripts/doctor-all.ts <repos-folder>');
+  console.error('Usage: npx tsx scripts/doctor-all.ts <repos-folder>');
   process.exit(1);
 }
 
@@ -67,7 +67,7 @@ async function main() {
   console.log(`\nDone. ${total.length}/${repos.length} repos processed successfully.`);
   console.log(`Output: ${outputBase}`);
   console.log(`\nTo index all into RAG, run:`);
-  console.log(`  node --import ./register-ts-node.mjs scripts/index-doctor-all.ts`);
+  console.log(`  npx tsx scripts/index-doctor-all.ts`);
 }
 
 main().catch(e => { console.error(e); process.exit(1); });

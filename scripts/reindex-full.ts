@@ -7,10 +7,10 @@
  * logic changes and existing points need cleaning.
  *
  * Usage:
- *   node --import ./register-ts-node.mjs scripts/reindex-full.ts <repos-folder> [docs-folder]
+ *   npx tsx scripts/reindex-full.ts <repos-folder> [docs-folder]
  *
  * Example:
- *   node --import ./register-ts-node.mjs scripts/reindex-full.ts C:/GIT/work C:/GIT/work/my-website/docs
+ *   npx tsx scripts/reindex-full.ts C:/GIT/work C:/GIT/work/my-website/docs
  *
  * Exit codes:
  *   0  reindex completed
@@ -72,7 +72,7 @@ async function releaseLock(): Promise<void> {
 function runStep(label: string, args: string[]): Promise<number> {
   console.log(`\n━━━ ${label} ━━━`)
   return new Promise(resolve => {
-    const child = spawn(process.execPath, ["--import", "./register-ts-node.mjs", ...args], {
+    const child = spawn(process.execPath, ["--import", "tsx", ...args], {
       stdio: "inherit",
     })
     child.on("close", code => resolve(code ?? 1))
@@ -84,8 +84,8 @@ async function main(): Promise<number> {
   const docsFolder = process.argv[3]
 
   if (!reposFolder) {
-    console.error("Usage: node --import ./register-ts-node.mjs scripts/reindex-full.ts <repos-folder> [docs-folder]")
-    console.error("Example: node --import ./register-ts-node.mjs scripts/reindex-full.ts C:/GIT/work C:/GIT/work/my-website/docs")
+    console.error("Usage: npx tsx scripts/reindex-full.ts <repos-folder> [docs-folder]")
+    console.error("Example: npx tsx scripts/reindex-full.ts C:/GIT/work C:/GIT/work/my-website/docs")
     return 1
   }
 

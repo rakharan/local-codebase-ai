@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Batch script: index all Doctor output folders into RAG.
- * Usage: node --import ./register-ts-node.mjs scripts/index-doctor-all.ts
+ * Usage: npx tsx scripts/index-doctor-all.ts
  */
 import path from 'node:path';
 import fs from 'node:fs/promises';

@@ -13,8 +13,8 @@
  *   - /api/ask deep=true completes (generous timeout)
  *
  * Usage:
- *   node --import ./register-ts-node.mjs scripts/api-regression.ts
- *   node --import ./register-ts-node.mjs scripts/api-regression.ts --base-url http://localhost:9191
+ *   npx tsx scripts/api-regression.ts
+ *   npx tsx scripts/api-regression.ts --base-url http://localhost:9191
  */
 
 const BASE_URL = parseBaseUrl(process.argv.slice(2))

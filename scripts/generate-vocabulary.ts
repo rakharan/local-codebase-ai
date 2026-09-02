@@ -2,7 +2,7 @@
 /**
  * Auto-generates config/services.json entries from Doctor reports.
  * Adds entries for repos not already covered.
- * Usage: node --import ./register-ts-node.mjs scripts/generate-vocabulary.ts
+ * Usage: npx tsx scripts/generate-vocabulary.ts
  */
 import path from 'node:path';
 import fs from 'node:fs/promises';
