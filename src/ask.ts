@@ -1,3 +1,4 @@
+import "./lib/env.js"
 import path from "node:path"
 import fs from "node:fs/promises"
 import { Command } from "commander"
@@ -901,10 +902,12 @@ async function main() {
   dlog("stage", { name: "merge-chunks", ms: elapsedMs(mergeStart), retrievedChunks: retrievedChunks.length })
 
   // Neural reranker: re-score top chunks using BGE cross-encoder.
-  // Runs after heuristic merge, before account-type/deep-investigation expansion.
+  // Skip for deterministic fast paths where retrieval order is already optimal —
+  // saves 5-6s latency on CPU for route matches, inventory, and exact symbol lookups.
   // Falls back to heuristic order if reranker unavailable.
   let rerankedChunks = retrievedChunks
-  if (retrievedChunks.length > 0) {
+  const skipRerank = exactRoutes.length > 0 || isGreeting(question) || isConversationalFollowUp(question, history.length > 0)
+  if (retrievedChunks.length > 0 && !skipRerank) {
     rerankedChunks = await timeStage("neural-rerank", () =>
       neuralRerankFallback(question, retrievedChunks),
     )

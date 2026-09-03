@@ -1,9 +1,8 @@
+import "./lib/env.js"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
-import { config as dotenvConfig } from "dotenv"
 import { prewarmBM25Index } from "./lib/bm25-index.js"
 
-dotenvConfig() // load .env before spawning child processes
 
 const execFileAsync = promisify(execFile)
 

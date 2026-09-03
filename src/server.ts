@@ -1,5 +1,4 @@
-import { config as dotenvConfig } from "dotenv"
-dotenvConfig()
+import "./lib/env.js"
 
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -927,17 +926,20 @@ app.post("/api/registry/entries/:entryName/reindex", async (request, response) =
   }
 })
 
-// Graph endpoint — returns relationship edges for visualization
+// Graph endpoint — returns cross-service relationship graph for visualization.
+// Shows repo-to-repo connections: which service calls/handles the same routes,
+// touches the same tables, calls the same RPC functions.
 app.get("/api/graph", async (request, response) => {
   try {
     const repoFilter = request.query.repo as string | undefined
     const edgeTypeFilter = request.query.type as string | undefined
-    const limit = Math.min(Number(request.query.limit ?? 500), 2000)
+    const limit = Math.min(Number(request.query.limit ?? 2000), 5000)
 
     const allEdges = await readRelationshipGraph()
     let edges = allEdges
 
     if (repoFilter) {
+      // Show this repo + all repos it connects to
       edges = edges.filter(e => e.repoName === repoFilter || e.repoName.includes(repoFilter))
     }
 
@@ -945,61 +947,136 @@ app.get("/api/graph", async (request, response) => {
       edges = edges.filter(e => e.type === edgeTypeFilter)
     }
 
-    // Build nodes and edges for vis.js format.
-    // Each repo is a node. Edges connect repos that share a route/handler/symbol/table.
-    // For CALLS_HTTP_ENDPOINT: from = repoName, to = handler's repo (if known from toRoute)
-    // For TOUCHES_TABLE: node per repo, edge to a table node
-    const nodeSet = new Map<string, { id: string; label: string; group: string }>()
-    const edgeList: Array<{ from: string; to: string; label: string; type: string }> = []
+    // Group edges by their shared resource (route, table, RPC func, symbol)
+    // Then build repo-to-repo connections: if repo A calls route X and repo B handles route X,
+    // create edge A → B with the shared resource as label.
+    const byRoute = new Map<string, { callers: Set<string>; handlers: Set<string> }>()
+    const byTable = new Map<string, Set<string>>()
+    const byRpc = new Map<string, Set<string>>()
+    const bySymbol = new Map<string, { definers: Set<string>; callers: Set<string> }>()
 
-    function addNode(id: string, group: string) {
-      if (!nodeSet.has(id)) {
-        nodeSet.set(id, { id, label: id, group })
-      }
-    }
-
-    for (const edge of edges.slice(0, limit)) {
+    for (const edge of edges) {
       const repo = edge.repoName
-      addNode(repo, edge.serviceType)
+      if (!repo) continue
 
       if (edge.type === "HANDLES_HTTP_ENDPOINT" && edge.toRoute) {
-        // Route node
-        const routeId = `route:${edge.toRoute}`
-        addNode(routeId, "route")
-        edgeList.push({ from: repo, to: routeId, label: `handles ${edge.httpMethod ?? ""}`, type: edge.type })
+        const r = edge.toRoute
+        if (!byRoute.has(r)) byRoute.set(r, { callers: new Set(), handlers: new Set() })
+        byRoute.get(r)!.handlers.add(repo)
       } else if (edge.type === "CALLS_HTTP_ENDPOINT" && edge.toRoute) {
-        const routeId = `route:${edge.toRoute}`
-        addNode(routeId, "route")
-        edgeList.push({ from: repo, to: routeId, label: `calls via ${edge.viaConstant ?? ""}`, type: edge.type })
+        const r = edge.toRoute
+        if (!byRoute.has(r)) byRoute.set(r, { callers: new Set(), handlers: new Set() })
+        byRoute.get(r)!.callers.add(repo)
       } else if (edge.type === "TOUCHES_TABLE" && edge.table) {
-        const tableId = `table:${edge.table}`
-        addNode(tableId, "table")
-        edgeList.push({ from: repo, to: tableId, label: "touches", type: edge.type })
+        const t = edge.table
+        if (!byTable.has(t)) byTable.set(t, new Set())
+        byTable.get(t)!.add(repo)
       } else if (edge.type === "CALLS_RPC_FUNC" && edge.rpcFunc) {
-        const rpcId = `rpc:${edge.rpcFunc}`
-        addNode(rpcId, "rpc")
-        edgeList.push({ from: repo, to: rpcId, label: "calls RPC", type: edge.type })
+        const f = edge.rpcFunc
+        if (!byRpc.has(f)) byRpc.set(f, new Set())
+        byRpc.get(f)!.add(repo)
       } else if (edge.type === "DEFINES_SYMBOL" && edge.symbol) {
-        const symId = `symbol:${edge.symbol}`
-        addNode(symId, "symbol")
-        edgeList.push({ from: repo, to: symId, label: "defines", type: edge.type })
+        const s = edge.symbol
+        if (!bySymbol.has(s)) bySymbol.set(s, { definers: new Set(), callers: new Set() })
+        bySymbol.get(s)!.definers.add(repo)
       } else if (edge.type === "CALLS_SYMBOL" && edge.calleeSymbol) {
-        const symId = `symbol:${edge.calleeSymbol}`
-        addNode(symId, "symbol")
-        edgeList.push({ from: repo, to: symId, label: "calls", type: edge.type })
+        const s = edge.calleeSymbol
+        if (!bySymbol.has(s)) bySymbol.set(s, { definers: new Set(), callers: new Set() })
+        bySymbol.get(s)!.callers.add(repo)
       }
     }
+
+    // Build repo-to-repo edges
+    const nodeSet = new Map<string, { id: string; label: string; group: string; connections: number }>()
+    const edgeMap = new Map<string, { from: string; to: string; label: string; type: string; width: number }>()
+
+    function addNode(repo: string, serviceType: string) {
+      if (!nodeSet.has(repo)) {
+        nodeSet.set(repo, { id: repo, label: repo, group: serviceType, connections: 0 })
+      }
+    }
+
+    function addEdge(from: string, to: string, label: string, type: string) {
+      const key = `${from}|${to}|${type}`
+      if (from === to) return // skip self-loops
+      if (!edgeMap.has(key)) {
+        addNode(from, "unknown")
+        addNode(to, "unknown")
+        edgeMap.set(key, { from, to, label, type, width: 1 })
+      } else {
+        edgeMap.get(key)!.width++
+      }
+      nodeSet.get(from)!.connections++
+      nodeSet.get(to)!.connections++
+    }
+
+    // Route-based: caller → handler
+    for (const [route, { callers, handlers }] of byRoute) {
+      for (const caller of callers) {
+        for (const handler of handlers) {
+          addEdge(caller, handler, route, "HTTP")
+        }
+      }
+    }
+
+    // Table-based: repos that touch the same table → connected
+    for (const [table, repos] of byTable) {
+      const repoList = [...repos]
+      for (let i = 0; i < repoList.length; i++) {
+        for (let j = i + 1; j < repoList.length; j++) {
+          addEdge(repoList[i]!, repoList[j]!, `table: ${table}`, "TABLE")
+        }
+      }
+    }
+
+    // RPC-based: repos that call the same RPC → connected
+    for (const [func, repos] of byRpc) {
+      const repoList = [...repos]
+      for (let i = 0; i < repoList.length; i++) {
+        for (let j = i + 1; j < repoList.length; j++) {
+          addEdge(repoList[i]!, repoList[j]!, `RPC: ${func}`, "RPC")
+        }
+      }
+    }
+
+    // Symbol-based: caller → definer
+    for (const [symbol, { definers, callers }] of bySymbol) {
+      for (const caller of callers) {
+        for (const definer of definers) {
+          addEdge(caller, definer, symbol, "SYMBOL")
+        }
+      }
+    }
+
+    // Assign service types from edges
+    for (const edge of edges.slice(0, limit)) {
+      if (edge.repoName && nodeSet.has(edge.repoName)) {
+        const node = nodeSet.get(edge.repoName)!
+        if (node.group === "unknown") node.group = edge.serviceType
+      }
+    }
+
+    // Sort nodes by connection count (most connected first)
+    const nodes = [...nodeSet.values()].sort((a, b) => b.connections - a.connections)
+    const edgeList = [...edgeMap.values()].sort((a, b) => b.width - a.width)
 
     // Edge type counts for legend
     const typeCounts: Record<string, number> = {}
-    for (const e of edges) {
+    for (const e of edgeList) {
       typeCounts[e.type] = (typeCounts[e.type] ?? 0) + 1
     }
 
     response.json({
-      nodes: [...nodeSet.values()],
-      edges: edgeList,
-      totalEdges: edges.length,
+      nodes: nodes.map(n => ({ id: n.id, label: n.label, group: n.group, value: n.connections })),
+      edges: edgeList.map(e => ({
+        from: e.from,
+        to: e.to,
+        label: e.label,
+        type: e.type,
+        width: e.width,
+      })),
+      totalEdges: edgeList.length,
+      totalNodes: nodes.length,
       typeCounts,
     })
   } catch (error) {

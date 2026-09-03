@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-import { config as dotenvConfig } from "dotenv"
-dotenvConfig()
+import "../src/lib/env.js"
 
 /**
  * Batch script: run Repo Doctor + index-doctor on all repos in a folder.

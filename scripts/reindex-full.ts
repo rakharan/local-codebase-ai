@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-import { config as dotenvConfig } from "dotenv"
-dotenvConfig()
+import "../src/lib/env.js"
 
 /**
  * Lock-protected FULL reindex: doctor-all → index-doctor-all → index-repo (per repo) → index-docs.

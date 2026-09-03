@@ -1,5 +1,4 @@
-import { config as dotenvConfig } from "dotenv"
-dotenvConfig()
+import "./lib/env.js"
 
 import path from "node:path"
 import fs from "node:fs/promises"
