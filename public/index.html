@@ -4093,41 +4093,52 @@ function renderGraph() {
     edges.map((e, i) => {
       const col = GRAPH_EDGE_COLORS[e.type] || '#30363d';
       // width drives edge thickness: thicker = stronger connection (default min 1).
-      const width = (typeof e.width === 'number' && e.width > 0) ? e.width : 1;
+      // Cap visual width so dense TABLE/SYMBOL edges don't overwhelm the graph.
+      const rawW = (typeof e.width === 'number' && e.width > 0) ? e.width : 1;
+      const width = Math.min(rawW, 8);
+      // Arrows only on directed HTTP edges (caller → handler).
+      // TABLE/SYMBOL/RPC connections are bidirectional — arrows add noise.
+      const isDirected = e.type === 'HTTP';
       return {
         id: 'ge' + i,
         from: e.from,
         to: e.to,
         // No label field => label not drawn; title shows on hover tooltip.
-        title: (e.label || e.type || ''),
+        title: (e.label || e.type || '') + ' (' + rawW + ' shared ' + (e.type === 'TABLE' ? 'table refs' : e.type === 'SYMBOL' ? 'symbols' : 'refs') + ')',
         width: width,
-        color: { color: col, highlight: col, hover: col, opacity: 0.85 },
-        arrows: { to: { enabled: true, scaleFactor: 0.5 } },
-        smooth: { type: 'cubicBezier', roundness: 0.5 },
+        color: { color: col, highlight: col, hover: col, opacity: 0.75 },
+        arrows: isDirected ? { to: { enabled: true, scaleFactor: 0.5 } } : undefined,
+        smooth: { type: 'continuous' },
       };
     })
   );
 
   const data = { nodes: visNodes, edges: visEdges };
   const options = {
-    nodes: { shape: 'dot', scaling: { min: 8, max: 40, label: { enabled: true, min: 12, max: 24 } }, borderWidth: 2, font: { color: '#c9d1d9', size: 12, face: 'sans-serif' } },
-    edges: { selectionWidth: 1.5, smooth: { type: 'cubicBezier', roundness: 0.5 } },
-    layout: {
-      hierarchical: {
-        enabled: true,
-        direction: 'LR',          // leftToRight
-        sortMethod: 'directed',
-        levelSeparation: 180,
-        nodeSpacing: 120,
-        treeSpacing: 120,
-        blockShifting: true,
-        edgeCrossing: true,
-        shakeTowards: 'roots',
-      },
-    },
+    nodes: { shape: 'dot', scaling: { min: 10, max: 40, label: { enabled: true, min: 12, max: 24 } }, borderWidth: 2, font: { color: '#c9d1d9', size: 12, face: 'sans-serif' } },
+    edges: { selectionWidth: 1.5, smooth: { type: 'continuous' } },
+    // Force-directed layout — better for dense graphs than hierarchical.
+    // Hierarchical created a single vertical chain because the graph is dense
+    // (most repos connect to most repos), not a tree.
+    layout: { improvedLayout: true },
     physics: {
-      enabled: false,             // hierarchical layout disables physics
-      stabilization: { enabled: false },
+      enabled: true,
+      solver: 'forceAtlas2Based',
+      forceAtlas2Based: {
+        gravitationalConstant: -80,
+        centralGravity: 0.008,
+        springLength: 120,
+        springConstant: 0.09,
+        damping: 0.5,
+        avoidOverlap: 1,
+      },
+      stabilization: {
+        enabled: true,
+        iterations: 300,
+        fit: true,
+      },
+      maxVelocity: 40,
+      minVelocity: 0.4,
     },
     interaction: { hover: true, tooltipDelay: 120, navigationButtons: false, keyboard: false, zoomView: true, dragView: true },
   };
