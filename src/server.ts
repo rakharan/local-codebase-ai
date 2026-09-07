@@ -926,159 +926,324 @@ app.post("/api/registry/entries/:entryName/reindex", async (request, response) =
   }
 })
 
-// Graph endpoint — returns cross-service relationship graph for visualization.
-// Shows repo-to-repo connections: which service calls/handles the same routes,
-// touches the same tables, calls the same RPC functions.
-app.get("/api/graph", async (request, response) => {
+// ---------------------------------------------------------------------------
+// DB Schema Explorer — table inventory, per-table detail, migration timeline.
+// All data comes from already-indexed Qdrant chunks (evidenceTypes: migration,
+// raw_sql, db_model) + the relationship graph's TOUCHES_TABLE edges. No
+// separate crawler needed.
+// ---------------------------------------------------------------------------
+
+type TableSummary = {
+  name: string
+  repos: string[]
+  repoCount: number
+  migrationCount: number
+  modelCount: number
+}
+
+type MigrationEntry = {
+  repoName: string
+  branchName?: string | undefined
+  filePath: string
+  timestamp: number | null
+  timestampIso: string | null
+  operation: string
+  snippet: string
+}
+
+type TableDetail = {
+  name: string
+  repos: string[]
+  migrations: MigrationEntry[]
+  modelFiles: Array<{ repoName: string; filePath: string; startLine?: number | undefined; endLine?: number | undefined }>
+  sqlRefs: Array<{ repoName: string; filePath: string; startLine?: number | undefined; endLine?: number | undefined; operation: string }>
+}
+
+// Scroll all points matching a filter. Bounded by maxPoints to avoid runaway scans.
+async function scrollPoints(
+  filter: Record<string, unknown>,
+  withPayload: boolean,
+  maxPoints = 50_000,
+): Promise<Array<Record<string, unknown>>> {
+  const all: Array<Record<string, unknown>> = []
+  let offset: string | number | Record<string, unknown> | null | undefined = undefined
+  while (all.length < maxPoints) {
+    const body: Record<string, unknown> = {
+      filter,
+      limit: 256,
+      with_payload: withPayload,
+      with_vector: false,
+      ...(offset ? { offset } : {}),
+    }
+    const result = await qdrant.scroll(config.collectionName, body as never)
+    const points = (result.points as unknown[]) ?? []
+    all.push(...(points as Array<Record<string, unknown>>))
+    offset = result.next_page_offset
+    if (!offset || points.length === 0) break
+  }
+  return all
+}
+
+// Extract SQL operations (CREATE TABLE / ALTER / DROP / rename) from migration content.
+function classifyMigrationOperation(content: string): string {
+  const c = content.toLowerCase()
+  if (/create\s+table/.test(c)) return "CREATE TABLE"
+  if (/add\s+column|add\s+foreign\s+key|alter\s+table.*add/.test(c)) return "ADD COLUMN/CONSTRAINT"
+  if (/drop\s+column|drop\s+table/.test(c)) return "DROP"
+  if (/rename|change\s+column|modify\s+column/.test(c)) return "RENAME/MODIFY"
+  if (/insert\s+into/.test(c)) return "INSERT DATA"
+  if (/update\s+\w+\s+set/.test(c)) return "UPDATE DATA"
+  if (/alter\s+table/.test(c)) return "ALTER TABLE"
+  return "MIGRATION"
+}
+
+// Parse timestamp from migration filename: 1611350153036-add_cash_group.ts → epoch ms
+function parseMigrationTimestamp(filePath: string): { ms: number | null; iso: string | null } {
+  const m = filePath.match(/(\d{13})[-_]/)
+  if (m?.[1]) {
+    const ms = Number(m[1])
+    if (Number.isFinite(ms)) return { ms, iso: new Date(ms).toISOString() }
+  }
+  return { ms: null, iso: null }
+}
+
+// GET /api/schema/tables — all known tables with repo + migration + model counts.
+app.get("/api/schema/tables", async (_request, response) => {
   try {
-    const repoFilter = request.query.repo as string | undefined
-    const edgeTypeFilter = request.query.type as string | undefined
-    const limit = Math.min(Number(request.query.limit ?? 2000), 5000)
-
+    // Source 1: TOUCHES_TABLE edges from relationship graph (repo → table)
     const allEdges = await readRelationshipGraph()
-    let edges = allEdges
-
-    if (repoFilter) {
-      // Show this repo + all repos it connects to
-      edges = edges.filter(e => e.repoName === repoFilter || e.repoName.includes(repoFilter))
+    const tableRepos = new Map<string, Set<string>>()
+    for (const edge of allEdges) {
+      if (edge.type !== "TOUCHES_TABLE" || !edge.table) continue
+      // Validate table name: snake_case with underscore separator, min 5 chars.
+      // Single-word entries like "table"/"query"/"class" are extractor noise.
+      if (edge.table.length < 5 || !/^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(edge.table)) continue
+      if (!tableRepos.has(edge.table)) tableRepos.set(edge.table, new Set())
+      tableRepos.get(edge.table)!.add(edge.repoName)
     }
 
-    if (edgeTypeFilter) {
-      edges = edges.filter(e => e.type === edgeTypeFilter)
+    // Source 2: migration chunks — count migrations per table via content match.
+    // Scanning 902 migration payloads is cheap; do a targeted scroll.
+    const migrationPoints = await scrollPoints(
+      { must: [{ key: "evidenceTypes", match: { any: ["migration"] } }] },
+      true,
+      5_000,
+    )
+
+    const tables = new Map<string, TableSummary>()
+
+    for (const [table, repos] of tableRepos) {
+      tables.set(table, {
+        name: table,
+        repos: [...repos].sort(),
+        repoCount: repos.size,
+        migrationCount: 0,
+        modelCount: 0,
+      })
     }
 
-    // Group edges by their shared resource (route, table, RPC func, symbol)
-    // Then build repo-to-repo connections: if repo A calls route X and repo B handles route X,
-    // create edge A → B with the shared resource as label.
-    const byRoute = new Map<string, { callers: Set<string>; handlers: Set<string> }>()
-    const byTable = new Map<string, Set<string>>()
-    const byRpc = new Map<string, Set<string>>()
-    const bySymbol = new Map<string, { definers: Set<string>; callers: Set<string> }>()
-
-    for (const edge of edges) {
-      const repo = edge.repoName
-      if (!repo) continue
-
-      if (edge.type === "HANDLES_HTTP_ENDPOINT" && edge.toRoute) {
-        const r = edge.toRoute
-        if (!byRoute.has(r)) byRoute.set(r, { callers: new Set(), handlers: new Set() })
-        byRoute.get(r)!.handlers.add(repo)
-      } else if (edge.type === "CALLS_HTTP_ENDPOINT" && edge.toRoute) {
-        const r = edge.toRoute
-        if (!byRoute.has(r)) byRoute.set(r, { callers: new Set(), handlers: new Set() })
-        byRoute.get(r)!.callers.add(repo)
-      } else if (edge.type === "TOUCHES_TABLE" && edge.table) {
-        const t = edge.table
-        if (!byTable.has(t)) byTable.set(t, new Set())
-        byTable.get(t)!.add(repo)
-      } else if (edge.type === "CALLS_RPC_FUNC" && edge.rpcFunc) {
-        const f = edge.rpcFunc
-        if (!byRpc.has(f)) byRpc.set(f, new Set())
-        byRpc.get(f)!.add(repo)
-      } else if (edge.type === "DEFINES_SYMBOL" && edge.symbol) {
-        const s = edge.symbol
-        if (!bySymbol.has(s)) bySymbol.set(s, { definers: new Set(), callers: new Set() })
-        bySymbol.get(s)!.definers.add(repo)
-      } else if (edge.type === "CALLS_SYMBOL" && edge.calleeSymbol) {
-        const s = edge.calleeSymbol
-        if (!bySymbol.has(s)) bySymbol.set(s, { definers: new Set(), callers: new Set() })
-        bySymbol.get(s)!.callers.add(repo)
+    for (const p of migrationPoints) {
+      const payload = (p.payload ?? {}) as Record<string, unknown>
+      const content = String(payload.content ?? "")
+      const repo = String(payload.repoName ?? "?")
+      // Look for table names referenced in migration SQL — word-boundary match
+      const lowerContent = content.toLowerCase()
+      for (const table of tables.keys()) {
+        if (new RegExp(`\\b${table.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(lowerContent)) {
+          const t = tables.get(table)!
+          t.migrationCount++
+          if (!t.repos.includes(repo)) {
+            t.repos.push(repo)
+            t.repoCount = t.repos.length
+          }
+        }
+      }
+      // Migrations may reference tables not in the edge graph — extract CREATE TABLE names
+      const createMatches = [...content.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?[`"']?([\w.]+)[`"']?/gi)]
+      for (const m of createMatches) {
+        const name = (m[1] ?? "").split(".").pop() ?? ""
+        // Validate: snake_case with underscore, min 5 chars, not a common word
+        if (!name || name.length < 5 || !/^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(name)) continue
+        if (!tables.has(name)) {
+          tables.set(name, { name, repos: [repo], repoCount: 1, migrationCount: 1, modelCount: 0 })
+        } else {
+          const t = tables.get(name)!
+          t.migrationCount++
+        }
       }
     }
 
-    // Build repo-to-repo edges
-    const nodeSet = new Map<string, { id: string; label: string; group: string; connections: number }>()
-    const edgeMap = new Map<string, { from: string; to: string; label: string; type: string; width: number }>()
-
-    function addNode(repo: string, serviceType: string) {
-      if (!nodeSet.has(repo)) {
-        nodeSet.set(repo, { id: repo, label: repo, group: serviceType, connections: 0 })
+    // Source 3: db_model chunks — count model files per table via payload dbTables
+    const modelPoints = await scrollPoints(
+      { must: [{ key: "evidenceTypes", match: { any: ["db_model"] } }] },
+      true,
+      10_000,
+    )
+    for (const p of modelPoints) {
+      const payload = (p.payload ?? {}) as Record<string, unknown>
+      const repo = String(payload.repoName ?? "?")
+      const dbTables = (payload.dbTables as string[] | undefined) ?? []
+      for (const table of dbTables) {
+        if (!tables.has(table)) {
+          tables.set(table, { name: table, repos: [repo], repoCount: 1, migrationCount: 0, modelCount: 1 })
+        } else {
+          const t = tables.get(table)!
+          t.modelCount++
+          if (!t.repos.includes(repo)) {
+            t.repos.push(repo)
+            t.repoCount = t.repos.length
+          }
+        }
       }
     }
 
-    function addEdge(from: string, to: string, label: string, type: string) {
-      const key = `${from}|${to}|${type}`
-      if (from === to) return // skip self-loops
-      if (!edgeMap.has(key)) {
-        addNode(from, "unknown")
-        addNode(to, "unknown")
-        edgeMap.set(key, { from, to, label, type, width: 1 })
+    const list = [...tables.values()].sort(
+      (a, b) => b.repoCount * 100 + b.migrationCount - (a.repoCount * 100 + a.migrationCount),
+    )
+
+    response.json({ tables: list, totalTables: list.length })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
+// GET /api/schema/table/:name — full detail for one table.
+app.get("/api/schema/table/:name", async (request, response) => {
+  try {
+    const tableName = String(request.params.name ?? "").toLowerCase()
+    if (!tableName) {
+      response.status(400).json({ error: "Missing table name" })
+      return
+    }
+
+    const detail: TableDetail = { name: tableName, repos: [], migrations: [], modelFiles: [], sqlRefs: [] }
+    const repoSet = new Set<string>()
+
+    // Repos from relationship graph
+    const allEdges = await readRelationshipGraph()
+    for (const edge of allEdges) {
+      if (edge.type === "TOUCHES_TABLE" && edge.table?.toLowerCase() === tableName) {
+        repoSet.add(edge.repoName)
+      }
+    }
+
+    // Migration chunks mentioning the table
+    const migrationPoints = await scrollPoints(
+      { must: [{ key: "evidenceTypes", match: { any: ["migration"] } }] },
+      true,
+      5_000,
+    )
+    const seenMigrationFiles = new Set<string>()
+    for (const p of migrationPoints) {
+      const payload = (p.payload ?? {}) as Record<string, unknown>
+      const content = String(payload.content ?? "")
+      const repo = String(payload.repoName ?? "?")
+      const filePath = String(payload.filePath ?? "")
+      if (!content.toLowerCase().includes(tableName)) continue
+      if (seenMigrationFiles.has(`${repo}/${filePath}`)) continue
+      seenMigrationFiles.add(`${repo}/${filePath}`)
+      repoSet.add(repo)
+      const { ms, iso } = parseMigrationTimestamp(filePath)
+      detail.migrations.push({
+        repoName: repo,
+        branchName: payload.branchName as string | undefined,
+        filePath,
+        timestamp: ms,
+        timestampIso: iso,
+        operation: classifyMigrationOperation(content),
+        snippet: content.split(/\r?\n/).slice(0, 3).join(" ").slice(0, 200),
+      })
+    }
+    // Oldest first — timeline order
+    detail.migrations.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))
+
+    // Model files defining/using the table (dbTables payload match)
+    const modelPoints = await scrollPoints(
+      { must: [{ key: "evidenceTypes", match: { any: ["db_model", "raw_sql"] } }] },
+      true,
+      20_000,
+    )
+    const seenModelFiles = new Set<string>()
+    for (const p of modelPoints) {
+      const payload = (p.payload ?? {}) as Record<string, unknown>
+      const repo = String(payload.repoName ?? "?")
+      const filePath = String(payload.filePath ?? "")
+      const dbTables = ((payload.dbTables as string[] | undefined) ?? []).map(t => t.toLowerCase())
+      const content = String(payload.content ?? "").toLowerCase()
+      const mentions = dbTables.includes(tableName) || content.includes(tableName)
+      if (!mentions) continue
+      repoSet.add(repo)
+      const key = `${repo}/${filePath}:${payload.startLine}`
+      if (seenModelFiles.has(key)) continue
+      seenModelFiles.add(key)
+      const entry = {
+        repoName: repo,
+        filePath,
+        startLine: payload.startLine as number | undefined,
+        endLine: payload.endLine as number | undefined,
+      }
+      const evidence = (payload.evidenceTypes as string[] | undefined) ?? []
+      if (evidence.includes("db_model") && dbTables.includes(tableName)) {
+        detail.modelFiles.push(entry)
       } else {
-        edgeMap.get(key)!.width++
-      }
-      nodeSet.get(from)!.connections++
-      nodeSet.get(to)!.connections++
-    }
-
-    // Route-based: caller → handler
-    for (const [route, { callers, handlers }] of byRoute) {
-      for (const caller of callers) {
-        for (const handler of handlers) {
-          addEdge(caller, handler, route, "HTTP")
-        }
+        // raw_sql reference — classify the SQL operation
+        const snippet = content.slice(0, 500)
+        const op = /insert\s+into/.test(snippet) ? "INSERT"
+          : /update\s+\w+\s+set/.test(snippet) ? "UPDATE"
+          : /delete\s+from/.test(snippet) ? "DELETE"
+          : /create\s+table/.test(snippet) ? "CREATE"
+          : "SELECT"
+        detail.sqlRefs.push({ ...entry, operation: op })
       }
     }
 
-    // Table-based: repos that touch the same table → connected
-    for (const [table, repos] of byTable) {
-      const repoList = [...repos]
-      for (let i = 0; i < repoList.length; i++) {
-        for (let j = i + 1; j < repoList.length; j++) {
-          addEdge(repoList[i]!, repoList[j]!, `table: ${table}`, "TABLE")
-        }
-      }
+    detail.repos = [...repoSet].sort()
+    // Cap lists so the payload stays readable
+    detail.sqlRefs = detail.sqlRefs.slice(0, 50)
+
+    response.json(detail)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
+// GET /api/schema/migrations — all migrations, optionally filtered by table.
+app.get("/api/schema/migrations", async (request, response) => {
+  try {
+    const tableFilter = String(request.query.table ?? "").toLowerCase()
+    const migrationPoints = await scrollPoints(
+      { must: [{ key: "evidenceTypes", match: { any: ["migration"] } }] },
+      true,
+      5_000,
+    )
+
+    const seen = new Set<string>()
+    const entries: MigrationEntry[] = []
+    for (const p of migrationPoints) {
+      const payload = (p.payload ?? {}) as Record<string, unknown>
+      const content = String(payload.content ?? "")
+      const repo = String(payload.repoName ?? "?")
+      const filePath = String(payload.filePath ?? "")
+      const key = `${repo}/${filePath}`
+      if (seen.has(key)) continue
+      if (tableFilter && !content.toLowerCase().includes(tableFilter)) continue
+      seen.add(key)
+      const { ms, iso } = parseMigrationTimestamp(filePath)
+      entries.push({
+        repoName: repo,
+        branchName: payload.branchName as string | undefined,
+        filePath,
+        timestamp: ms,
+        timestampIso: iso,
+        operation: classifyMigrationOperation(content),
+        snippet: content.split(/\r?\n/).slice(0, 3).join(" ").slice(0, 200),
+      })
     }
+    entries.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
 
-    // RPC-based: repos that call the same RPC → connected
-    for (const [func, repos] of byRpc) {
-      const repoList = [...repos]
-      for (let i = 0; i < repoList.length; i++) {
-        for (let j = i + 1; j < repoList.length; j++) {
-          addEdge(repoList[i]!, repoList[j]!, `RPC: ${func}`, "RPC")
-        }
-      }
-    }
-
-    // Symbol-based: caller → definer
-    for (const [symbol, { definers, callers }] of bySymbol) {
-      for (const caller of callers) {
-        for (const definer of definers) {
-          addEdge(caller, definer, symbol, "SYMBOL")
-        }
-      }
-    }
-
-    // Assign service types from edges
-    for (const edge of edges.slice(0, limit)) {
-      if (edge.repoName && nodeSet.has(edge.repoName)) {
-        const node = nodeSet.get(edge.repoName)!
-        if (node.group === "unknown") node.group = edge.serviceType
-      }
-    }
-
-    // Sort nodes by connection count (most connected first)
-    const nodes = [...nodeSet.values()].sort((a, b) => b.connections - a.connections)
-    const edgeList = [...edgeMap.values()].sort((a, b) => b.width - a.width)
-
-    // Edge type counts for legend
-    const typeCounts: Record<string, number> = {}
-    for (const e of edgeList) {
-      typeCounts[e.type] = (typeCounts[e.type] ?? 0) + 1
-    }
-
-    response.json({
-      nodes: nodes.map(n => ({ id: n.id, label: n.label, group: n.group, value: n.connections })),
-      edges: edgeList.map(e => ({
-        from: e.from,
-        to: e.to,
-        label: e.label,
-        type: e.type,
-        width: e.width,
-      })),
-      totalEdges: edgeList.length,
-      totalNodes: nodes.length,
-      typeCounts,
-    })
+    response.json({ migrations: entries, total: entries.length })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     response.status(500).json({ error: message })
