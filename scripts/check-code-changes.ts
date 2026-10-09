@@ -11,7 +11,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { execSync } from "node:child_process"
 
-const REPOS_DIR = "C:/GIT/work"
+const REPOS_DIR = process.env.REPOS_DIR || "C:/GIT/work"
 const STATE_FILE = ".data/doc-sync-state.json"
 const SKIP_DIRS = new Set([".claude", "node_modules", ".git", "my_usage.json", "Playgrounds", "Opencode Memory"])
 

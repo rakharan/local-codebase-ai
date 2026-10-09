@@ -2196,7 +2196,7 @@ function makeVsCodeLink(source) {
     const repoMatch = source.match(/^([^@]+)@/);
     if (!repoMatch) return null;
     const repoName = repoMatch[1];
-    const repoBase = `C:/GIT/work/${repoName}`;
+    const repoBase = `${localStorage.getItem('reposDir') || 'C:/GIT/work'}/${repoName}`;
     const fullPath = `${repoBase}/${filePath}`;
     return `vscode://file/${fullPath}:${line}`;
   } catch { return null; }

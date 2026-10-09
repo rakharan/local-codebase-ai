@@ -16,12 +16,13 @@ import fastGlob from "fast-glob"
 
 const SKIP_DIRS = new Set([".claude", "node_modules", ".git", "my_usage.json", "Playgrounds", "Opencode Memory"])
 
+const REPOS_DIR = process.env.REPOS_DIR || "C:/GIT/work"
+const DOCS_DIR = process.env.DOCS_DIR || "C:/GIT/work/tf-documentation/my-website/docs"
+
 async function getRepos(): Promise<string[]> {
-  const entries = await fs.readdir("C:/GIT/work", { withFileTypes: true })
+  const entries = await fs.readdir(REPOS_DIR, { withFileTypes: true })
   return entries.filter(e => e.isDirectory() && !SKIP_DIRS.has(e.name)).map(e => e.name)
 }
-
-const DOCS_DIR = "C:/GIT/work/tf-documentation/my-website/docs"
 
 type Feature = {
   repo: string
