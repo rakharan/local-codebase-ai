@@ -5,6 +5,11 @@ dist
 backups
 *.log
 
+# IDE / agent configs
+.claude/
+.kiro/
+CLAUDE.md
+
 # Repo Doctor generated output
 repo-docs-*/
 
