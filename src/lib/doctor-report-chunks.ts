@@ -8,6 +8,8 @@ import type {
   ApiRouteFact,
   RabbitMqFact,
   DatabaseFact,
+  HttpClientFact,
+  CronFact,
 } from "../doctor/types.js"
 
 export interface DoctorReport {
@@ -17,6 +19,8 @@ export interface DoctorReport {
   apiRoutes: ApiRouteFact[];
   rabbitMq: RabbitMqFact[];
   database: DatabaseFact[];
+  httpClients?: HttpClientFact[];
+  cron?: CronFact[];
   summary: {
     serviceCount: number;
     envVarCount: number;
@@ -129,6 +133,23 @@ export function buildDatabaseChunks(report: DoctorReport, repoName: string): Cod
   })
 }
 
+export function buildHttpClientChunks(report: DoctorReport, repoName: string): CodeChunk[] {
+  return (report.httpClients ?? []).map(fact => {
+    const content = `Outbound HTTP call ${fact.method} ${fact.urlHint} via ${fact.lib} in ${fact.sourcePath} line ${fact.line}.\nConfidence: ${fact.confidence}.`
+    const hints: RelationshipHints = { ...EMPTY_HINTS, routes: [fact.urlHint] }
+    return makeChunk(repoName, `doctor-fact:http-client:${fact.method}:${fact.urlHint}:${fact.line}`, fact.line, content, hints)
+  })
+}
+
+export function buildCronChunks(report: DoctorReport, repoName: string): CodeChunk[] {
+  return (report.cron ?? []).map(fact => {
+    const label = fact.kind === 'setInterval' ? `every ${fact.expression}ms` : fact.expression
+    const content = `Scheduled task ${label} (${fact.kind}) in ${fact.sourcePath} line ${fact.line}.\nConfidence: ${fact.confidence}.`
+    const hints: RelationshipHints = { ...EMPTY_HINTS }
+    return makeChunk(repoName, `doctor-fact:cron:${fact.kind}:${fact.expression}:${fact.line}`, fact.line, content, hints)
+  })
+}
+
 /**
  * Convert a full DoctorReport into RAG-ready CodeChunks.
  */
@@ -140,5 +161,7 @@ export function buildReportChunks(report: DoctorReport, repoName: string): CodeC
     ...buildApiRouteChunks(report, repoName),
     ...buildRabbitMqChunks(report, repoName),
     ...buildDatabaseChunks(report, repoName),
+    ...buildHttpClientChunks(report, repoName),
+    ...buildCronChunks(report, repoName),
   ]
 }

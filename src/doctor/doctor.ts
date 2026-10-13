@@ -7,15 +7,19 @@ import { extractConfigDefaults } from './extractors/config-default-extractor.js'
 import { extractApiRoutes } from './extractors/api-route-extractor.js';
 import { extractRabbitMq } from './extractors/rabbitmq-extractor.js';
 import { extractDatabase } from './extractors/database-extractor.js';
+import { extractHttpClients } from './extractors/http-client-extractor.js';
+import { extractCron } from './extractors/cron-extractor.js';
 import { generateServicesMarkdown } from './generators/services-generator.js';
 import { generateEnvMarkdown } from './generators/env-generator.js';
 import { generateConfigMarkdown } from './generators/config-generator.js';
 import { generateApiMarkdown } from './generators/api-generator.js';
 import { generateRabbitMqMarkdown } from './generators/rabbitmq-generator.js';
 import { generateDatabaseMarkdown } from './generators/database-generator.js';
+import { generateHttpClientMarkdown } from './generators/http-client-generator.js';
+import { generateCronMarkdown } from './generators/cron-generator.js';
 import { generateArchitectureMarkdown } from './generators/architecture-generator.js';
 import { generateOverviewMarkdown } from './generators/overview-generator.js';
-import type { PackageFacts, EnvVarFact, ConfigDefaultFact, ApiRouteFact, RabbitMqFact, DatabaseFact } from './types.js';
+import type { PackageFacts, EnvVarFact, ConfigDefaultFact, ApiRouteFact, RabbitMqFact, DatabaseFact, HttpClientFact, CronFact } from './types.js';
 
 export interface DoctorOptions {
   rootFolder: string;
@@ -38,6 +42,8 @@ export interface DoctorReport {
   apiRoutes: ApiRouteFact[];
   rabbitMq: RabbitMqFact[];
   database: DatabaseFact[];
+  httpClients: HttpClientFact[];
+  cron: CronFact[];
   summary: {
     serviceCount: number;
     envVarCount: number;
@@ -45,6 +51,8 @@ export interface DoctorReport {
     apiRouteCount: number;
     rabbitMqCount: number;
     databaseCount: number;
+    httpClientCount: number;
+    cronCount: number;
     filesScanned: number;
   };
 }
@@ -81,6 +89,8 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   const apiRouteFacts: ApiRouteFact[] = [];
   const rabbitMqFacts: RabbitMqFact[] = [];
   const databaseFacts: DatabaseFact[] = [];
+  const httpClientFacts: HttpClientFact[] = [];
+  const cronFacts: CronFact[] = [];
 
   for (const file of files) {
     if (path.basename(file.relativePath) === 'package.json') {
@@ -92,6 +102,8 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     apiRouteFacts.push(...extractApiRoutes(file.content, file.relativePath));
     rabbitMqFacts.push(...extractRabbitMq(file.content, file.relativePath));
     databaseFacts.push(...extractDatabase(file.content, file.relativePath));
+    httpClientFacts.push(...extractHttpClients(file.content, file.relativePath));
+    cronFacts.push(...extractCron(file.content, file.relativePath));
   }
 
   // Filter by repo-name
@@ -114,6 +126,8 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   await fs.writeFile(path.join(outputFolder, 'api.md'), generateApiMarkdown(apiRouteFacts), 'utf8');
   await fs.writeFile(path.join(outputFolder, 'rabbitmq.md'), generateRabbitMqMarkdown(rabbitMqFacts), 'utf8');
   await fs.writeFile(path.join(outputFolder, 'database.md'), generateDatabaseMarkdown(databaseFacts), 'utf8');
+  await fs.writeFile(path.join(outputFolder, 'http-clients.md'), generateHttpClientMarkdown(httpClientFacts), 'utf8');
+  await fs.writeFile(path.join(outputFolder, 'cron.md'), generateCronMarkdown(cronFacts), 'utf8');
   await fs.writeFile(path.join(outputFolder, 'architecture.md'), generateArchitectureMarkdown({ packageFacts, apiRouteFacts, rabbitMqFacts, databaseFacts }), 'utf8');
   await fs.writeFile(path.join(outputFolder, 'overview.md'), generateOverviewMarkdown({ packageFacts, envFacts, configDefaultFacts, apiRouteFacts, rabbitMqFacts, databaseFacts }), 'utf8');
 
@@ -125,6 +139,8 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
     apiRoutes: apiRouteFacts,
     rabbitMq: rabbitMqFacts,
     database: databaseFacts,
+    httpClients: httpClientFacts,
+    cron: cronFacts,
     summary: {
       serviceCount: packageFacts.length,
       envVarCount: envFacts.length,
@@ -132,6 +148,8 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
       apiRouteCount: apiRouteFacts.length,
       rabbitMqCount: rabbitMqFacts.length,
       databaseCount: databaseFacts.length,
+      httpClientCount: httpClientFacts.length,
+      cronCount: cronFacts.length,
       filesScanned: files.length,
     },
   };
@@ -143,8 +161,8 @@ export async function runDoctor(options: DoctorOptions): Promise<DoctorReport> {
   }
 
   log(`Documentation generated in: ${outputFolder}`);
-  log(`Generated files: overview.md, services.md, env.md, config.md, api.md, rabbitmq.md, database.md, architecture.md`);
-  log(`Summary: ${report.summary.serviceCount} services, ${report.summary.envVarCount} env vars, ${report.summary.configDefaultCount} config defaults, ${report.summary.apiRouteCount} routes, ${report.summary.rabbitMqCount} MQ, ${report.summary.databaseCount} DB`);
+  log(`Generated files: overview.md, services.md, env.md, config.md, api.md, rabbitmq.md, database.md, http-clients.md, cron.md, architecture.md`);
+  log(`Summary: ${report.summary.serviceCount} services, ${report.summary.envVarCount} env vars, ${report.summary.apiRouteCount} routes, ${report.summary.rabbitMqCount} MQ, ${report.summary.databaseCount} DB, ${report.summary.httpClientCount} HTTP calls, ${report.summary.cronCount} cron tasks`);
 
   return report;
 }

@@ -1,21 +1,26 @@
 {
   "type": "module",
   "scripts": {
-    "index": "node --import ./register-ts-node.mjs src/index-repo.ts",
-    "index-docs": "node --import ./register-ts-node.mjs src/index-docs.ts",
-    "index-doctor": "node --import ./register-ts-node.mjs src/index-doctor.ts",
-    "doctor-all": "node --import ./register-ts-node.mjs scripts/doctor-all.ts",
-    "index-doctor-all": "node --import ./register-ts-node.mjs scripts/index-doctor-all.ts",
-    "eval:models": "node --import ./register-ts-node.mjs scripts/model-eval.ts",
-    "ask": "node --import ./register-ts-node.mjs src/ask.ts",
-    "digest": "node --import ./register-ts-node.mjs src/commands/digest.ts",
-    "drafts": "node --import ./register-ts-node.mjs src/commands/drafts.ts",
-    "test:answers": "node --import ./register-ts-node.mjs src/answer-regression.ts",
-    "test:answers:full": "node --import ./register-ts-node.mjs src/answer-regression.ts --suite full",
-    "start": "node --import ./register-ts-node.mjs src/server.ts",
-    "dev": "node --watch --import ./register-ts-node.mjs src/server.ts",
-    "doctor": "node --import ./register-ts-node.mjs src/doctor-cli.ts",
-    "test:doctor": "node --import ./register-ts-node.mjs src/doctor/test/run-tests.ts"
+    "index": "npx tsx src/index-repo.ts",
+    "index-docs": "npx tsx src/index-docs.ts",
+    "index-doctor": "npx tsx src/index-doctor.ts",
+    "doctor-all": "npx tsx scripts/doctor-all.ts",
+    "index-doctor-all": "npx tsx scripts/index-doctor-all.ts",
+    "reindex-all": "npx tsx scripts/reindex-all.ts",
+    "reindex-full": "npx tsx scripts/reindex-full.ts",
+    "eval:models": "npx tsx scripts/model-eval.ts",
+    "ask": "npx tsx src/ask.ts",
+    "digest": "npx tsx src/commands/digest.ts",
+    "drafts": "npx tsx src/commands/drafts.ts",
+    "test:answers": "npx tsx src/answer-regression.ts",
+    "test:answers:full": "npx tsx src/answer-regression.ts --suite full",
+    "test:api": "npx tsx scripts/api-regression.ts",
+    "test:language": "npx tsx -e \"import('./src/ask/language.test.ts').then(m => m.runTests())\"",
+    "start": "npx tsx src/server.ts",
+    "dev": "npx tsx watch src/server.ts",
+    "doctor": "npx tsx src/doctor-cli.ts",
+    "test:doctor": "npx tsx src/doctor/test/run-tests.ts",
+    "eval:feedback": "npx tsx scripts/eval-feedback.ts"
   },
   "dependencies": {
     "@qdrant/js-client-rest": "^1.18.0",
@@ -26,11 +31,11 @@
     "fast-glob": "^3.3.3",
     "ignore": "^7.0.5",
     "minisearch": "^7.1.1",
-    "ts-node": "^10.9.2",
     "typescript": "^6.0.3"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
-    "@types/node": "^25.9.1"
+    "@types/node": "^25.9.1",
+    "tsx": "^4.23.13"
   }
 }

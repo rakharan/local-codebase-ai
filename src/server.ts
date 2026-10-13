@@ -1,3 +1,5 @@
+import "./lib/env.js"
+
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { execFile } from "node:child_process"
@@ -5,6 +7,7 @@ import { promisify } from "node:util"
 import express from "express"
 import { config } from "./lib/config.js"
 import { ensureCollection, qdrant } from "./lib/qdrant.js"
+import { prewarmBM25Index } from "./lib/bm25-index.js"
 import { deleteRelationshipGraphForScope, readRelationshipGraph } from "./lib/graph.js"
 import {
   saveVersion,
@@ -25,6 +28,11 @@ import {
   readAnswerFeedback,
   type AnswerFeedbackInput,
 } from "./lib/answer-feedback.js"
+import {
+  createLearningRule,
+  loadAllLearningRules,
+  rollbackRule,
+} from "./lib/learning-rules.js"
 import {
   listDrafts,
   readDraft,
@@ -83,8 +91,17 @@ app.use("/api/", (request, response, next) => {
 // --- API key authentication ---
 // Set APP_API_KEY in .env to enable. Leave unset to allow all (dev mode).
 const APP_API_KEY = process.env.APP_API_KEY?.trim()
+// Public probe endpoints that must remain reachable without credentials so
+// the UI can detect auth requirements and service health before login.
+// NOTE: middleware is mounted at "/api/" so Express strips that prefix from
+// request.path — compare against the stripped paths.
+const PUBLIC_API_PATHS = new Set(["/health", "/ready", "/auth-required"])
 if (APP_API_KEY) {
   app.use("/api/", (request, response, next) => {
+    if (PUBLIC_API_PATHS.has(request.path)) {
+      next()
+      return
+    }
     const authHeader = request.headers["authorization"] ?? ""
     const provided = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader
     if (provided !== APP_API_KEY) {
@@ -391,7 +408,11 @@ app.post("/api/ask", async (request, response) => {
     return
   }
 
-  const args = ["--import", "./register-ts-node.mjs", "src/ask.ts", question]
+  const requestId = Math.random().toString(36).slice(2, 10)
+  const reqStart = Date.now()
+  console.log(`[ask][${requestId}] start q=${question.slice(0, 80)}${question.length > 80 ? "…" : ""} deep=${!!body.deep} limit=${body.limit ?? "-"}`)
+
+  const args = ["--import", "tsx", "src/ask.ts", question]
 
   if (body.limit) {
     args.push("--limit", String(body.limit))
@@ -431,18 +452,20 @@ app.post("/api/ask", async (request, response) => {
       timeout: body.deep ? 900_000 : 600_000,
       maxBuffer: 10 * 1024 * 1024,
       windowsHide: true,
+      env: { ...process.env, ASK_REQUEST_ID: requestId, ASK_DEBUG: process.env.ASK_DEBUG ?? "1" },
     })
 
     const output = [stdout, stderr].filter(Boolean).join("\n")
     const result = parseAskOutput(output)
 
+    console.log(`[ask][${requestId}] done ms=${Date.now() - reqStart}`)
     response.json(result)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     const stdout = (error as { stdout?: string }).stdout ?? ""
     const stderr = (error as { stderr?: string }).stderr ?? ""
 
-    console.error("Ask process failed:", message)
+    console.error(`[ask][${requestId}] failed ms=${Date.now() - reqStart}:`, message)
 
     response.status(500).json({
       error: message,
@@ -461,6 +484,10 @@ app.post("/api/ask/stream", (request, response) => {
     return
   }
 
+  const requestId = Math.random().toString(36).slice(2, 10)
+  const reqStart = Date.now()
+  console.log(`[ask][${requestId}] stream-start q=${question.slice(0, 80)}${question.length > 80 ? "…" : ""} deep=${!!body.deep} limit=${body.limit ?? "-"}`)
+
   // Set up SSE headers
   response.setHeader("Content-Type", "text/event-stream")
   response.setHeader("Cache-Control", "no-cache")
@@ -473,7 +500,7 @@ app.post("/api/ask/stream", (request, response) => {
 
   sendEvent({ type: "thinking" })
 
-  const args = ["--import", "./register-ts-node.mjs", "src/ask.ts", question]
+  const args = ["--import", "tsx", "src/ask.ts", question]
   if (body.limit) args.push("--limit", String(body.limit))
   if (body.deep) args.push("--deep")
   if (body.chatModel?.trim()) args.push("--chat-model", body.chatModel.trim())
@@ -485,15 +512,20 @@ app.post("/api/ask/stream", (request, response) => {
 
   let stdout = ""
   let stderr = ""
+  let completed = false
 
   const child = execFile(process.execPath, args, {
     cwd: rootDir,
     timeout: body.deep ? 900_000 : 600_000,
     maxBuffer: 10 * 1024 * 1024,
     windowsHide: true,
+    env: { ...process.env, ASK_REQUEST_ID: requestId, ASK_DEBUG: process.env.ASK_DEBUG ?? "1" },
   }, (error, out, err) => {
+    completed = true
     stdout = out ?? ""
     stderr = err ?? ""
+
+    console.log(`[ask][${requestId}] stream-done ms=${Date.now() - reqStart}`)
 
     if (error) {
       sendEvent({ type: "error", error: error.message, raw: [out, err].filter(Boolean).join("\n") })
@@ -513,8 +545,8 @@ app.post("/api/ask/stream", (request, response) => {
     }
   })
 
-  request.on("close", () => {
-    if (!child.killed) child.kill()
+  response.on("close", () => {
+    if (!completed && !child.killed) child.kill()
   })
 })
 
@@ -894,6 +926,330 @@ app.post("/api/registry/entries/:entryName/reindex", async (request, response) =
   }
 })
 
+// ---------------------------------------------------------------------------
+// DB Schema Explorer — table inventory, per-table detail, migration timeline.
+// All data comes from already-indexed Qdrant chunks (evidenceTypes: migration,
+// raw_sql, db_model) + the relationship graph's TOUCHES_TABLE edges. No
+// separate crawler needed.
+// ---------------------------------------------------------------------------
+
+type TableSummary = {
+  name: string
+  repos: string[]
+  repoCount: number
+  migrationCount: number
+  modelCount: number
+}
+
+type MigrationEntry = {
+  repoName: string
+  branchName?: string | undefined
+  filePath: string
+  timestamp: number | null
+  timestampIso: string | null
+  operation: string
+  snippet: string
+}
+
+type TableDetail = {
+  name: string
+  repos: string[]
+  migrations: MigrationEntry[]
+  modelFiles: Array<{ repoName: string; filePath: string; startLine?: number | undefined; endLine?: number | undefined }>
+  sqlRefs: Array<{ repoName: string; filePath: string; startLine?: number | undefined; endLine?: number | undefined; operation: string }>
+}
+
+// Scroll all points matching a filter. Bounded by maxPoints to avoid runaway scans.
+async function scrollPoints(
+  filter: Record<string, unknown>,
+  withPayload: boolean,
+  maxPoints = 50_000,
+): Promise<Array<Record<string, unknown>>> {
+  const all: Array<Record<string, unknown>> = []
+  let offset: string | number | Record<string, unknown> | null | undefined = undefined
+  while (all.length < maxPoints) {
+    const body: Record<string, unknown> = {
+      filter,
+      limit: 256,
+      with_payload: withPayload,
+      with_vector: false,
+      ...(offset ? { offset } : {}),
+    }
+    const result = await qdrant.scroll(config.collectionName, body as never)
+    const points = (result.points as unknown[]) ?? []
+    all.push(...(points as Array<Record<string, unknown>>))
+    offset = result.next_page_offset
+    if (!offset || points.length === 0) break
+  }
+  return all
+}
+
+// Extract SQL operations (CREATE TABLE / ALTER / DROP / rename) from migration content.
+function classifyMigrationOperation(content: string): string {
+  const c = content.toLowerCase()
+  if (/create\s+table/.test(c)) return "CREATE TABLE"
+  if (/add\s+column|add\s+foreign\s+key|alter\s+table.*add/.test(c)) return "ADD COLUMN/CONSTRAINT"
+  if (/drop\s+column|drop\s+table/.test(c)) return "DROP"
+  if (/rename|change\s+column|modify\s+column/.test(c)) return "RENAME/MODIFY"
+  if (/insert\s+into/.test(c)) return "INSERT DATA"
+  if (/update\s+\w+\s+set/.test(c)) return "UPDATE DATA"
+  if (/alter\s+table/.test(c)) return "ALTER TABLE"
+  return "MIGRATION"
+}
+
+// Parse timestamp from migration filename: 1611350153036-add_cash_group.ts → epoch ms
+function parseMigrationTimestamp(filePath: string): { ms: number | null; iso: string | null } {
+  const m = filePath.match(/(\d{13})[-_]/)
+  if (m?.[1]) {
+    const ms = Number(m[1])
+    if (Number.isFinite(ms)) return { ms, iso: new Date(ms).toISOString() }
+  }
+  return { ms: null, iso: null }
+}
+
+// GET /api/schema/tables — all known tables with repo + migration + model counts.
+app.get("/api/schema/tables", async (_request, response) => {
+  try {
+    // Source 1: TOUCHES_TABLE edges from relationship graph (repo → table)
+    const allEdges = await readRelationshipGraph()
+    const tableRepos = new Map<string, Set<string>>()
+    for (const edge of allEdges) {
+      if (edge.type !== "TOUCHES_TABLE" || !edge.table) continue
+      // Validate table name: snake_case with underscore separator, min 5 chars.
+      // Single-word entries like "table"/"query"/"class" are extractor noise.
+      if (edge.table.length < 5 || !/^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(edge.table)) continue
+      if (!tableRepos.has(edge.table)) tableRepos.set(edge.table, new Set())
+      tableRepos.get(edge.table)!.add(edge.repoName)
+    }
+
+    // Source 2: migration chunks — count migrations per table via content match.
+    // Scanning 902 migration payloads is cheap; do a targeted scroll.
+    const migrationPoints = await scrollPoints(
+      { must: [{ key: "evidenceTypes", match: { any: ["migration"] } }] },
+      true,
+      5_000,
+    )
+
+    const tables = new Map<string, TableSummary>()
+
+    for (const [table, repos] of tableRepos) {
+      tables.set(table, {
+        name: table,
+        repos: [...repos].sort(),
+        repoCount: repos.size,
+        migrationCount: 0,
+        modelCount: 0,
+      })
+    }
+
+    for (const p of migrationPoints) {
+      const payload = (p.payload ?? {}) as Record<string, unknown>
+      const content = String(payload.content ?? "")
+      const repo = String(payload.repoName ?? "?")
+      // Look for table names referenced in migration SQL — word-boundary match
+      const lowerContent = content.toLowerCase()
+      for (const table of tables.keys()) {
+        if (new RegExp(`\\b${table.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(lowerContent)) {
+          const t = tables.get(table)!
+          t.migrationCount++
+          if (!t.repos.includes(repo)) {
+            t.repos.push(repo)
+            t.repoCount = t.repos.length
+          }
+        }
+      }
+      // Migrations may reference tables not in the edge graph — extract CREATE TABLE names
+      const createMatches = [...content.matchAll(/create\s+table\s+(?:if\s+not\s+exists\s+)?[`"']?([\w.]+)[`"']?/gi)]
+      for (const m of createMatches) {
+        const name = (m[1] ?? "").split(".").pop() ?? ""
+        // Validate: snake_case with underscore, min 5 chars, not a common word
+        if (!name || name.length < 5 || !/^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(name)) continue
+        if (!tables.has(name)) {
+          tables.set(name, { name, repos: [repo], repoCount: 1, migrationCount: 1, modelCount: 0 })
+        } else {
+          const t = tables.get(name)!
+          t.migrationCount++
+        }
+      }
+    }
+
+    // Source 3: db_model chunks — count model files per table via payload dbTables
+    const modelPoints = await scrollPoints(
+      { must: [{ key: "evidenceTypes", match: { any: ["db_model"] } }] },
+      true,
+      10_000,
+    )
+    for (const p of modelPoints) {
+      const payload = (p.payload ?? {}) as Record<string, unknown>
+      const repo = String(payload.repoName ?? "?")
+      const dbTables = (payload.dbTables as string[] | undefined) ?? []
+      for (const table of dbTables) {
+        if (!tables.has(table)) {
+          tables.set(table, { name: table, repos: [repo], repoCount: 1, migrationCount: 0, modelCount: 1 })
+        } else {
+          const t = tables.get(table)!
+          t.modelCount++
+          if (!t.repos.includes(repo)) {
+            t.repos.push(repo)
+            t.repoCount = t.repos.length
+          }
+        }
+      }
+    }
+
+    const list = [...tables.values()].sort(
+      (a, b) => b.repoCount * 100 + b.migrationCount - (a.repoCount * 100 + a.migrationCount),
+    )
+
+    response.json({ tables: list, totalTables: list.length })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
+// GET /api/schema/table/:name — full detail for one table.
+app.get("/api/schema/table/:name", async (request, response) => {
+  try {
+    const tableName = String(request.params.name ?? "").toLowerCase()
+    if (!tableName) {
+      response.status(400).json({ error: "Missing table name" })
+      return
+    }
+
+    const detail: TableDetail = { name: tableName, repos: [], migrations: [], modelFiles: [], sqlRefs: [] }
+    const repoSet = new Set<string>()
+
+    // Repos from relationship graph
+    const allEdges = await readRelationshipGraph()
+    for (const edge of allEdges) {
+      if (edge.type === "TOUCHES_TABLE" && edge.table?.toLowerCase() === tableName) {
+        repoSet.add(edge.repoName)
+      }
+    }
+
+    // Migration chunks mentioning the table
+    const migrationPoints = await scrollPoints(
+      { must: [{ key: "evidenceTypes", match: { any: ["migration"] } }] },
+      true,
+      5_000,
+    )
+    const seenMigrationFiles = new Set<string>()
+    for (const p of migrationPoints) {
+      const payload = (p.payload ?? {}) as Record<string, unknown>
+      const content = String(payload.content ?? "")
+      const repo = String(payload.repoName ?? "?")
+      const filePath = String(payload.filePath ?? "")
+      if (!content.toLowerCase().includes(tableName)) continue
+      if (seenMigrationFiles.has(`${repo}/${filePath}`)) continue
+      seenMigrationFiles.add(`${repo}/${filePath}`)
+      repoSet.add(repo)
+      const { ms, iso } = parseMigrationTimestamp(filePath)
+      detail.migrations.push({
+        repoName: repo,
+        branchName: payload.branchName as string | undefined,
+        filePath,
+        timestamp: ms,
+        timestampIso: iso,
+        operation: classifyMigrationOperation(content),
+        snippet: content.split(/\r?\n/).slice(0, 3).join(" ").slice(0, 200),
+      })
+    }
+    // Oldest first — timeline order
+    detail.migrations.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))
+
+    // Model files defining/using the table (dbTables payload match)
+    const modelPoints = await scrollPoints(
+      { must: [{ key: "evidenceTypes", match: { any: ["db_model", "raw_sql"] } }] },
+      true,
+      20_000,
+    )
+    const seenModelFiles = new Set<string>()
+    for (const p of modelPoints) {
+      const payload = (p.payload ?? {}) as Record<string, unknown>
+      const repo = String(payload.repoName ?? "?")
+      const filePath = String(payload.filePath ?? "")
+      const dbTables = ((payload.dbTables as string[] | undefined) ?? []).map(t => t.toLowerCase())
+      const content = String(payload.content ?? "").toLowerCase()
+      const mentions = dbTables.includes(tableName) || content.includes(tableName)
+      if (!mentions) continue
+      repoSet.add(repo)
+      const key = `${repo}/${filePath}:${payload.startLine}`
+      if (seenModelFiles.has(key)) continue
+      seenModelFiles.add(key)
+      const entry = {
+        repoName: repo,
+        filePath,
+        startLine: payload.startLine as number | undefined,
+        endLine: payload.endLine as number | undefined,
+      }
+      const evidence = (payload.evidenceTypes as string[] | undefined) ?? []
+      if (evidence.includes("db_model") && dbTables.includes(tableName)) {
+        detail.modelFiles.push(entry)
+      } else {
+        // raw_sql reference — classify the SQL operation
+        const snippet = content.slice(0, 500)
+        const op = /insert\s+into/.test(snippet) ? "INSERT"
+          : /update\s+\w+\s+set/.test(snippet) ? "UPDATE"
+          : /delete\s+from/.test(snippet) ? "DELETE"
+          : /create\s+table/.test(snippet) ? "CREATE"
+          : "SELECT"
+        detail.sqlRefs.push({ ...entry, operation: op })
+      }
+    }
+
+    detail.repos = [...repoSet].sort()
+    // Cap lists so the payload stays readable
+    detail.sqlRefs = detail.sqlRefs.slice(0, 50)
+
+    response.json(detail)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
+// GET /api/schema/migrations — all migrations, optionally filtered by table.
+app.get("/api/schema/migrations", async (request, response) => {
+  try {
+    const tableFilter = String(request.query.table ?? "").toLowerCase()
+    const migrationPoints = await scrollPoints(
+      { must: [{ key: "evidenceTypes", match: { any: ["migration"] } }] },
+      true,
+      5_000,
+    )
+
+    const seen = new Set<string>()
+    const entries: MigrationEntry[] = []
+    for (const p of migrationPoints) {
+      const payload = (p.payload ?? {}) as Record<string, unknown>
+      const content = String(payload.content ?? "")
+      const repo = String(payload.repoName ?? "?")
+      const filePath = String(payload.filePath ?? "")
+      const key = `${repo}/${filePath}`
+      if (seen.has(key)) continue
+      if (tableFilter && !content.toLowerCase().includes(tableFilter)) continue
+      seen.add(key)
+      const { ms, iso } = parseMigrationTimestamp(filePath)
+      entries.push({
+        repoName: repo,
+        branchName: payload.branchName as string | undefined,
+        filePath,
+        timestamp: ms,
+        timestampIso: iso,
+        operation: classifyMigrationOperation(content),
+        snippet: content.split(/\r?\n/).slice(0, 3).join(" ").slice(0, 200),
+      })
+    }
+    entries.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
+
+    response.json({ migrations: entries, total: entries.length })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
 app.get("/api/knowledge/notes", async (_request, response) => {
   try {
     response.json({
@@ -1011,6 +1367,64 @@ app.delete("/api/feedback/:id", async (request, response) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
 
+    response.status(500).json({ error: message })
+  }
+})
+
+// ── Learning rules ──
+app.get("/api/learning/rules", async (_request, response) => {
+  try {
+    const rules = await loadAllLearningRules()
+    response.json({ rules })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
+app.post("/api/learning/rules", async (request, response) => {
+  try {
+    const body = request.body as {
+      type?: string
+      trigger?: string
+      content?: string
+      rationale?: string
+      source?: string
+    }
+
+    if (!body.trigger || !body.content) {
+      response.status(400).json({ error: "Missing required fields: trigger, content" })
+      return
+    }
+
+    const rule = await createLearningRule({
+      type: (body.type as "prompt_directive" | "retrieval_boost" | "query_rewrite") ?? "prompt_directive",
+      trigger: body.trigger,
+      content: body.content,
+      rationale: body.rationale ?? "",
+      source: (body.source as "manual" | "meta_eval" | "feedback") ?? "manual",
+    })
+
+    response.json(rule)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    response.status(500).json({ error: message })
+  }
+})
+
+app.post("/api/learning/rules/:id/rollback", async (request, response) => {
+  try {
+    const reason = (request.body as { reason?: string })?.reason ?? ""
+    const ok = await rollbackRule(request.params.id, reason)
+
+    if (!ok) {
+      response.status(404).json({ error: `Rule not found: ${request.params.id}` })
+      return
+    }
+
+    response.json({ ok: true })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
     response.status(500).json({ error: message })
   }
 })
@@ -1343,8 +1757,91 @@ app.post("/api/decisions/:filename/rollback/:versionId", async (request, respons
   }
 })
 
+// --- Health checks ---
+// Liveness (/api/health): process is alive. Always 200 if the server can respond.
+// Readiness (/api/ready): upstream dependencies (Qdrant + Ollama) are reachable.
+// Readiness is cached briefly so a flood of probes does not hammer the upstreams.
+// BM25 prewarm status is included for observability but does not affect the HTTP
+// status code — queries degrade gracefully without BM25 (vector-only results).
+
+let bm25PrewarmStatus: "warming" | "ready" | "failed" | "skipped" = "skipped"
+
+type ReadinessState = {
+  qdrant: "ok" | "down"
+  ollama: "ok" | "down"
+  bm25: "warming" | "ready" | "failed" | "skipped"
+  qdrantDetail: string | undefined
+  ollamaDetail: string | undefined
+}
+
+type CachedReadiness = {
+  checkedAt: number
+  ready: boolean
+  state: ReadinessState
+}
+
+const READINESS_CACHE_TTL_MS = 5_000
+let cachedReadiness: CachedReadiness | null = null
+
+async function fetchWithTimeout(url: string, ms: number): Promise<Response> {
+  const controller = new AbortController()
+  const id = setTimeout(() => controller.abort(), ms)
+  try {
+    return await fetch(url, { signal: controller.signal })
+  } finally {
+    clearTimeout(id)
+  }
+}
+
+async function probeReadiness(): Promise<ReadinessState> {
+  let qdrantStatus: ReadinessState["qdrant"] = "ok"
+  let ollamaStatus: ReadinessState["ollama"] = "ok"
+  let qdrantDetail: string | undefined
+  let ollamaDetail: string | undefined
+
+  try {
+    await qdrant.getCollections()
+  } catch (err) {
+    qdrantStatus = "down"
+    qdrantDetail = err instanceof Error ? err.message : String(err)
+  }
+
+  try {
+    const res = await fetchWithTimeout(`${config.ollamaUrl}/api/tags`, 2_000)
+    if (!res.ok) {
+      ollamaStatus = "down"
+      ollamaDetail = `HTTP ${res.status}`
+    }
+  } catch (err) {
+    ollamaStatus = "down"
+    ollamaDetail = err instanceof Error ? err.message : String(err)
+  }
+
+  return { qdrant: qdrantStatus, ollama: ollamaStatus, bm25: bm25PrewarmStatus, qdrantDetail, ollamaDetail }
+}
+
+async function getReadiness(): Promise<CachedReadiness> {
+  if (cachedReadiness && Date.now() - cachedReadiness.checkedAt < READINESS_CACHE_TTL_MS) {
+    return cachedReadiness
+  }
+  const state = await probeReadiness()
+  const ready = state.qdrant === "ok" && state.ollama === "ok"
+  cachedReadiness = { checkedAt: Date.now(), ready, state }
+  return cachedReadiness
+}
+
 app.get("/api/health", (_request, response) => {
+  // Liveness: process is up.
   response.json({ status: "ok" })
+})
+
+app.get("/api/ready", async (_request, response) => {
+  const result = await getReadiness()
+  response.status(result.ready ? 200 : 503).json({
+    ready: result.ready,
+    checkedAt: new Date(result.checkedAt).toISOString(),
+    dependencies: result.state,
+  })
 })
 
 app.get("/api/auth-required", (_request, response) => {
@@ -1355,4 +1852,11 @@ const port = Number(process.env.PORT ?? 9191)
 
 app.listen(port, () => {
   console.log(`Local Codebase AI server running at http://localhost:${port}`)
+
+  // Prewarm BM25 disk cache in the background so the first /api/ask request
+  // does not pay the ~2-3 min cold-build cost. Non-blocking — errors are logged.
+  bm25PrewarmStatus = "warming"
+  prewarmBM25Index()
+    .then(() => { bm25PrewarmStatus = "ready" })
+    .catch(() => { bm25PrewarmStatus = "failed" })
 })

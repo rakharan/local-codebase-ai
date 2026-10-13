@@ -44,7 +44,7 @@ async function runForModel(model: string): Promise<ModelEvalResult> {
   try {
     const { stdout, stderr } = await execFileAsync(
       process.execPath,
-      ["--import", "./register-ts-node.mjs", "src/answer-regression.ts", "--chat-model", model],
+      ["--import", "tsx", "src/answer-regression.ts", "--chat-model", model],
       {
         cwd: process.cwd(),
         timeout: 900_000,

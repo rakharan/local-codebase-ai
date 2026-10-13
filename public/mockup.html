@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Codebase AI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#070b17;--sh:#0e1528;--p1:#131c34;--p2:#1b2745;--ln:#243157;--tx:#e9eefb;--mu:#8e9cc2;--ac:#8b7bff;--acs:#8b7bff24;--on:#0b0f1f;--ev:#3dd6c0;--evs:#3dd6c020;--wn:#ffb454;--wns:#ffb45422;--bd:#ff6b81;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--bg:#e8ecf6;--sh:#f8f9fd;--p1:#fff;--p2:#eef1fa;--ln:#dde3f1;--tx:#14192b;--mu:#5b688a;--ac:#5b49e6;--acs:#5b49e61c;--on:#fff;--ev:#0a8f7c;--evs:#0a8f7c1a;--wn:#a86200;--wns:#a862001c;--bd:#d6264a}}
+:root[data-theme="light"]{--bg:#e8ecf6;--sh:#f8f9fd;--p1:#fff;--p2:#eef1fa;--ln:#dde3f1;--tx:#14192b;--mu:#5b688a;--ac:#5b49e6;--acs:#5b49e61c;--on:#fff;--ev:#0a8f7c;--evs:#0a8f7c1a;--wn:#a86200;--wns:#a862001c;--bd:#d6264a}
+:root[data-theme="dark"]{--bg:#070b17;--sh:#0e1528;--p1:#131c34;--p2:#1b2745;--ln:#243157;--tx:#e9eefb;--mu:#8e9cc2;--ac:#8b7bff;--acs:#8b7bff24;--on:#0b0f1f;--ev:#3dd6c0;--evs:#3dd6c020;--wn:#ffb454;--wns:#ffb45422;--bd:#ff6b81}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--tx);font:14px/1.5 "Instrument Sans",system-ui,"Segoe UI",sans-serif;padding:12px;-webkit-font-smoothing:antialiased}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+.i{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.app{height:100%;max-width:1480px;margin:auto;display:grid;grid-template-columns:216px minmax(0,1fr);gap:12px}
+.side,.col{background:var(--sh);border:1px solid var(--ln);border-radius:20px}
+.side{padding:16px 10px;display:flex;flex-direction:column;gap:4px;min-height:0}
+.logo{display:flex;align-items:center;gap:10px;padding:2px 8px 16px;font-weight:600;font-size:15px}
+.logo i{width:30px;height:30px;border-radius:9px;background:var(--ac);color:var(--on);display:grid;place-items:center}
+nav{display:flex;flex-direction:column;gap:2px}
+nav button{display:flex;align-items:center;gap:11px;border:0;background:none;color:var(--mu);padding:9px 12px;border-radius:10px;text-align:left}
+nav button:hover{background:var(--p2);color:var(--tx)}
+nav button.on{background:var(--acs);color:var(--tx);font-weight:500}
+nav button.on .i{color:var(--ac)}
+.col{display:flex;flex-direction:column;min-width:0;overflow:hidden}
+.top{display:flex;align-items:center;gap:10px;padding:14px 22px;border-bottom:1px solid var(--ln)}
+.top h1{font-size:17px;font-weight:600;margin:0;letter-spacing:-.01em;margin-right:auto}
+.ib{width:34px;height:34px;border-radius:10px;border:1px solid var(--ln);background:var(--p1);display:grid;place-items:center}
+main{flex:1;min-height:0;display:grid;grid-template-rows:minmax(0,1fr);overflow:hidden}
+section{display:none;min-height:0;overflow:auto;padding:22px}
+section.on{display:block}
+section.chatgrid.on{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:22px;overflow:hidden}
+section.pg>*{max-width:1040px;margin-inline:auto}
+.lead{color:var(--mu);margin:0 auto 18px;max-width:1040px}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:99px;background:var(--p2);color:var(--mu);font-size:12px;white-space:nowrap}
+.chip.ok{color:var(--ev);background:var(--evs)}.chip.wn{color:var(--wn);background:var(--wns)}.chip.ac{color:var(--ac);background:var(--acs)}
+.d{width:7px;height:7px;border-radius:50%;background:var(--ev)}
+.btn{background:var(--ac);color:var(--on);border:0;border-radius:10px;padding:8px 14px;font-weight:500}
+.btn.g{background:var(--p2);color:var(--tx);border:1px solid var(--ln)}
+.btn.s{padding:5px 10px;font-size:12px}
+.pn{background:var(--p1);border:1px solid var(--ln);border-radius:14px;padding:16px;margin-bottom:14px}
+input[type=text],input:not([type]),select,textarea{background:var(--p1);border:1px solid var(--ln);border-radius:10px;padding:8px 12px}
+.tools{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}.tools input{flex:1;min-width:160px}
+.tbl{overflow-x:auto}.tbl>div{min-width:660px}
+.row{display:grid;gap:14px;align-items:center;padding:12px 4px;border-bottom:1px solid var(--ln)}
+.row:last-child{border:0}
+.row small,.mu{color:var(--mu)}
+.bar{height:5px;border-radius:9px;background:var(--p2);overflow:hidden}.bar i{display:block;height:100%;background:var(--ac);border-radius:9px;transition:width .3s}.bar.t i{background:var(--ev)}
+.sw{width:36px;height:20px;border-radius:99px;background:var(--ln);border:0;position:relative;flex:none;padding:0}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:#fff;transition:.15s}
+.sw.on{background:var(--ev)}.sw.on::after{left:19px}
+.stats{display:flex;gap:40px;flex-wrap:wrap;margin:0 auto 20px}.stats b{display:block;font-size:26px;font-weight:600;letter-spacing:-.02em}.stats span{color:var(--mu);font-size:12px}
+code,pre,.mono{font-family:"JetBrains Mono",ui-monospace,Consolas,monospace;font-size:12px}
+/* chat */
+.conv{display:flex;flex-direction:column;min-height:0}
+.scroll{flex:1;overflow:auto;padding-right:6px}
+.u{display:flex;justify-content:flex-end;margin:6px 0 18px}.u div{background:var(--p2);padding:10px 14px;border-radius:16px 16px 4px 16px;max-width:80%}
+.a{margin-bottom:26px}
+.steps{border:1px solid var(--ln);background:var(--p1);border-radius:14px;padding:6px 14px;margin-bottom:14px;max-width:560px}
+.step{display:grid;grid-template-columns:16px 1fr auto;gap:10px;align-items:center;padding:7px 0;color:var(--mu)}
+.step em{font-style:normal;font-size:12px;opacity:0;transition:opacity .3s}
+.step.done em{opacity:1}.step.run,.step.done{color:var(--tx)}
+.sp{width:14px;height:14px;border-radius:50%;border:1.5px solid var(--ln)}
+.run .sp{border-color:var(--ac) transparent var(--ac) var(--ac);animation:spin .8s linear infinite}
+.done .sp{background:var(--ev);border-color:var(--ev);position:relative}
+.done .sp::after{content:"";position:absolute;left:3.5px;top:1.5px;width:4px;height:7px;border:solid var(--sh);border-width:0 1.8px 1.8px 0;transform:rotate(40deg)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.ans p{line-height:1.7;margin:.6em 0;max-width:68ch}
+.cite{display:inline-grid;place-items:center;width:18px;height:18px;border-radius:6px;background:var(--evs);color:var(--ev);border:0;font-size:11px;font-weight:600;margin:0 3px;padding:0}
+.cite:hover{background:var(--ev);color:var(--sh)}
+.code{border:1px solid var(--ln);border-radius:12px;overflow:hidden;margin:12px 0;background:var(--bg);max-width:620px}
+.ch{display:flex;gap:10px;align-items:center;padding:6px 12px;background:var(--p2);font-size:12px;color:var(--mu)}.ch span{color:var(--tx);font-weight:500}.ch button{margin-left:auto}
+pre{margin:0;padding:12px;line-height:1.65;overflow-x:auto}
+.k{color:var(--ac)}.s{color:var(--ev)}.f{color:var(--wn)}.n{color:var(--bd)}
+.meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}.meta .mini{border:1px solid var(--ln);background:none;border-radius:8px;padding:4px 10px;color:var(--mu);font-size:12px}.meta .mini:hover{color:var(--tx)}
+.composer{padding-top:10px}
+.sugg{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.sugg button,.chips button{border:1px solid var(--ln);background:none;color:var(--mu);border-radius:99px;padding:4px 12px;font-size:12px}
+.sugg button:hover{color:var(--tx)}.chips button.on{background:var(--acs);color:var(--tx);border-color:transparent}
+.box{border:1px solid var(--ln);background:var(--p1);border-radius:16px;padding:10px 12px}.box:focus-within{border-color:var(--ac)}
+textarea{width:100%;border:0!important;background:transparent!important;resize:none;outline:none;padding:4px 2px!important}
+.b2{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.chips{display:flex;gap:6px;flex-wrap:wrap;margin-right:auto}
+.send{width:34px;height:34px;border-radius:50%;border:0;background:var(--ac);color:var(--on);display:grid;place-items:center}
+.evid{overflow:auto;min-height:0}.evid h3{font-size:13px;margin:4px 0 12px;font-weight:600}
+.src{border:1px solid var(--ln);background:var(--p1);border-radius:12px;padding:12px;margin-bottom:10px;transition:.2s}
+.src.hl{border-color:var(--ev);box-shadow:0 0 0 3px var(--evs)}
+.sh{display:flex;gap:8px;align-items:flex-start;margin-bottom:8px}.sh div{flex:1;min-width:0;word-break:break-all}.sh b{font-weight:600}
+.nb{width:20px;height:20px;border-radius:6px;background:var(--evs);color:var(--ev);display:grid;place-items:center;font-size:11px;font-weight:600;flex:none}
+.sc{display:grid;grid-template-columns:96px 1fr;gap:8px;align-items:center;font-size:11px;color:var(--mu);margin-top:5px}
+.snip{margin-top:8px;color:var(--mu);font-size:12px;border-left:2px solid var(--ln);padding-left:8px}
+/* admin bits */
+.seg{display:inline-flex;background:var(--p2);border-radius:10px;padding:3px;gap:2px}.seg button{border:0;background:none;color:var(--mu);padding:4px 12px;border-radius:8px;font-size:12px}.seg button.on{background:var(--p1);color:var(--tx)}
+.rg{display:grid;grid-template-columns:270px minmax(0,1fr);gap:14px}
+.rr{display:grid;grid-template-columns:22px 1fr 170px;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid var(--ln)}
+.rr:last-child{border:0}.rr b{font-weight:600}.rr .p{color:var(--mu);font-size:12px;word-break:break-all}
+input[type=range]{width:100%;accent-color:var(--ac)}
+.lbl{font-size:12px;color:var(--mu);margin:14px 0 6px;display:flex;justify-content:space-between}
+.gg{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:14px}
+#gsvg{width:100%;height:auto;display:block}#gsvg g[data-id]{cursor:pointer}#gsvg text{fill:var(--tx);font:500 11.5px "Instrument Sans",sans-serif;text-anchor:middle;pointer-events:none}
+.leg{display:flex;gap:14px;font-size:12px;color:var(--mu);margin-top:6px}.leg i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.logl{font-size:12px;color:var(--mu);line-height:1.9}.logl b{color:var(--tx);font-weight:500}
+#toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translate(-50%,16px);background:var(--p2);border:1px solid var(--ln);padding:10px 16px;border-radius:12px;opacity:0;transition:.25s;pointer-events:none;z-index:9}
+#toast.on{opacity:1;transform:translate(-50%,0)}
+[hidden]{display:none!important}
+button.chip{border:0;cursor:pointer}
+.mini{border:1px solid var(--ln);background:none;border-radius:8px;padding:4px 10px;color:var(--mu);font-size:12px}.mini:hover{color:var(--tx)}
+.conv{position:relative}
+.chead{display:flex;gap:8px;align-items:center;margin-bottom:10px;position:relative;flex-wrap:wrap}
+.pop{position:absolute;z-index:8;background:var(--p1);border:1px solid var(--ln);border-radius:12px;padding:8px;min-width:240px;max-width:340px}
+.chead .pop{top:36px;left:0;width:min(420px,100%);max-width:none}
+#stpop{position:fixed;top:64px;right:20px;padding:14px}
+.pi{display:flex;justify-content:space-between;gap:12px;width:100%;border:0;background:none;padding:9px 12px;text-align:left;border-radius:8px}.pi:hover{background:var(--p2)}.pi small{color:var(--mu);white-space:nowrap}
+.ov{position:fixed;inset:0;background:#0008;z-index:20;display:grid;place-items:center;padding:16px}
+.ov.r{place-items:stretch end;padding:0}
+.modal{background:var(--sh);border:1px solid var(--ln);border-radius:16px;width:min(760px,100%);max-height:86vh;overflow:auto}
+.modal.pal{width:min(520px,100%);align-self:start;margin-top:12vh}
+.modal.pal input{width:100%;border:0;border-bottom:1px solid var(--ln);border-radius:0;padding:14px 16px;background:transparent;outline:none}
+.drawer{width:min(420px,100%);height:100%;overflow:auto;background:var(--sh);border-left:1px solid var(--ln);padding:20px;border-radius:16px 0 0 16px}
+.mh{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:16px 18px;border-bottom:1px solid var(--ln)}
+.drawer .mh{padding:0 0 10px;border:0}
+.fv{padding:8px 0;overflow-x:auto}.ln{display:flex;padding:0 14px;line-height:1.7}.ln i{width:40px;color:var(--mu);font-style:normal;flex:none;user-select:none}.ln span{white-space:pre}.ln.hl{background:var(--evs);box-shadow:inset 2px 0 var(--ev)}
+.empty{text-align:center;padding:12vh 12px 0}.empty h2{font-size:22px;letter-spacing:-.01em;margin:0 0 8px}
+.step.warn{color:var(--tx)}.step.warn em{opacity:1;color:var(--wn)}.step.warn .sp{background:var(--wn);border-color:var(--wn)}
+.step.bad{color:var(--tx)}.step.bad em{opacity:1;color:var(--bd)}.step.bad .sp{background:var(--bd);border-color:var(--bd)}
+.err{border:1px solid var(--bd);border-radius:12px;padding:12px 14px;max-width:560px}
+.sk{display:block;height:40px;border-radius:10px;background:linear-gradient(90deg,var(--p2),var(--ln),var(--p2));background-size:200% 100%;animation:sh 1.2s linear infinite}
+@keyframes sh{to{background-position:-200% 0}}
+.lnk{border:0;background:none;padding:0;text-align:left;color:var(--tx)}.lnk:hover{color:var(--ac)}
+#gsvg g[data-id]{touch-action:none}
+@media (max-width:760px){#jobs{min-width:0}.cr{grid-template-columns:1fr auto!important;gap:8px}}
+@media (min-width:761px) and (max-width:1000px){.app{grid-template-columns:64px minmax(0,1fr)}nav button span,.logo b{display:none}nav button{justify-content:center}.logo{justify-content:center;padding-inline:0}}
+@media (max-width:900px){section.chatgrid.on{grid-template-columns:1fr;overflow:auto}.rg,.gg,.two{grid-template-columns:1fr}}
+@media (max-width:760px){body{padding:8px}.app{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) auto;gap:8px}.col{order:1}.side{order:2;flex-direction:row;padding:6px;overflow-x:auto;border-radius:16px}.logo{display:none}nav{flex-direction:row;gap:2px}nav button{flex-direction:column;gap:2px;font-size:10.5px;padding:6px 10px;white-space:nowrap}.top{padding:12px 14px}section{padding:14px}.top .chip.hide{display:none}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.8A8 8 0 1 1 21 12z"/></symbol>
+<symbol id="i-idx" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></symbol>
+<symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+<symbol id="i-rule" viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 17l.8 2.2L22 20l-2.2.8L19 23l-.8-2.2L16 20l2.2-.8z"/></symbol>
+<symbol id="i-find" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></symbol>
+<symbol id="i-graph" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="8" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M8 7l8 1M7 8l4 8M17 10l-4 6"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+<symbol id="i-bars" viewBox="0 0 24 24"><path d="M5 20V10M12 20V4M19 20v-7"/></symbol>
+<symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+</defs></svg>
+
+<div class="app">
+<aside class="side"><div class="logo"><i><svg class="i"><use href="#i-find"/></svg></i><b>Codebase AI</b></div><nav id="nav"></nav><div style="margin-top:auto;padding-top:10px;border-top:1px solid var(--ln)"><button class="mini" id="setbtn" style="width:100%;text-align:center">Settings</button></div></aside>
+<div class="col">
+<header class="top"><h1 id="title">Chat</h1>
+<button class="chip hide" data-st="qdrant"><i class="d"></i>Qdrant</button><button class="chip hide" data-st="ollama"><i class="d"></i>Ollama</button><button class="ib" id="pal" aria-label="Search pages, repositories and chats" title="Ctrl K"><svg class="i"><use href="#i-find"/></svg></button>
+<button class="ib" id="theme" aria-label="Switch theme"><svg class="i"><use href="#i-sun"/></svg></button></header>
+<main>
+
+<section id="chat" class="chatgrid on">
+<div class="conv">
+<div class="chead"><button class="mini" id="hbtn">History</button><button class="mini" id="nchat">New chat</button><span class="chip wn" id="degb" hidden>Keyword search is down, answers use meaning only</span><div class="pop" id="hpop" hidden></div></div>
+<div class="scroll" id="thread"></div>
+<div class="composer">
+<div class="sugg" id="sugg"></div>
+<div class="box"><textarea id="q" rows="2" placeholder="Ask about code, architecture or config"></textarea>
+<div class="b2"><div class="chips" id="scope"></div>
+<select id="model" aria-label="Model"><option>Claude via 9router</option><option>Ollama local</option><option>Groq</option></select>
+<button class="send" id="send" aria-label="Send question"><svg class="i"><use href="#i-up"/></svg></button></div></div>
+</div></div>
+<aside class="evid"><h3>Evidence</h3><div id="cards"><p class="mu">Sources appear here when you ask a question.</p></div></aside>
+</section>
+
+<section id="index" class="pg"><p class="lead">See what is indexed, how fresh it is, and re-index repositories.</p>
+<div class="stats"><div><b>152,340</b><span>chunks in code_chunks</span></div><div><b>25</b><span>repositories</span></div><div><b>768</b><span>dimensions, nomic-embed-text</span></div></div>
+<div class="pn"><div class="tools"><input id="rf" placeholder="Filter repositories" aria-label="Filter repositories"><button class="chip ok" id="lockb">Index lock free</button><button class="btn" id="ra">Reindex all</button></div><div class="tbl"><div id="repos"></div></div></div></section>
+
+<section id="schema" class="pg"><p class="lead">Structure of the Qdrant collection and what each field is used for.</p>
+<div class="pn"><div class="tools" style="margin:0"><b style="font-size:16px">code_chunks</b><span class="chip ok">Green</span><span class="chip">152,340 points</span><span class="chip">Cosine</span><span class="chip">768 dimensions</span></div></div>
+<div class="two"><div class="pn"><div id="fields"></div></div>
+<div class="pn"><b>Sample point</b><div class="code" style="margin:10px 0 0"><pre>{
+  <span class="s">"id"</span>: <span class="n">481920</span>,
+  <span class="s">"vector"</span>: [<span class="n">0.021</span>, <span class="n">-0.113</span>, …],
+  <span class="s">"payload"</span>: {
+    <span class="s">"repo"</span>: <span class="s">"gateway-service"</span>,
+    <span class="s">"path"</span>: <span class="s">"src/guard/callback.ts"</span>,
+    <span class="s">"language"</span>: <span class="s">"typescript"</span>,
+    <span class="s">"evidenceTypes"</span>: [<span class="s">"code"</span>],
+    <span class="s">"start_line"</span>: <span class="n">42</span>,
+    <span class="s">"end_line"</span>: <span class="n">78</span>,
+    <span class="s">"content_hash"</span>: <span class="s">"9f2c1ab4"</span>
+  }
+}</pre></div></div></div></section>
+
+<section id="rules" class="pg"><p class="lead">Rules learned from feedback. Turn them on or off, or approve new suggestions.</p>
+<div class="pn" id="rulelist"></div>
+<div class="pn"><div class="tools" style="margin:0"><input id="nr" placeholder="Describe a new rule, for example: prefer README files for setup questions"><button class="btn" id="ar">Add rule</button></div></div>
+<div class="pn"><b>Answers marked not helpful</b><div id="fbl" style="margin-top:6px"></div></div></section>
+
+<section id="retrieval" class="pg"><p class="lead">Tune how meaning and keyword search are combined, and watch the ranking change.</p>
+<div class="rg"><div class="pn"><b>Search settings</b>
+<div class="lbl"><span>Keywords</span><span id="wl">60% meaning</span><span>Meaning</span></div><input type="range" id="rw" min="0" max="100" value="60" aria-label="Balance between keyword and meaning search">
+<div class="lbl"><span>Results to keep</span><span id="kl">5</span></div><input type="range" id="rk" min="2" max="6" value="5" aria-label="Results to keep">
+<div class="lbl"><span>Source type</span></div><div class="seg" id="ty"><button class="on" data-v="all">All</button><button data-v="code">Code</button><button data-v="doc">Docs</button><button data-v="config">Config</button></div>
+<div class="row" style="grid-template-columns:1fr auto;margin-top:14px;border:0;padding:0"><span>Simulate keyword outage</span><button class="sw" id="dg" role="switch" aria-checked="false" aria-label="Simulate keyword outage"></button></div><div class="row" style="grid-template-columns:1fr auto;border:0;padding:8px 0 0"><span>Simulate Ollama outage</span><button class="sw" id="ol" role="switch" aria-checked="false" aria-label="Simulate Ollama outage"></button></div></div>
+<div class="pn"><div class="tools"><input id="rq" value="callback signature validation" aria-label="Test query"></div><div id="rbn"></div><div id="rres"></div></div></div></section>
+
+<section id="graph" class="pg"><p class="lead">How services depend on each other, found from HTTP clients and config files. Select a node to inspect it.</p>
+<div class="gg"><div class="pn"><input id="gs" placeholder="Find a service" aria-label="Find a service" style="margin-bottom:8px;width:100%"><svg id="gsvg" viewBox="0 0 700 390" role="img" aria-label="Service dependency graph"></svg>
+<div class="leg"><span><i style="background:var(--ac)"></i>Service</span><span><i style="background:var(--ev)"></i>Database</span><span><i style="background:var(--wn)"></i>Queue</span></div></div>
+<div class="pn" id="gdet"></div></div></section>
+
+<section id="cron" class="pg"><p class="lead">Scheduled jobs that keep the index and rules up to date.</p>
+<div class="pn"><div class="tbl"><div id="jobs"></div></div></div>
+<div class="pn"><b>Recent runs</b><div class="logl" id="runlog" style="margin-top:6px"></div></div></section>
+
+<section id="metrics" class="pg"><div class="tools" style="max-width:1040px;margin:0 auto 14px"><p class="lead" style="margin:0;flex:1">How the system is performing and how good the answers are.</p><div class="seg" id="rng"><button data-v="24h">24 hours</button><button class="on" data-v="7d">7 days</button><button data-v="30d">30 days</button></div></div>
+<div class="stats" id="kpis"></div>
+<div class="pn"><b>Questions asked</b><div id="chart"></div></div>
+<div class="two"><div class="pn"><b>Where the time goes</b><div id="lat" style="margin-top:12px"></div></div><div class="pn"><b>Answer quality</b><div id="qual" style="margin-top:12px"></div></div></div></section>
+
+</main></div></div>
+<div class="pop" id="stpop" hidden></div>
+<div class="ov" id="ov" hidden><div class="modal" role="dialog" aria-modal="true"></div></div>
+<div class="ov r" id="dov" hidden><aside class="drawer" role="dialog" aria-modal="true"></aside></div>
+<div class="ov" id="pov" hidden><div class="modal pal" role="dialog" aria-modal="true"><input id="pin" placeholder="Jump to a page, repository or chat" aria-label="Search"><div id="plist"></div></div></div>
+<div id="toast" role="status"></div>
+
+<script>
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
+const RM=matchMedia('(prefers-reduced-motion: reduce)').matches;
+const sleep=ms=>new Promise(r=>setTimeout(r,RM?0:ms));
+const ic=n=>`<svg class="i"><use href="#i-${n}"/></svg>`;
+function toast(t){const e=$('#toast');e.textContent=t;e.classList.add('on');clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove('on'),2200)}
+/* nav + theme + role */
+const ADMIN_PAGES=['index','schema','rules','retrieval','graph','cron','metrics'];
+const V=[['chat','chat','Chat',0],['index','idx','Index Manager',1],['schema','db','DB Schema',1],['rules','rule','Learning Rules',1],['retrieval','find','Retrieval',1],['graph','graph','Graph',1],['cron','clock','Cron',1],['metrics','bars','Metrics',1]];
+let isAdmin=localStorage.getItem('cbai_admin')==='1';
+function rNav(){const nav=$('#nav');nav.innerHTML='';V.forEach(([id,i,l,ad],n)=>{if(ad&&!isAdmin)return;const b=document.createElement('button');b.className=n?'':'on';b.innerHTML=ic(i)+`<span>${l}</span>`;b.onclick=()=>{$$('section').forEach(s=>s.classList.toggle('on',s.id==id));$$('nav button').forEach(x=>x.classList.toggle('on',x==b));$('#title').textContent=l};nav.append(b)})}
+rNav();
+let dark=matchMedia('(prefers-color-scheme: dark)').matches;
+$('#theme').onclick=()=>{dark=!dark;document.documentElement.dataset.theme=dark?'dark':'light'};
+function openSettings(){openOv('ov',`<div class="mh"><b style="font-size:16px">Settings</b><button class="ib" data-x aria-label="Close">×</button></div><div style="padding:16px 18px 20px"><div class="lbl" style="margin:0 0 4px">Admin access</div><input id="akey" type="password" placeholder="Enter admin key to unlock management pages" style="width:100%;margin-bottom:8px" value="${(localStorage.getItem('cbai_akey')||'').replace(/"/g,'&quot;')}"><p class="mu" style="font-size:12px;margin:0 0 12px">Without an admin key, only the Chat page is visible.</p><div style="display:flex;gap:8px"><button class="btn" data-aset>Save</button>${isAdmin?'<button class="btn g s" data-alock>Lock admin</button>':''}</div></div>`)}
+document.addEventListener('click',e=>{const s=e.target.closest('[data-aset]');if(s){const v=$('#akey').value.trim();if(v){localStorage.setItem('cbai_akey',v);localStorage.setItem('cbai_admin','1');isAdmin=1;rNav();closeOv();toast('Admin access unlocked')}else{localStorage.removeItem('cbai_akey');localStorage.removeItem('cbai_admin');isAdmin=0;rNav();closeOv();toast('Admin access removed')}}const l=e.target.closest('[data-alock]');if(l){localStorage.removeItem('cbai_admin');isAdmin=0;rNav();closeOv();toast('Admin pages locked')}});
+/* chat */
+const SRC=[
+{n:1,f:'gateway-service/src/guard/callback.ts',l:'lines 42 to 53',v:.82,k:.64,t:'Code',s:'verify(body, sig, ts) recomputes the HMAC of the raw body…'},
+{n:2,f:'gateway-service/src/lib/http-client.ts',l:'lines 15 to 24',v:.77,k:.58,t:'Code',s:'forward() retries twice on 502 and 503, then throws…'},
+{n:3,f:'docs-portal/docs/payments/callbacks.md',l:'section: Retries',v:.74,k:.71,t:'Doc',s:'Upstream failures are reported to the caller as 424…'}];
+const CODE=`<div class="code"><div class="ch"><span>callback.ts</span>lines 42 to 53<button class="mini btn g s" data-copy>Copy</button></div><pre><span class="k">const</span> expected = <span class="f">hmac</span>(secret, rawBody);
+<span class="k">if</span> (!<span class="f">safeEqual</span>(expected, sig) || <span class="f">isStale</span>(ts, <span class="n">300</span>)) {
+  <span class="k">throw new</span> <span class="f">Forbidden</span>(<span class="s">'invalid callback'</span>);
+}</pre></div>`;
+const ANS=['The gateway checks every callback before it goes anywhere. ','It recomputes the HMAC of the raw request body and compares it with the signature header',{c:1},'. Anything older than five minutes is rejected as stale, so a replayed callback fails even if its signature is valid. ',{code:1},'Once both checks pass, the request is forwarded to payments-api through the shared HTTP client',{c:2},'. It retries twice on a 502 or 503, then reports the failure to the caller as a 424',{c:3},'.'];
+const STEPS=[['Searching by meaning','30 chunks, 38 ms'],['Searching by keyword','30 chunks, 12 ms'],['Merging and ranking','12 kept, 59 ms'],['Writing the answer','Claude via 9router, 1.8 s'],['Checking quality','Score 0.88, passed, 410 ms']];
+async function stream(el,ANS){let p=el.appendChild(document.createElement('p'));
+for(const s of ANS){if(typeof s=='string'){for(const w of s.split(/(?<= )/)){p.append(w);await sleep(26)}}
+else if(s.c)p.insertAdjacentHTML('beforeend',`<button class="cite" data-n="${s.c}" aria-label="Show source ${s.c}">${s.c}</button>`);
+else{el.insertAdjacentHTML('beforeend',CODE);p=el.appendChild(document.createElement('p'))}}}
+function cards(){$('#cards').innerHTML=SRC.map(s=>{const[a,...r]=s.f.split('/'),b=r.pop();return`<div class="src" id="s${s.n}"><div class="sh"><span class="nb">${s.n}</span><div><b>${b}</b><br><small class="mu">${a}/${r.join('/')}</small></div><span class="chip">${s.t}</span></div>
+<div class="sc">Meaning match<div class="bar t"><i style="width:${s.v*100}%"></i></div></div><div class="sc">Keyword match<div class="bar t"><i style="width:${s.k*100}%"></i></div></div><div class="snip">${s.l}: ${s.s}</div><button class="btn g s" data-open="${s.n}" style="margin-top:8px">Open file</button></div>`}).join('')}
+const ANS2a=['ledger-core is called by payments-api.'];
+const ANS2=['Only payments-api calls ledger-core. ','After a callback is confirmed, it posts a ledger entry through the internal client',{c:2},'. No other service writes to the ledger',{c:3},', so it is the only dependency to check when ledger entries look wrong.'];
+async function run(q){const t=$('#thread');$('.empty')?.remove();
+if(!HIST.some(h=>h.t==q))HIST.unshift({t:q,d:'Today'});
+t.insertAdjacentHTML('beforeend','<div class="u"><div></div></div>');t.lastChild.firstChild.textContent=q;
+const a=document.createElement('div');a.className='a';
+a.innerHTML='<div class="steps"></div><div class="ans"></div><div class="meta"></div>';t.append(a);
+const sb=a.querySelector('.steps'),ans=a.querySelector('.ans');
+const add=(n,d)=>{sb.insertAdjacentHTML('beforeend',`<div class="step"><i class="sp"></i><span>${n}</span><em>${d}</em></div>`);return sb.lastChild};
+const go=e=>e.className='step run',dn=e=>e.className='step done';
+const rows=STEPS.map(([n,d])=>add(n,d));
+if(S.dg)rows[1].querySelector('em').textContent='Unavailable, skipped';
+if(S.ol){go(rows[0]);await sleep(600);rows[0].className='step bad';rows[0].querySelector('em').textContent='Ollama not responding';
+ans.innerHTML=`<div class="err"><b>The embedding service is not responding.</b><br><span class="mu">Start Ollama on localhost:11434, then try again.</span><br><button class="btn g s" style="margin-top:8px" data-retry="${encodeURIComponent(q)}">Try again</button></div>`;return}
+for(let i=0;i<3;i++){go(rows[i]);await sleep(420);dn(rows[i])}
+cards();go(rows[3]);
+const retry=/^Which services/.test(q);
+await stream(ans,retry?ANS2a:ANS);dn(rows[3]);go(rows[4]);await sleep(500);
+if(retry){rows[4].className='step warn';rows[4].querySelector('em').textContent='Score 0.41, below 0.5';await sleep(700);
+const x=add('Retrying with more context','8 more chunks');go(x);await sleep(800);dn(x);
+const y=add('Writing a new answer','Claude via 9router');go(y);ans.innerHTML='';await stream(ans,ANS2);dn(y);
+const z=add('Checking quality','Score 0.86, passed');go(z);await sleep(500);dn(z)}else dn(rows[4]);
+a.querySelector('.meta').innerHTML=`<span class="chip ok">Grounded ${retry?'0.86':'0.91'}</span><span class="chip ok">Relevant 0.88</span>${retry?'<span class="chip wn">Retried once</span>':''}<span class="chip">${retry?'4.6':'1.8'} s</span><button class="mini" data-fb="up">Helpful</button><button class="mini" data-fb="down">Not helpful</button><button class="mini" data-rg>Regenerate</button>`;
+t.scrollTop=t.scrollHeight}
+$('#sugg').innerHTML=['Where is the retry policy configured?','What does reindex-all do when a lock exists?','Which services call the ledger?'].map(s=>`<button>${s}</button>`).join('');
+$('#scope').innerHTML=['All repos','gateway-service','payments-api','docs-portal'].map((s,i)=>`<button class="${i?'':'on'}">${s}</button>`).join('');
+function ask(q){q=q.trim();if(!q)return;$('#q').value='';run(q)}
+$('#send').onclick=()=>ask($('#q').value);
+$('#q').onkeydown=e=>{if(e.key=='Enter'&&!e.shiftKey){e.preventDefault();ask($('#q').value)}};
+$('#sugg').onclick=e=>{if(e.target.tagName=='BUTTON')ask(e.target.textContent)};
+$('#scope').onclick=e=>{if(e.target.tagName=='BUTTON')$$('#scope button').forEach(b=>b.classList.toggle('on',b==e.target))};
+document.addEventListener('click',e=>{const c=e.target.closest('.cite');if(c){$$('.src').forEach(s=>s.classList.remove('hl'));const s=$('#s'+c.dataset.n);if(s){s.classList.add('hl');s.scrollIntoView({block:'nearest',behavior:RM?'auto':'smooth'})}}
+const f=e.target.closest('[data-fb]');if(f)toast(f.dataset.fb=='up'?'Thanks. This feeds Learning Rules.':'Noted. We will review this answer.');
+if(e.target.closest('[data-rg]'))toast('Regenerating answer');
+if(e.target.closest('[data-copy]')){try{navigator.clipboard.writeText(e.target.closest('.code').querySelector('pre').textContent)}catch(_){}toast('Copied')}});
+/* index */
+const REPOS=[{n:'gateway-service',t:'TypeScript',c:8412,a:'2 hours ago',s:'ok'},{n:'payments-api',t:'PHP',c:11090,a:'2 hours ago',s:'ok'},{n:'auth-service',t:'TypeScript',c:5230,a:'1 day ago',s:'ok'},{n:'docs-portal',t:'Docusaurus',c:14775,a:'9 days ago',s:'stale'},{n:'notify-worker',t:'Go',c:3904,a:'Now',s:'run',p:64},{n:'ledger-core',t:'Java',c:9120,a:'3 days ago',s:'ok'}];
+const G='grid-template-columns:minmax(150px,1.4fr) 90px 110px minmax(150px,1fr) 90px';
+function rRepos(){if(window.ld)return;const f=$('#rf').value.toLowerCase();$('#repos').innerHTML=`<div class="row mu" style="${G};padding-top:0"><small>Repository</small><small>Chunks</small><small>Indexed</small><small>Status</small><small></small></div>`+REPOS.filter(r=>r.n.includes(f)).map(r=>`<div class="row" style="${G}"><div><button class="lnk" data-rd="${r.n}"><b>${r.n}</b></button><br><small>${r.t}</small></div><span>${r.c.toLocaleString()}</span><small>${r.a}</small><div>${r.s=='run'?`<div class="bar"><i style="width:${r.p}%"></i></div><small>Indexing ${Math.round(r.p)}%</small>`:r.s=='ok'?'<span class="chip ok">Up to date</span>':'<span class="chip wn">Needs reindex</span>'}</div><button class="btn g s" data-ri="${r.n}" ${r.s=='run'?'disabled':''}>Reindex</button></div>`).join('')}
+setInterval(()=>{let ch=0;REPOS.forEach(r=>{if(r.s=='run'){r.p+=6+Math.random()*10;ch=1;if(r.p>=100){r.s='ok';r.a='Just now';toast(r.n+' reindexed')}}});if(ch)rRepos()},500);
+$('#rf').oninput=rRepos;
+$('#repos').onclick=e=>{const n=e.target.dataset.ri;if(n){const r=REPOS.find(x=>x.n==n);r.s='run';r.p=0;rRepos()}};
+$('#ra').onclick=()=>{if(LK.held){toast('Blocked by a stale lock');openLock();return}REPOS.forEach(r=>{if(r.s!='run'){r.s='run';r.p=0}});rRepos();toast('Reindexing all repositories')};
+rRepos();
+/* schema */
+const F=[['repo','keyword',1,'Filter by repository'],['path','keyword',1,'Open a file from a citation'],['language','keyword',1,'Choose the chunker, filter by language'],['evidenceTypes','keyword[]',1,'Filter code, docs or config on the server'],['content_hash','keyword',1,'Skip chunks that did not change'],['start_line','integer',0,'Line range in citations'],['end_line','integer',0,'Line range in citations'],['text','text',0,'Chunk body shown as a snippet']];
+$('#fields').innerHTML=F.map(([n,t,i,u])=>`<div class="row" style="grid-template-columns:1fr auto"><div><code>${n}</code> <small>${t}</small><br><small>${u}</small></div><span class="chip ${i?'ok':''}">${i?'Indexed':'Not indexed'}</span></div>`).join('');
+/* rules */
+const RL=[{t:'Prefer documentation for architecture questions',s:'From feedback',h:312,on:1},{t:'Boost config files for settings and environment questions',s:'From feedback',h:148,on:1},{t:'Ignore generated and vendor folders',s:'Manual',h:96,on:1},{t:'Always cite the file path and line range',s:'Manual',h:1284,on:1},{t:'Prefer the newest doc version when two disagree',s:'Suggested',h:0,on:0,g:1}];
+function rRules(){$('#rulelist').innerHTML=RL.map((r,i)=>`<div class="row" style="grid-template-columns:1fr auto"><div>${r.t}<br><small>${r.s}${r.g?'':', used '+r.h+' times'}</small></div>${r.g?`<span><button class="btn s" data-ap="${i}">Approve</button> <button class="btn g s" data-dm="${i}">Dismiss</button></span>`:`<button class="sw ${r.on?'on':''}" role="switch" aria-checked="${!!r.on}" aria-label="Toggle rule" data-sw="${i}"></button>`}</div>`).join('')}
+$('#rulelist').onclick=e=>{const d=e.target.dataset;if(d.sw)RL[d.sw].on^=1;if(d.ap){RL[d.ap].g=0;RL[d.ap].on=1;RL[d.ap].s='Approved';toast('Rule approved')}if(d.dm)RL.splice(d.dm,1);rRules()};
+$('#ar').onclick=()=>{const v=$('#nr').value.trim();if(v){RL.push({t:v,s:'Manual',h:0,on:1});$('#nr').value='';rRules();toast('Rule added')}};
+rRules();
+/* retrieval */
+const RES=[{f:'gateway-service/src/guard/callback.ts',t:'code',v:.82,k:.52},{f:'docs-portal/docs/payments/callbacks.md',t:'doc',v:.71,k:.84},{f:'payments-api/src/hooks/verify.ts',t:'code',v:.69,k:.55},{f:'gateway-service/src/lib/http-client.ts',t:'code',v:.77,k:.40},{f:'ledger-core/src/CallbackAudit.java',t:'code',v:.58,k:.66},{f:'payments-api/config/channelsconfig.php',t:'config',v:.44,k:.78},{f:'docs-portal/docs/security/signing.md',t:'doc',v:.66,k:.61}];
+const S={w:60,k:5,ty:'all',dg:0};
+function rRetr(){const w=S.dg?1:S.w/100;$('#wl').textContent=S.dg?'Meaning only':Math.round(w*100)+'% meaning';$('#degb').hidden=!S.dg;$('#kl').textContent=S.k;
+$('#rbn').innerHTML=S.dg?'<div class="chip wn" style="margin-bottom:8px">Degraded: keyword search was unavailable, showing meaning matches only</div>':'';
+$('#rres').innerHTML=RES.filter(r=>S.ty=='all'||r.t==S.ty).map(r=>({...r,m:w*r.v+(1-w)*r.k})).sort((a,b)=>b.m-a.m).slice(0,S.k).map((r,i)=>{const p=r.f.split('/'),b=p.pop();return`<div class="rr"><span class="mu">${i+1}</span><div><b>${b}</b> <span class="chip">${r.t}</span><div class="p">${p.join('/')}</div></div><div><div class="bar"><i style="width:${r.m*100}%"></i></div><small class="mu">Score ${r.m.toFixed(2)}, meaning ${r.v.toFixed(2)}, keywords ${S.dg?'n/a':r.k.toFixed(2)}</small></div></div>`}).join('')||'<p class="mu">No results for this source type.</p>'}
+$('#rw').oninput=e=>{S.w=+e.target.value;rRetr()};$('#rk').oninput=e=>{S.k=+e.target.value;rRetr()};
+$('#ty').onclick=e=>{if(e.target.dataset.v){S.ty=e.target.dataset.v;$$('#ty button').forEach(b=>b.classList.toggle('on',b==e.target));rRetr()}};
+$('#dg').onclick=e=>{S.dg^=1;e.target.classList.toggle('on',!!S.dg);e.target.setAttribute('aria-checked',!!S.dg);$('#rw').disabled=!!S.dg;rRetr()};
+rRetr();
+/* graph */
+const N=[{id:'gateway',x:350,y:60,t:'ac',r:'gateway-service',k:'Service',f:214},{id:'auth',x:130,y:180,t:'ac',r:'auth-service',k:'Service',f:132},{id:'payments',x:350,y:190,t:'ac',r:'payments-api',k:'Service',f:341},{id:'notify',x:570,y:180,t:'ac',r:'notify-worker',k:'Service',f:97},{id:'users db',x:130,y:320,t:'ev',r:'auth-service',k:'Database',f:12},{id:'ledger',x:350,y:325,t:'ac',r:'ledger-core',k:'Service',f:268},{id:'queue',x:570,y:320,t:'wn',r:'notify-worker',k:'Queue',f:8}];
+const E=[['gateway','auth','checks tokens'],['gateway','payments','forwards callbacks'],['gateway','notify','sends events'],['auth','users db','reads users'],['payments','ledger','posts entries'],['payments','queue','publishes'],['notify','queue','consumes']];
+const nd=id=>N.find(n=>n.id==id);let sel='gateway';
+function rGraph(){const R=32;$('#gsvg').innerHTML=`<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--mu)"/></marker></defs>`+
+E.map(([a,b,l])=>{const A=nd(a),B=nd(b),dx=B.x-A.x,dy=B.y-A.y,d=Math.hypot(dx,dy),ux=dx/d,uy=dy/d,on=sel==a||sel==b;
+return`<g opacity="${on?1:.2}"><line x1="${(A.x+ux*R).toFixed(1)}" y1="${(A.y+uy*R).toFixed(1)}" x2="${(B.x-ux*(R+5)).toFixed(1)}" y2="${(B.y-uy*(R+5)).toFixed(1)}" stroke="var(--mu)" stroke-width="1.5" marker-end="url(#ar)"/>${on?`<text x="${(A.x+B.x)/2}" y="${(A.y+B.y)/2-6}" style="font-size:10.5px;fill:var(--mu)">${l}</text>`:''}</g>`}).join('')+
+N.map(n=>{const on=n.id==sel||E.some(([a,b])=>(a==sel&&b==n.id)||(b==sel&&a==n.id));return`<g data-id="${n.id}" opacity="${on?1:.3}" tabindex="0" role="button" aria-label="${n.id}"><circle cx="${n.x}" cy="${n.y}" r="${R}" fill="var(--p2)" stroke="var(--${n.t})" stroke-width="${n.id==sel?3.5:1.5}"/><text x="${n.x}" y="${n.y+4}">${n.id}</text></g>`}).join('');
+const n=nd(sel),out=E.filter(e=>e[0]==sel),inn=E.filter(e=>e[1]==sel);
+$('#gdet').innerHTML=`<b style="font-size:16px">${n.id}</b><div style="margin:6px 0 12px"><span class="chip">${n.k}</span> <span class="chip">${n.f} files</span></div><small class="mu">Repository</small><div style="margin-bottom:12px">${n.r}</div><small class="mu">Calls</small><div style="margin-bottom:12px">${out.map(e=>`${e[1]}: ${e[2]}`).join('<br>')||'Nothing'}</div><small class="mu">Called by</small><div>${inn.map(e=>`${e[0]}: ${e[2]}`).join('<br>')||'Nothing'}</div>`}
+const gs=$('#gsvg');let drag=null;
+gs.onpointerdown=e=>{const g=e.target.closest('[data-id]');if(g){drag=g.dataset.id;sel=drag;rGraph();gs.setPointerCapture(e.pointerId)}};
+gs.onpointermove=e=>{if(!drag)return;const pt=gs.createSVGPoint();pt.x=e.clientX;pt.y=e.clientY;const q=pt.matrixTransform(gs.getScreenCTM().inverse()),n=nd(drag);n.x=Math.max(40,Math.min(660,q.x));n.y=Math.max(40,Math.min(350,q.y));rGraph()};
+gs.onpointerup=()=>{drag=null};
+$('#gs').oninput=e=>{const v=e.target.value.toLowerCase(),m=v&&N.find(n=>n.id.includes(v));if(m){sel=m.id;rGraph()}};
+$('#gsvg').onkeydown=e=>{if(e.key=='Enter'){const g=e.target.closest('[data-id]');if(g){sel=g.dataset.id;rGraph();$('#gsvg [data-id="'+sel+'"]').focus()}}};
+rGraph();
+/* cron */
+const J=[{n:'Reindex changed repositories',h:'Every night at 02:00',x:'0 2 * * *',l:'Today 02:00',nx:'Tomorrow 02:00',on:1},{n:'Refresh keyword index',h:'Every hour',x:'0 * * * *',l:'12 minutes ago',nx:'In 48 minutes',on:1},{n:'Turn feedback into rules',h:'Mondays at 06:00',x:'0 6 * * 1',l:'Monday 06:00',nx:'Monday 06:00',on:1},{n:'Back up Qdrant',h:'Sundays at 03:00',x:'0 3 * * 0',l:'Last Sunday',nx:'Paused',on:0}];
+const LOG=[['Refresh keyword index','12 minutes ago','finished in 4.1 s'],['Reindex changed repositories','Today 02:00','finished in 6 min 12 s'],['Turn feedback into rules','Monday 06:00','added 1 suggestion']];
+const CG='grid-template-columns:minmax(180px,1.5fr) 150px 130px 130px 60px 90px';
+function rJobs(){$('#jobs').innerHTML=J.map((j,i)=>`<div class="row cr" style="${CG}"><div><b>${j.n}</b><br><small>${j.h}</small></div><code class="mu">${j.x}</code><small>Last: ${j.l}</small><small>Next: ${j.nx}</small><button class="sw ${j.on?'on':''}" role="switch" aria-checked="${!!j.on}" aria-label="Enable ${j.n}" data-j="${i}"></button><button class="btn g s" data-run="${i}">Run now</button></div>`).join('');
+$('#runlog').innerHTML=LOG.map(l=>`<div><b>${l[0]}</b> ${l[2]}, ${l[1]}</div>`).join('')}
+$('#jobs').onclick=e=>{const d=e.target.dataset;if(d.j){J[d.j].on^=1;J[d.j].nx=J[d.j].on?'Scheduled':'Paused'}if(d.run){LOG.unshift([J[d.run].n,'Just now','finished in 3.4 s']);toast('Started '+J[d.run].n)}rJobs()};
+rJobs();
+/* metrics */
+const gen=n=>Array.from({length:n},(_,i)=>Math.round(150+60*Math.sin(i/2.3)+(i%7>4?-80:0)+i*2));
+const M={'24h':{v:[12,8,5,4,6,14,30,52,71,88,76,64,70,82,90,77,60,48,36,28,22,18,15,11],x:i=>i%4?'':i+':00',k:[['998','questions'],['1.9 s','median time'],['0.85','average quality'],['2.8%','retried']]},
+'7d':{v:[168,194,221,203,246,98,74],x:i=>['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][i],k:[['1,204','questions'],['2.1 s','median time'],['0.84','average quality'],['3.2%','retried']]},
+'30d':{v:gen(30),x:i=>i%5?'':'Day '+(i+1),k:[['4,912','questions'],['2.2 s','median time'],['0.83','average quality'],['3.6%','retried']]}};
+function rMet(k){const m=M[k],W=640,H=210,p=26,mx=Math.max(...m.v)*1.15,X=i=>p+i*(W-2*p)/(m.v.length-1),Y=v=>H-26-v/mx*(H-46);
+const pts=m.v.map((v,i)=>[X(i).toFixed(1),Y(v).toFixed(1)]),d='M'+pts.map(q=>q.join(',')).join('L');
+$('#kpis').innerHTML=m.k.map(([a,b])=>`<div><b>${a}</b><span>${b}</span></div>`).join('');
+$('#chart').innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Questions over time">`+[0,1,2].map(i=>`<line x1="${p}" x2="${W-p}" y1="${20+i*(H-46)/2}" y2="${20+i*(H-46)/2}" stroke="var(--ln)"/>`).join('')+`<path d="${d}L${pts.at(-1)[0]},${H-26}L${pts[0][0]},${H-26}Z" fill="var(--acs)"/><path d="${d}" fill="none" stroke="var(--ac)" stroke-width="2.2" stroke-linejoin="round"/>`+pts.map((q,i)=>`<circle cx="${q[0]}" cy="${q[1]}" r="3.5" fill="var(--ac)"><title>${m.v[i]} questions</title></circle><text x="${q[0]}" y="${H-6}" text-anchor="middle" font-size="10.5" fill="var(--mu)">${m.x(i)}</text>`).join('')+'</svg>'}
+$('#rng').onclick=e=>{if(e.target.dataset.v){$$('#rng button').forEach(b=>b.classList.toggle('on',b==e.target));rMet(e.target.dataset.v)}};
+rMet('7d');
+const LT=[['Writing the answer',1620,'var(--ac)'],['Checking quality',410,'var(--ev)'],['Embedding the question',120,'var(--wn)'],['Searching by meaning',38,'var(--mu)'],['Searching by keyword',12,'var(--ln)'],['Ranking',9,'var(--p2)']],tot=LT.reduce((a,b)=>a+b[1],0);
+$('#lat').innerHTML=`<div style="display:flex;height:12px;border-radius:9px;overflow:hidden;margin-bottom:12px">${LT.map(l=>`<i style="width:${l[1]/tot*100}%;background:${l[2]}"></i>`).join('')}</div>`+LT.map(l=>`<div class="row" style="grid-template-columns:12px 1fr auto;padding:5px 0;border:0"><i style="width:10px;height:10px;border-radius:3px;background:${l[2]}"></i><span>${l[0]}</span><small>${l[1]} ms</small></div>`).join('');
+const QB=[['Below 0.2',2],['0.2 to 0.4',5],['0.4 to 0.6',18],['0.6 to 0.8',96],['Above 0.8',224]];
+$('#qual').innerHTML=QB.map(([l,v],i)=>`<div class="row" style="grid-template-columns:90px 1fr 36px;padding:6px 0;border:0"><small>${l}</small><div class="bar ${i>1?'t':''}"><i style="width:${v/224*100}%;${i<2?'background:var(--bd)':i==2?'background:var(--wn)':''}"></i></div><small>${v}</small></div>`).join('')+'<small class="mu">Answers scoring under 0.5 are retried automatically.</small>';
+/* more features */
+const esc=x=>x.replace(/&/g,'&amp;').replace(/</g,'&lt;');
+const HIST=[{t:'Where is the retry policy configured?',d:'Yesterday'},{t:'How do I run reindex-all?',d:'4 days ago'}];
+const EMPTY='<div class="empty"><h2>What do you want to know about your code?</h2><p class="mu">Ask about services, config or architecture. Answers cite the files they came from.</p></div>';
+function openOv(id,html){const o=$('#'+id);if(html!=null)o.firstElementChild.innerHTML=html;o.hidden=false}
+function closeOv(){$$('.ov').forEach(o=>o.hidden=true)}
+function openChat(q){$('#thread').innerHTML='';run(q)}
+function rHist(){$('#hpop').innerHTML=HIST.map((h,i)=>`<button class="pi" data-h="${i}"><span>${esc(h.t)}</span><small>${h.d}</small></button>`).join('')}
+$('#hbtn').onclick=()=>{rHist();$('#hpop').hidden=!$('#hpop').hidden};
+$('#nchat').onclick=()=>{$('#thread').innerHTML=EMPTY;$('#cards').innerHTML='<p class="mu">Sources appear here when you ask a question.</p>';$('#q').focus()};
+/* source viewer */
+const FILES={1:{s:38,a:42,b:53,L:["import { createHmac, timingSafeEqual } from 'crypto';","import { Forbidden } from '../errors';","","const MAX_AGE_SECONDS = 300;","export function verify(body: Buffer, sig: string, ts: number) {","  const secret = process.env.CALLBACK_SECRET!;","  const expected = createHmac('sha256', secret)","    .update(body)","    .digest('hex');","  const sigOk = safeEqual(expected, sig);","  const fresh = Date.now() / 1000 - ts < MAX_AGE_SECONDS;","  if (!sigOk || !fresh) {","    throw new Forbidden('invalid callback');","  }","  return true;","}","","function safeEqual(a: string, b: string) {","  const x = Buffer.from(a); const y = Buffer.from(b);","  return x.length === y.length && timingSafeEqual(x, y);","}"]},
+2:{s:12,a:15,b:24,L:["import axios from 'axios';","","const RETRY_STATUS = [502, 503];","export async function forward(req: Request) {","  for (let attempt = 0; attempt <= 2; attempt++) {","    const res = await axios.post(PAYMENTS_URL, req.body, {","      headers: signHeaders(req),","      validateStatus: () => true,","    });","    if (!RETRY_STATUS.includes(res.status)) return res;","  }","  throw new UpstreamError(424, 'payments-api unavailable');","}","","function signHeaders(req: Request) {","  return { 'x-gateway-sig': sign(req.rawBody) };","}"]},
+3:{s:1,a:6,b:10,L:["# Payment callbacks","","Callbacks are signed with HMAC-SHA256.","The gateway rejects requests older than 5 minutes.","","## Retries","","Failed forwards are retried twice on 502 and 503.","After the last attempt the caller receives a 424","with the upstream status in the response body.","","## Idempotency","","Send the same callback id to make retries safe."]}};
+function openFile(n){const s=SRC[n-1],F=FILES[n];
+openOv('ov',`<div class="mh"><div><b>${s.f.split('/').pop()}</b><br><small class="mu">${s.f}</small></div><span><button class="btn g s" data-cp="${s.f}">Copy path</button> <button class="ib" data-x aria-label="Close" style="display:inline-grid;vertical-align:middle">×</button></span></div><div class="fv mono">${F.L.map((t,i)=>{const k=F.s+i;return`<div class="ln${k>=F.a&&k<=F.b?' hl':''}"><i>${k}</i><span>${esc(t)||' '}</span></div>`}).join('')}</div><div style="padding:6px 18px 14px"><small class="mu">Cited lines ${F.a} to ${F.b} are highlighted</small></div>`)}
+/* repo drawer + lock */
+const LG={TypeScript:[['TypeScript',78],['JSON',12],['Markdown',10]],PHP:[['PHP',71],['Config',19],['Markdown',10]],Go:[['Go',84],['YAML',9],['Markdown',7]],Java:[['Java',80],['XML',12],['Markdown',8]],Docusaurus:[['Markdown',74],['MDX',16],['JSON',10]]};
+function openRepo(n){const r=REPOS.find(x=>x.n==n),un=n=='payments-api'?['config/channelsconfig.php','config/faconfig.php']:[];
+openOv('dov',`<div class="mh"><b style="font-size:17px">${n}</b><button class="ib" data-x aria-label="Close">×</button></div>
+<div class="tools" style="margin:6px 0 18px"><span class="chip">${r.c.toLocaleString()} chunks</span><span class="chip">${r.t}</span><span class="chip ${r.s=='ok'?'ok':'wn'}">${r.s=='ok'?'Up to date':r.s=='run'?'Indexing':'Needs reindex'}</span></div>
+<b>Languages</b><div style="margin:8px 0 18px">${LG[r.t].map(([l,v])=>`<div class="row" style="grid-template-columns:90px 1fr 36px;padding:5px 0;border:0"><small>${l}</small><div class="bar"><i style="width:${v}%"></i></div><small>${v}%</small></div>`).join('')}</div>
+<b>Last reindex</b><div class="logl" style="margin:6px 0 18px"><div>${r.a}: scanned 214 files, embedded 1,038 chunks</div><div>Skipped 7,374 unchanged chunks</div><div>Finished in 4 min 8 s</div></div>
+<b>Files not mapped</b><div class="logl" style="margin:6px 0 20px">${un.length?un.map(u=>`<div><code>${u}</code> is missing from the config constant map</div>`).join(''):'<div>Every file was mapped.</div>'}</div>
+<button class="btn" data-ri2="${n}" ${r.s=='run'?'disabled':''}>Reindex ${n}</button>`)}
+const LK={held:1};
+function rLock(){const b=$('#lockb');b.className='chip '+(LK.held?'wn':'ok');b.textContent=LK.held?'Index lock held, stale':'Index lock free'}
+function openLock(){openOv('ov',`<div class="mh"><b style="font-size:16px">Index lock</b><button class="ib" data-x aria-label="Close">×</button></div><div style="padding:16px 18px 20px">${LK.held?`<p style="margin-top:0"><b>reindex-all</b> took the lock 5 h 12 min ago and never finished.</p><p class="mu">Locks older than 4 hours are safe to take over. The file is <code>.data/reindex.lock</code>.</p><button class="btn" data-steal>Take over lock</button>`:'<p style="margin-top:0">No reindex is running. The lock is free.</p>'}</div>`)}
+$('#lockb').onclick=openLock;rLock();
+/* feedback */
+const FB=[{q:'Where is the retry policy configured?',w:'Cited a test file instead of config',d:'Yesterday',r:'Prefer config files over tests for configuration questions'},{q:'How do I run reindex-all?',w:'Showed an outdated doc',d:'4 days ago',r:'Prefer README files for setup questions'}];
+function rFb(){$('#fbl').innerHTML=FB.map((f,i)=>`<div class="row" style="grid-template-columns:1fr auto"><div>${esc(f.q)}<br><small>${f.w}, ${f.d}</small></div><button class="btn g s" data-fb2="${i}">Turn into rule</button></div>`).join('')||'<p class="mu">Nothing to review.</p>'}
+$('#fbl').onclick=e=>{const i=e.target.dataset.fb2;if(i!=null){RL.push({t:FB[i].r,s:'Suggested',h:0,on:0,g:1});FB.splice(i,1);rFb();rRules();toast('Added a suggested rule')}};rFb();
+/* status, outage */
+function rStatus(){$('[data-st=ollama] .d').style.background=S.ol?'var(--bd)':''}
+$('#ol').onclick=e=>{S.ol^=1;e.target.classList.toggle('on',!!S.ol);e.target.setAttribute('aria-checked',!!S.ol);rStatus()};
+/* command palette */
+let PI=[];
+function rPal(){const q=$('#pin').value.toLowerCase();PI=[...V.filter(([id,i,l,ad])=>!ad||isAdmin).map(([id,i,l],n)=>{const btn=$$('nav button').find(b=>b.textContent.includes(l));return btn?{t:l,k:'Page',f:()=>btn.click()}:null}).filter(Boolean),...REPOS.filter(r=>isAdmin).map(r=>({t:r.n,k:'Repository',f:()=>{$$('nav button')[0].click();openRepo(r.n)}})),...HIST.map(h=>({t:h.t,k:'Chat',f:()=>{$$('nav button')[0].click();openChat(h.t)}}))].filter(x=>x.t.toLowerCase().includes(q)).slice(0,8);
+$('#plist').innerHTML=PI.map((x,i)=>`<button class="pi" data-pi="${i}"><span>${esc(x.t)}</span><small>${x.k}</small></button>`).join('')||'<p class="mu" style="padding:12px 16px">Nothing found</p>'}
+function openPal(){openOv('pov');$('#pin').value='';rPal();$('#pin').focus()}
+$('#pal').onclick=openPal;$('#pin').oninput=rPal;$('#setbtn').onclick=openSettings;
+$('#pin').onkeydown=e=>{if(e.key=='Enter'&&PI[0]){closeOv();PI[0].f()}};
+document.addEventListener('keydown',e=>{if(e.key=='Escape'){closeOv();$$('.pop').forEach(p=>p.hidden=true)}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()=='k'){e.preventDefault();openPal()}});
+/* click routing */
+const STI={qdrant:['Qdrant','Ready',['Responds in 14 ms','Collection code_chunks is green','152,340 points']],ok:['Ollama','Ready',['nomic-embed-text is loaded','Embedding takes about 38 ms']],bad:['Ollama','Not responding',['Embedding requests are failing','Start Ollama on localhost:11434']]};
+document.addEventListener('click',e=>{const T=e.target;
+if(T.classList.contains('ov')||T.closest('[data-x]'))closeOv();
+if(!T.closest('.pop,[data-st],#hbtn'))$$('.pop').forEach(p=>p.hidden=true);
+const st=T.closest('[data-st]');if(st){const k=st.dataset.st,bad=k=='ollama'&&S.ol,i=k=='qdrant'?STI.qdrant:bad?STI.bad:STI.ok,p=$('#stpop');p.innerHTML=`<b>${i[0]}</b> <span class="chip ${bad?'wn':'ok'}">${i[1]}</span><div class="logl">${i[2].map(x=>`<div>${x}</div>`).join('')}</div><small class="mu">Readiness checks refresh every 5 seconds</small>`;p.hidden=false;return}
+const o=T.closest('[data-open]');if(o)openFile(+o.dataset.open);
+const rd=T.closest('[data-rd]');if(rd)openRepo(rd.dataset.rd);
+const r2=T.closest('[data-ri2]');if(r2){const r=REPOS.find(x=>x.n==r2.dataset.ri2);r.s='run';r.p=0;rRepos();closeOv();toast('Reindexing '+r.n)}
+if(T.closest('[data-steal]')){LK.held=0;rLock();closeOv();toast('Took over the lock')}
+const pi=T.closest('[data-pi]');if(pi){closeOv();PI[+pi.dataset.pi].f()}
+const h=T.closest('[data-h]');if(h){$('#hpop').hidden=true;openChat(HIST[+h.dataset.h].t)}
+const rt=T.closest('[data-retry]');if(rt)run(decodeURIComponent(rt.dataset.retry));
+const cp=T.closest('[data-cp]');if(cp){try{navigator.clipboard.writeText(cp.dataset.cp)}catch(_){}toast('Path copied')}});
+/* loading state for index */
+window.ld=1;$('#repos').innerHTML=Array(5).fill('<div class="row" style="grid-template-columns:1fr"><i class="sk"></i></div>').join('');
+setTimeout(()=>{window.ld=0;rRepos()},RM?0:900);
+/* start */
+run('How does the gateway validate a payment callback before forwarding it to payments-api?');
+</script>
+</body>
+</html>

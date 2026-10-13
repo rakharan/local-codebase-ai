@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
+import { prewarmBM25Index } from "./lib/bm25-index.js"
 
 const execFileAsync = promisify(execFile)
 
@@ -261,6 +262,16 @@ async function ask(question: string, timeoutMs: number): Promise<string> {
 async function main() {
   let failed = 0
   const results: { name: string; status: string; details?: string }[] = []
+
+  // Prewarm BM25 in-process before spawning children so each child hits the
+  // fast disk-cache path instead of contending on the cross-process build lock.
+  console.log("Prewarming BM25 index...")
+  try {
+    await prewarmBM25Index()
+    console.log("BM25 index ready.")
+  } catch (err) {
+    console.warn(`BM25 prewarm failed (non-fatal): ${err instanceof Error ? err.message : err}`)
+  }
 
   for (const testCase of edgeCases) {
     process.stdout.write(`Running: ${testCase.name}... `)

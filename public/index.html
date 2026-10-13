@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CodebaseAI — Internal Knowledge Base</title>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
@@ -15,7 +15,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-powershell.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-yaml.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -222,6 +222,126 @@
     padding: 24px;
   }
   .main.manager-active .manager-view { display: block; }
+
+  /* DB Schema */
+  .main.schema-active .chat-messages,
+  .main.schema-active .input-bar,
+  .main.schema-active .loading-indicator {
+    display: none;
+  }
+  .schema-view {
+    display: none;
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px;
+  }
+  .main.schema-active .schema-view { display: block; }
+  .schema-inner { max-width: 1120px; margin: 0 auto; }
+  .schema-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .schema-table th, .schema-table td {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid #30363d;
+    font-size: 0.82rem;
+  }
+  .schema-table th {
+    color: #8b949e;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.5px;
+    background: #161b22;
+  }
+  .schema-table tbody tr { cursor: pointer; transition: background 0.15s; }
+  .schema-table tbody tr:hover { background: #161b22; }
+  .schema-table tbody tr:last-child td { border-bottom: none; }
+  .schema-name { color: #58a6ff; font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .schema-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    border: 1px solid #30363d;
+    background: #21262d;
+    color: #c9d1d9;
+    font-size: 0.75rem;
+    margin: 2px 4px 2px 0;
+  }
+  .schema-op {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    font-weight: 600;
+  }
+  .schema-op-create { background: rgba(46,160,67,0.2); color: #3fb950; }
+  .schema-op-add    { background: rgba(88,166,255,0.2); color: #58a6ff; }
+  .schema-op-drop   { background: rgba(248,81,73,0.2); color: #f85149; }
+  .schema-op-rename { background: rgba(210,153,34,0.2); color: #d29922; }
+  .schema-op-other  { background: #21262d; color: #8b949e; }
+  .schema-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem; color: #8b949e; }
+  .schema-mig {
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    background: #0d1117;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    font-size: 0.82rem;
+  }
+  .schema-timeline {
+    border-left: 2px solid #30363d;
+    padding-left: 16px;
+    margin: 8px 0 24px;
+  }
+  .schema-section-title {
+    color: #f0f6fc;
+    font-size: 0.95rem;
+    font-weight: 700;
+    margin: 20px 0 8px;
+  }
+  .schema-snippet {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin-top: 6px;
+  }
+  .schema-search {
+    width: 100%;
+    max-width: 380px;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: #c9d1d9;
+    font-size: 0.85rem;
+    outline: none;
+    margin-bottom: 14px;
+  }
+  .schema-search:focus { border-color: #58a6ff; }
+  .schema-muted { color: #8b949e; font-size: 0.8rem; }
+  .schema-details { margin-top: 6px; }
+  .schema-details summary { cursor: pointer; color: #58a6ff; font-size: 0.78rem; }
+  .schema-ref-row {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    padding: 4px 0;
+    border-bottom: 1px solid #21262d;
+    font-size: 0.8rem;
+  }
+  .schema-inner .manager-btn { margin-right: 8px; }
+
   .manager-inner {
     max-width: 1120px;
     margin: 0 auto;
@@ -987,6 +1107,7 @@
     .manager-subgrid { grid-template-columns: 1fr; }
     .manager-search-row { align-items: stretch; flex-direction: column; }
   }
+
 </style>
 </head>
 <body>
@@ -1009,6 +1130,11 @@
     <button class="new-chat-btn" onclick="showManager()">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"></path><path d="M4 12h16"></path><path d="M4 17h16"></path></svg>
       Index Manager
+    </button>
+
+    <button class="new-chat-btn" onclick="showSchema()">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"></ellipse><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"></path><path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"></path></svg>
+      DB Schema
     </button>
 
     <div>
@@ -1073,6 +1199,20 @@
       <div style="display:flex;gap:8px;justify-content:flex-end;">
         <button onclick="closeSettings()" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:8px 16px;color:#c9d1d9;cursor:pointer;font-size:0.875rem;">Cancel</button>
         <button onclick="saveSettings()" style="background:#238636;border:1px solid #2ea043;border-radius:6px;padding:8px 16px;color:#fff;cursor:pointer;font-size:0.875rem;font-weight:600;">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Generic Prompt/Confirm Modal (prompt()/confirm() are blocked in some webviews) -->
+  <div id="promptModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1100;align-items:center;justify-content:center;">
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;width:440px;max-width:90vw;">
+      <h2 id="promptModalTitle" style="font-size:1rem;font-weight:600;color:#f0f6fc;margin-bottom:12px;"></h2>
+      <p id="promptModalMessage" style="font-size:0.875rem;color:#c9d1d9;margin-bottom:16px;white-space:pre-wrap;line-height:1.5;"></p>
+      <input id="promptModalInput" type="text" placeholder=""
+        style="display:none;width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:8px 10px;color:#c9d1d9;font-size:0.875rem;margin-bottom:16px;" />
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button id="promptModalCancel" style="background:#21262d;border:1px solid #30363d;border-radius:6px;padding:8px 16px;color:#c9d1d9;cursor:pointer;font-size:0.875rem;">Cancel</button>
+        <button id="promptModalOk" style="background:#238636;border:1px solid #2ea043;border-radius:6px;padding:8px 16px;color:#fff;cursor:pointer;font-size:0.875rem;font-weight:600;">OK</button>
       </div>
     </div>
   </div>
@@ -1498,6 +1638,29 @@ source: brain_dump
       </div>
     </div>
 
+    <!-- DB Schema Panel -->
+    <section class="schema-view" id="schemaView">
+      <div class="schema-inner">
+        <!-- Table List -->
+        <div id="schemaList">
+          <div class="manager-header">
+            <div>
+              <div class="manager-title">DB Schema</div>
+              <div class="manager-subtitle">Tables discovered across indexed repos — migrations, models, and SQL usage.</div>
+            </div>
+            <div class="manager-actions">
+              <button class="manager-btn" onclick="showChat()">Back to Chat</button>
+              <button class="manager-btn primary" onclick="loadSchemaTables()">Refresh</button>
+            </div>
+          </div>
+          <input class="schema-search" id="schemaSearchBox" type="text" placeholder="Filter tables..." oninput="renderSchemaTableList()" />
+          <div id="schemaTableContainer"></div>
+        </div>
+        <!-- Table Detail -->
+        <div id="schemaDetail" style="display:none;"></div>
+      </div>
+    </section>
+
     <!-- Loading Indicator -->
     <div class="loading-indicator" id="loadingIndicator">
       <div class="loading-indicator-content">
@@ -1532,6 +1695,77 @@ source: brain_dump
 function getApiKey() { return localStorage.getItem('app_api_key') || ''; }
 function setApiKey(key) { localStorage.setItem('app_api_key', key); }
 
+// --- Modal-based prompt/confirm (native prompt()/confirm() are blocked in some webviews) ---
+function promptModal(message, defaultValue = '') {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('promptModal');
+    const titleEl = document.getElementById('promptModalTitle');
+    const msgEl = document.getElementById('promptModalMessage');
+    const inputEl = document.getElementById('promptModalInput');
+    const okBtn = document.getElementById('promptModalOk');
+    const cancelBtn = document.getElementById('promptModalCancel');
+
+    titleEl.textContent = 'Input required';
+    msgEl.textContent = message;
+    inputEl.style.display = 'block';
+    inputEl.value = defaultValue;
+    okBtn.textContent = 'OK';
+
+    modal.style.display = 'flex';
+    setTimeout(() => inputEl.focus(), 0);
+
+    function cleanup() {
+      modal.style.display = 'none';
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      inputEl.removeEventListener('keydown', onKey);
+      modal.removeEventListener('click', onBackdrop);
+    }
+    function onOk() { const v = inputEl.value; cleanup(); resolve(v); }
+    function onCancel() { cleanup(); resolve(null); }
+    function onKey(e) { if (e.key === 'Enter') { e.preventDefault(); onOk(); } if (e.key === 'Escape') { e.preventDefault(); onCancel(); } }
+    function onBackdrop(e) { if (e.target === modal) onCancel(); }
+
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    inputEl.addEventListener('keydown', onKey);
+    modal.addEventListener('click', onBackdrop);
+  });
+}
+
+function confirmModal(message) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('promptModal');
+    const titleEl = document.getElementById('promptModalTitle');
+    const msgEl = document.getElementById('promptModalMessage');
+    const inputEl = document.getElementById('promptModalInput');
+    const okBtn = document.getElementById('promptModalOk');
+    const cancelBtn = document.getElementById('promptModalCancel');
+
+    titleEl.textContent = 'Confirm';
+    msgEl.textContent = message;
+    inputEl.style.display = 'none';
+    okBtn.textContent = 'Confirm';
+
+    modal.style.display = 'flex';
+    setTimeout(() => okBtn.focus(), 0);
+
+    function cleanup() {
+      modal.style.display = 'none';
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      modal.removeEventListener('click', onBackdrop);
+    }
+    function onOk() { cleanup(); resolve(true); }
+    function onCancel() { cleanup(); resolve(false); }
+    function onBackdrop(e) { if (e.target === modal) onCancel(); }
+
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    modal.addEventListener('click', onBackdrop);
+  });
+}
+
 // --- Settings modal ---
 function openSettings() {
   const modal = document.getElementById('settingsModal');
@@ -1552,6 +1786,8 @@ function saveSettings() {
   // Show brief confirmation
   const btn = document.querySelector('#settingsModal button[onclick="saveSettings()"]');
   if (btn) { btn.textContent = '✓ Saved'; setTimeout(() => btn && (btn.textContent = 'Save'), 1500); }
+  // Resolve any awaiting apiFetch retry.
+  if (_settingsSaveResolver) { const r = _settingsSaveResolver; _settingsSaveResolver = null; r(key); }
 }
 
 function toggleApiKeyVisibility() {
@@ -1593,20 +1829,40 @@ async function apiFetch(url, options = {}) {
   if (key) headers['Authorization'] = `Bearer ${key}`;
   const res = await fetch(url, { ...options, headers });
   if (res.status === 401) {
-    const k = prompt('API key required. Enter your APP_API_KEY:');
-    if (k) { setApiKey(k); return apiFetch(url, options); }
+    // Open settings modal so user can enter the key, then retry once.
+    if (!apiFetch._retrying) {
+      apiFetch._retrying = true;
+      openSettings();
+      const newKey = await waitForSettingsSave();
+      apiFetch._retrying = false;
+      if (newKey !== null) return apiFetch(url, options);
+    }
   }
   return res;
+}
+
+// Resolves with the saved key when saveSettings() is called, or null on cancel/close.
+let _settingsSaveResolver = null;
+function waitForSettingsSave() {
+  return new Promise((resolve) => {
+    _settingsSaveResolver = resolve;
+    // If user closes without saving, treat as cancel.
+    const origClose = closeSettings;
+    closeSettings = function() {
+      document.getElementById('settingsModal').style.display = 'none';
+      if (_settingsSaveResolver) { const r = _settingsSaveResolver; _settingsSaveResolver = null; r(null); }
+      closeSettings = origClose;
+    };
+  });
 }
 
 // Check if auth is required on load and prompt if key not set
 async function checkAuth() {
   try {
-    const res = await apiFetch('/api/auth-required');
+    const res = await fetch('/api/auth-required');
     const { required } = await res.json();
     if (required && !getApiKey()) {
-      const k = prompt('This server requires an API key. Enter your APP_API_KEY:');
-      if (k) setApiKey(k);
+      openSettings();
     }
   } catch { /* ignore */ }
 }
@@ -1678,8 +1934,6 @@ if (window.mermaid) {
 marked.setOptions({
   breaks: true,
   gfm: true,
-  headerIds: false,
-  mangle: false,
 });
 
 function autoResize(textarea) {
@@ -1700,6 +1954,7 @@ function toggleSettings() {
 
 function showManager() {
   mainEl.classList.add('manager-active');
+  mainEl.classList.remove('schema-active');
 
   // Set initial active tab (default to indexing)
   const managerView = document.getElementById('managerView');
@@ -1762,7 +2017,157 @@ function refreshActiveTab() {
 
 function showChat() {
   mainEl.classList.remove('manager-active');
+  mainEl.classList.remove('schema-active');
   questionInput.focus();
+}
+
+function showSchema() {
+  mainEl.classList.add('schema-active');
+  mainEl.classList.remove('manager-active');
+  showSchemaList();
+}
+
+let schemaTablesCache = [];
+
+function showSchemaList() {
+  document.getElementById('schemaList').style.display = '';
+  document.getElementById('schemaDetail').style.display = 'none';
+  document.getElementById('schemaSearchBox').value = '';
+  loadSchemaTables();
+}
+
+async function loadSchemaTables() {
+  const container = document.getElementById('schemaTableContainer');
+  container.innerHTML = '<div class="schema-muted">Loading tables...</div>';
+  try {
+    const res = await apiFetch('/api/schema/tables');
+    const data = await res.json();
+    schemaTablesCache = data.tables || [];
+    renderSchemaTableList();
+  } catch (err) {
+    container.innerHTML = `<div class="schema-muted">Failed to load schema: ${escapeHtml(String(err.message || err))}</div>`;
+  }
+}
+
+function renderSchemaTableList() {
+  const container = document.getElementById('schemaTableContainer');
+  const q = (document.getElementById('schemaSearchBox').value || '').toLowerCase();
+  const rows = schemaTablesCache.filter(t => !q || t.name.toLowerCase().includes(q));
+  if (!rows.length) {
+    container.innerHTML = `<div class="schema-muted">${schemaTablesCache.length ? 'No tables match filter.' : 'No tables found.'}</div>`;
+    return;
+  }
+  container.innerHTML = `
+    <table class="schema-table">
+      <thead><tr><th>Table</th><th>Repos</th><th>Migrations</th><th>Models</th></tr></thead>
+      <tbody>
+        ${rows.map(t => `
+          <tr onclick="openSchemaTable('${t.name.replace(/'/g, "\\'")}')">
+            <td class="schema-name">${escapeHtml(t.name)}</td>
+            <td>${t.repoCount}</td>
+            <td>${t.migrationCount}</td>
+            <td>${t.modelCount}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>
+    <div class="schema-muted" style="margin-top:8px;">${rows.length} table${rows.length === 1 ? '' : 's'}</div>`;
+}
+
+async function openSchemaTable(name) {
+  const detail = document.getElementById('schemaDetail');
+  const list = document.getElementById('schemaList');
+  list.style.display = 'none';
+  detail.style.display = '';
+  detail.innerHTML = '<div class="schema-muted">Loading table details...</div>';
+  try {
+    const res = await apiFetch(`/api/schema/table/${encodeURIComponent(name)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const t = await res.json();
+    renderSchemaTableDetail(t);
+  } catch (err) {
+    detail.innerHTML = `<div class="schema-muted">Failed to load table: ${escapeHtml(String(err.message || err))}</div>
+      <button class="manager-btn" onclick="showSchemaList()">Back to list</button>`;
+  }
+}
+
+function schemaOpClass(op) {
+  const o = (op || '').toUpperCase();
+  if (o.startsWith('CREATE')) return 'schema-op-create';
+  if (o.startsWith('ADD')) return 'schema-op-add';
+  if (o.includes('DROP') || o.startsWith('DELETE')) return 'schema-op-drop';
+  if (o.includes('RENAME')) return 'schema-op-rename';
+  return 'schema-op-other';
+}
+
+function renderSchemaTableDetail(t) {
+  const detail = document.getElementById('schemaDetail');
+  const migrations = t.migrations || [];
+  const modelFiles = t.modelFiles || [];
+  const sqlRefs = t.sqlRefs || [];
+
+  const migHtml = migrations.length ? migrations.map(m => {
+    const date = m.timestampIso ? new Date(m.timestampIso).toISOString().slice(0, 10) : '—';
+    return `
+      <div class="schema-mig">
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <span class="schema-op ${schemaOpClass(m.operation)}">${escapeHtml(m.operation || 'OTHER')}</span>
+          <span class="schema-muted">${escapeHtml(date)}</span>
+          <span class="schema-badge">${escapeHtml(m.repoName || '')}</span>
+          <span class="schema-mono">${escapeHtml(m.filePath || '')}</span>
+        </div>
+        ${m.snippet ? `
+          <details class="schema-details">
+            <summary>Snippet</summary>
+            <div class="schema-snippet">${escapeHtml(m.snippet)}</div>
+          </details>` : ''}
+      </div>`;
+  }).join('') : '<div class="schema-muted">No migrations recorded.</div>';
+
+  const modelHtml = modelFiles.length ? modelFiles.map(f => `
+    <div class="schema-ref-row">
+      <span class="schema-badge">${escapeHtml(f.repoName || '')}</span>
+      <span class="schema-mono">${escapeHtml(f.filePath || '')}${f.startLine ? ':' + f.startLine + (f.endLine ? '-' + f.endLine : '') : ''}</span>
+    </div>`).join('') : '<div class="schema-muted">No model files found.</div>';
+
+  const sqlCounts = { SELECT: 0, INSERT: 0, UPDATE: 0, DELETE: 0 };
+  sqlRefs.forEach(r => {
+    const op = (r.operation || '').toUpperCase();
+    if (op in sqlCounts) sqlCounts[op]++;
+  });
+
+  detail.innerHTML = `
+    <div class="manager-header">
+      <div>
+        <div class="manager-title">Table: <span class="schema-name">${escapeHtml(t.name)}</span></div>
+        <div class="manager-subtitle">${migrations.length} migration${migrations.length === 1 ? '' : 's'} · ${modelFiles.length} model file${modelFiles.length === 1 ? '' : 's'} · ${sqlRefs.length} SQL reference${sqlRefs.length === 1 ? '' : 's'}</div>
+      </div>
+      <div class="manager-actions">
+        <button class="manager-btn" onclick="showSchemaList()">← Back to tables</button>
+        <button class="manager-btn primary" onclick="openSchemaTable('${t.name.replace(/'/g, "\\'")}')">Refresh</button>
+      </div>
+    </div>
+
+    <div class="schema-section-title">Repos touching it</div>
+    <div>${(t.repos || []).map(r => `<span class="schema-badge">${escapeHtml(r)}</span>`).join('') || '<span class="schema-muted">None</span>'}</div>
+
+    <div class="schema-section-title">Migration timeline (oldest → newest)</div>
+    <div class="schema-timeline">${migHtml}</div>
+
+    <div class="schema-section-title">Model files</div>
+    <div>${modelHtml}</div>
+
+    <div class="schema-section-title">SQL references</div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
+      ${['SELECT', 'INSERT', 'UPDATE', 'DELETE'].map(op => `
+        <span class="schema-badge">${op}: <strong>${sqlCounts[op]}</strong></span>`).join('')}
+    </div>
+    ${sqlRefs.length ? sqlRefs.map(r => `
+      <div class="schema-ref-row">
+        <span class="schema-op ${schemaOpClass(r.operation)}">${escapeHtml(r.operation || '?')}</span>
+        <span class="schema-badge">${escapeHtml(r.repoName || '')}</span>
+        <span class="schema-mono">${escapeHtml(r.filePath || '')}${r.startLine ? ':' + r.startLine + (r.endLine ? '-' + r.endLine : '') : ''}</span>
+      </div>`).join('') : '<div class="schema-muted">No SQL references found.</div>'}
+  `;
 }
 
 function setQuestion(q) {
@@ -1775,6 +2180,9 @@ function setQuestion(q) {
 function escapeHtml(text) {
   if (!text) return '';
   const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
 
 function makeVsCodeLink(source) {
   // Source format: "repoName@branch [serviceType] filePath:startLine-endLine (evidenceTypes)"
@@ -1788,13 +2196,10 @@ function makeVsCodeLink(source) {
     const repoMatch = source.match(/^([^@]+)@/);
     if (!repoMatch) return null;
     const repoName = repoMatch[1];
-    const repoBase = `C:/GIT/work/${repoName}`;
+    const repoBase = `${localStorage.getItem('reposDir') || 'C:/GIT/work'}/${repoName}`;
     const fullPath = `${repoBase}/${filePath}`;
     return `vscode://file/${fullPath}:${line}`;
   } catch { return null; }
-}
-  div.textContent = text;
-  return div.innerHTML;
 }
 
 function saveRecent(question) {
@@ -1918,7 +2323,7 @@ async function loadIndexSummary() {
 async function deleteIndexScope(repoName, branchName) {
   const scope = branchName ? `${repoName}@${branchName}` : repoName;
 
-  if (!confirm(`Delete indexed data for ${scope}? This removes Qdrant chunks and relationship graph edges for that scope.`)) {
+  if (!await confirmModal(`Delete indexed data for ${scope}? This removes Qdrant chunks and relationship graph edges for that scope.`)) {
     return;
   }
 
@@ -2347,7 +2752,7 @@ async function reindexRegistryEntry(entryName) {
     return;
   }
 
-  if (!confirm(`Reindex affected repos for "${name}" with --replace-repo?\n\nKnown paths: ${(entry.repoPaths || []).map(repoPath => repoPath.repo).join(', ')}\nMissing paths: ${missingPathRepos.join(', ') || 'none'}\n\nThis can take a while.`)) {
+  if (!await confirmModal(`Reindex affected repos for "${name}" with --replace-repo?\n\nKnown paths: ${(entry.repoPaths || []).map(repoPath => repoPath.repo).join(', ')}\nMissing paths: ${missingPathRepos.join(', ') || 'none'}\n\nThis can take a while.`)) {
     return;
   }
 
@@ -2385,7 +2790,7 @@ async function deleteRegistryEntry(entryName) {
   const entry = registryEntries.find(item => item.name === entryName);
   const name = entry?.name || entryName;
 
-  if (!confirm(`Delete registry entry "${name}"? This does not delete indexed chunks, but future registry expansion will stop using it.`)) {
+  if (!await confirmModal(`Delete registry entry "${name}"? This does not delete indexed chunks, but future registry expansion will stop using it.`)) {
     return;
   }
 
@@ -2515,7 +2920,7 @@ async function deleteKnowledgeNote(noteId) {
   const note = knowledgeNotes.find(item => item.id === noteId);
   const title = note?.title || noteId;
 
-  if (!confirm(`Delete knowledge note "${title}"?`)) return;
+  if (!await confirmModal(`Delete knowledge note "${title}"?`)) return;
 
   notesStatus.textContent = `Deleting note: ${title}`;
 
@@ -2666,13 +3071,13 @@ async function copyRegressionDraft(feedbackId) {
     await navigator.clipboard.writeText(draft);
     feedbackReviewStatus.textContent = 'Regression draft copied. Paste it into src/answer-regression.ts and replace placeholders.';
   } catch {
-    window.prompt('Copy regression draft:', draft);
+    await promptModal('Copy regression draft (clipboard unavailable):', draft);
   }
 }
 
 async function deleteAnswerFeedback(feedbackId) {
   const item = answerFeedbackItems.find(feedback => feedback.id === feedbackId);
-  if (!confirm(`Resolve/delete feedback for: ${item?.question || feedbackId}?`)) return;
+  if (!await confirmModal(`Resolve/delete feedback for: ${item?.question || feedbackId}?`)) return;
 
   feedbackReviewStatus.textContent = 'Deleting feedback...';
 
@@ -2727,8 +3132,13 @@ function renderRecent() {
 }
 
 function renderMarkdown(text) {
-  const html = marked.parse(text);
-  const wrapper = document.createElement('div');
+  let html
+  try {
+    html = marked.parse(text)
+  } catch {
+    html = `<pre>${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`
+  }
+  const wrapper = document.createElement('div')
   wrapper.className = 'markdown-body';
   wrapper.innerHTML = html;
 
@@ -2935,7 +3345,7 @@ async function sendFeedback(messageIndex, rating) {
   if (!msg || msg.role !== 'assistant' || !msg.question) return;
 
   const note = rating === 'bad'
-    ? (prompt('What should be better? This becomes local feedback for future evals.', '') || '')
+    ? (await promptModal('What should be better? This becomes local feedback for future evals.', '') || '')
     : '';
 
   msg.feedbackSaving = true;
@@ -3002,19 +3412,15 @@ async function ask() {
   }));
 
   try {
-    const apiKey = getApiKey();
-    const headers = { 'Content-Type': 'application/json' };
-    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-
-    const res = await fetch('/api/ask/stream', {
+    const res = await apiFetch('/api/ask/stream', {
       method: 'POST',
-      headers,
       body: JSON.stringify({ question, repoName, project, branch, serviceType, chatModel, deep, history: historyForApi }),
     });
 
     if (!res.ok) {
       const data = await res.json();
-      messages.push({ role: 'assistant', content: `**Error:** ${data.error || 'Unknown error'}`, question, sources: [] });
+      const details = data.raw ? `\n\n\`\`\`text\n${data.raw}\n\`\`\`` : '';
+      messages.push({ role: 'assistant', content: `**Error:** ${data.error || 'Unknown error'}${details}`, question, sources: [] });
       saveMessages();
       return;
     }
@@ -3028,34 +3434,42 @@ async function ask() {
     const decoder = new TextDecoder();
     let buffer = '';
 
+    const handleEvent = (line) => {
+      if (!line.startsWith('data: ')) return;
+      let event;
+      try { event = JSON.parse(line.slice(6)); } catch { return; }
+      if (event.type === 'thinking') {
+        messages[msgIndex].content = '💭 Thinking...▌';
+        renderMessages();
+      } else if (event.type === 'progress') {
+        if (messages[msgIndex].streaming) {
+          if (messages[msgIndex].content === '▌' || messages[msgIndex].content === '💭 Thinking...▌') messages[msgIndex].content = '';
+          messages[msgIndex].content += event.text + '\n';
+          renderMessages();
+        }
+      } else if (event.type === 'answer') {
+        messages[msgIndex] = { role: 'assistant', content: event.answer, question, sources: event.sources || [] };
+        saveRecent(question);
+        saveMessages();
+        renderMessages();
+      } else if (event.type === 'error') {
+        const details = event.raw ? `\n\n\`\`\`text\n${event.raw}\n\`\`\`` : '';
+        messages[msgIndex] = { role: 'assistant', content: `**Error:** ${event.error}${details}`, question, sources: [] };
+        saveMessages();
+        renderMessages();
+      }
+    };
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const event = JSON.parse(line.slice(6));
-          if (event.type === 'thinking') {
-            messages[msgIndex].content = '💭 Thinking...▌';
-            renderMessages();
-          } else if (event.type === 'answer') {
-            saveRecent(question);
-            messages[msgIndex] = { role: 'assistant', content: event.answer, question, sources: event.sources || [] };
-            saveMessages();
-            renderMessages();
-          } else if (event.type === 'error') {
-            messages[msgIndex] = { role: 'assistant', content: `**Error:** ${event.error}`, question, sources: [] };
-            saveMessages();
-            renderMessages();
-          }
-        } catch { /* ignore parse errors */ }
-      }
+      for (const line of lines) handleEvent(line);
     }
+    // Flush final buffered event (answer often arrives without trailing newline)
+    if (buffer.trim()) handleEvent(buffer);
   } catch (err) {
     messages.push({ role: 'assistant', content: `**Network error:** ${err.message}`, question, sources: [] });
     saveMessages();
@@ -3261,7 +3675,7 @@ async function saveDraft() {
 async function approveDraft(fileName) {
   const draftsStatus = document.getElementById('draftsStatus');
 
-  if (!confirm(`Approve draft "${fileName}"? This will move it to approved/ and index it to Qdrant.`)) {
+  if (!await confirmModal(`Approve draft "${fileName}"? This will move it to approved/ and index it to Qdrant.`)) {
     return;
   }
 
@@ -3287,7 +3701,7 @@ async function approveDraft(fileName) {
 async function discardDraft(fileName) {
   const draftsStatus = document.getElementById('draftsStatus');
 
-  if (!confirm(`Discard draft "${fileName}"? This will permanently delete it.`)) {
+  if (!await confirmModal(`Discard draft "${fileName}"? This will permanently delete it.`)) {
     return;
   }
 
@@ -3703,7 +4117,7 @@ async function viewVersionContent(fileName, versionId) {
 }
 
 async function rollbackToVersion(fileName, versionId) {
-  if (!confirm(`Restore version ${versionId} of "${fileName}"? Current content will be overwritten.`)) return;
+  if (!await confirmModal(`Restore version ${versionId} of "${fileName}"? Current content will be overwritten.`)) return;
   const decisionsStatus = document.getElementById('decisionsStatus');
   decisionsStatus.textContent = `Restoring version ${versionId}...`;
   try {
@@ -3812,6 +4226,7 @@ function renderCoverage(data) {
       </div>
     </div>`;
 }
+
 </script>
 </body>
 </html>

@@ -3,6 +3,28 @@ export const config = {
   ollamaUrl: process.env.OLLAMA_URL ?? "http://localhost:11434",
   collectionName: process.env.QDRANT_COLLECTION ?? "code_chunks",
 
+  // Model routing: route simple queries to a fast model, complex to the full model.
+  // Set SIMPLE_MODEL to a fast local model (e.g. qwen2.5-coder:3b).
+  // Leave empty to disable routing (always use CHAT_MODEL).
+  simpleModel: process.env.SIMPLE_MODEL ?? "",
+  deepModel: process.env.DEEP_MODEL ?? "",
+
+  // Reranker model — neural cross-encoder for re-scoring retrieved chunks.
+  // Set to empty string or unset to disable (falls back to heuristic reranker).
+  // Default: qllama/bge-reranker-v2-m3 (568M params, 636MB, multilingual+code)
+  rerankerModel: process.env.RERANKER_MODEL ?? "qllama/bge-reranker-v2-m3",
+
+  // How many top chunks to send to the reranker. Higher = better recall, slower.
+  // Must be >= the final limit sent to LLM. CPU-only: keep low (20-30).
+  rerankerTopN: Number(process.env.RERANKER_TOP_N ?? 20),
+
+  // Max chars of chunk content to send to reranker per chunk. Truncating saves latency.
+  rerankerMaxChars: Number(process.env.RERANKER_MAX_CHARS ?? 256),
+
+  // Concurrency for reranker calls. Ollama on CPU is largely serial, so keep low.
+  rerankerConcurrency: Number(process.env.RERANKER_CONCURRENCY ?? 2),
+
+  // Embedding model stays on local Ollama regardless of chat provider.
   embeddingModel: process.env.EMBEDDING_MODEL ?? "nomic-embed-text",
   chatModel: process.env.CHAT_MODEL ?? "qwen2.5-coder:3b",
 
@@ -28,6 +50,53 @@ export const config = {
 
   // Max tokens in LLM response. Default 2048 is fine for most answers.
   maxTokens: Number(process.env.MAX_TOKENS ?? 2048),
+  deepMaxTokens: Number(process.env.DEEP_MAX_TOKENS ?? 4096),
+
+  // Quality gate threshold. Answers scoring below this trigger retry.
+  qualityThreshold: Number(process.env.QUALITY_THRESHOLD ?? 0.5),
+
+  // Enable/disable quality gate retry. Set to "false" to disable.
+  qualityRetryEnabled: process.env.QUALITY_RETRY !== "false",
+
+  // BM25 in-process index TTL. When this elapses, getBM25Index re-validates
+  // against Qdrant point count and reloads from disk only if data changed.
+  // Default 60 min balances freshness with avoiding repeated disk JSON parses.
+  bm25IndexTtlMs: Number(process.env.BM25_INDEX_TTL_MS ?? 60 * 60 * 1000),
+
+  // BM25 cross-process build lock wait timeout. When another process is
+  // cold-building the index, others wait this long for the cache to appear
+  // before stealing the lock and building themselves. Default 5 min covers
+  // the slowest expected cold build. Set lower (e.g. 10000) in test runners
+  // to fail-fast instead of hanging on a contended build.
+  bm25WaitTimeoutMs: Number(process.env.BM25_WAIT_TIMEOUT_MS ?? 5 * 60 * 1000),
+
+  // Concurrency for embedding + upsert during indexing. Each task hits Ollama
+  // (embedding) and Qdrant (upsert). Local Ollama on CPU is largely serial, so
+  // keep this modest. Raise only on GPU/remote Ollama.
+  indexConcurrency: Number(process.env.INDEX_CONCURRENCY ?? 4),
+
+  // Chunker tuning. Changing these after indexing affects NEW chunks only —
+  // existing indexed chunks keep their original boundaries until reindexed.
+  chunkMinLines: Number(process.env.CHUNK_MIN_LINES ?? 5),
+  chunkMaxLines: Number(process.env.CHUNK_MAX_LINES ?? 120),
+  chunkMinChars: Number(process.env.CHUNK_MIN_CHARS ?? 100),
+  chunkMaxChars: Number(process.env.CHUNK_MAX_CHARS ?? 2_000),
+  chunkOverlapLines: Number(process.env.CHUNK_OVERLAP_LINES ?? 3),
+
+  // LLM call tuning.
+  maxCloudPromptChars: Number(process.env.MAX_CLOUD_PROMPT_CHARS ?? 60_000),
+  chatMaxAttempts: Number(process.env.CHAT_MAX_ATTEMPTS ?? 4),
+
+  // Documentation chunking.
+  maxDocChunkChars: Number(process.env.MAX_DOC_CHUNK_CHARS ?? 1_500),
+
+  // Self-learning: meta-evaluator model (must differ from chatModel to avoid self-eval bias).
+  // Uses the same 9router/cloud provider as chat. Default: prod/glm-5.3.
+  evalModel: process.env.EVAL_MODEL ?? "prod/glm-5.3",
+
+  // Self-learning: path to learning rules JSON file. Rules are injected into
+  // the LLM prompt to correct systematic answer errors.
+  learningRulesPath: process.env.LEARNING_RULES_PATH ?? ".data/learning-rules.json",
 }
 
 export function setChatModel(model: string): void {

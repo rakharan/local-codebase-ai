@@ -18,6 +18,8 @@ const PATTERNS: PatternDef[] = [
   { regex: /rpc\w*\.send\(\s*['"`]([^'"`]+)['"`]/g, messageType: 'rpc', operation: 'send', confidence: 'medium', nameGroup: 1 },
   // queue: "queue-name" dalam config object (getInstance, createChannel, dll)
   { regex: /\bqueue:\s*['"`]([^'"`]+)['"`]/g, messageType: 'queue', operation: 'assert', confidence: 'medium', nameGroup: 1 },
+  // PHP MT4ManagerRPC::getInstance(..., QUEUE_CONST) — last arg is queue constant or string
+  { regex: /MT4ManagerRPC::getInstance\s*\([^)]*,\s*(MT4MAN_RPC_QUEUE_\w+|'[^']+'|"[^"]+")\s*\)/g, messageType: 'rpc', operation: 'send', confidence: 'high', nameGroup: 1 },
 ];
 
 /**

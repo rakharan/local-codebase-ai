@@ -1,3 +1,5 @@
+import "./lib/env.js"
+
 import path from "node:path"
 import fs from "node:fs/promises"
 import { sha256, uuidFromHash } from "./lib/hash.js"

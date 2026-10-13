@@ -5,6 +5,11 @@ dist
 backups
 *.log
 
+# IDE / agent configs
+.claude/
+.kiro/
+CLAUDE.md
+
 # Repo Doctor generated output
 repo-docs-*/
 
@@ -16,3 +21,11 @@ repo-docs-*/
 local-codebase-ai-phase5.docx
 local-codebase-ai-plan-v2.md
 local-codebase-ai-plan.docx
+src/ask/extraction_plan.json
+src/ask/comprehensive_plan.json
+
+# Telegram bot credentials
+.data/telegram-*.txt
+
+# Superdesign context
+.superdesign/
