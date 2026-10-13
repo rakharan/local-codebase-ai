@@ -26,3 +26,6 @@ src/ask/comprehensive_plan.json
 
 # Telegram bot credentials
 .data/telegram-*.txt
+
+# Superdesign context
+.superdesign/
